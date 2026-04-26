@@ -25,9 +25,74 @@ class FakeDurableObjectNamespace {
 }
 
 function createEnv(): Env {
-  const registry = new FakeDurableObjectNamespace(() => async () =>
-    Response.json({
-      type: 'registry.projects.list.result',
+  const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
+    const body = (await request.json()) as { type: string; apiKeyId?: string; hash?: string };
+
+    if (body.type === 'control.api-key.verify') {
+      return Response.json({
+        type: 'control.api-key.verify.result',
+        result: {
+          record: body.apiKeyId === 'project-key'
+            ? {
+                id: 'project-key',
+                projectSlug: 'demo',
+                name: 'Demo key',
+                scopes: ['table:create', 'table:read'],
+                createdAt: '2026-04-26T00:00:00.000Z',
+                revokedAt: null,
+                lastUsedAt: null
+              }
+            : null
+        }
+      });
+    }
+
+    if (body.type === 'control.api-key.touch') {
+      return Response.json({
+        type: 'control.api-key.touch.result',
+        result: { ok: true }
+      });
+    }
+
+    if (body.type === 'control.api-key.create') {
+      return Response.json({
+        type: 'control.api-key.create.result',
+        result: {
+          apiKey: 'sfk_created-key.secret',
+          record: {
+            id: 'created-key',
+            projectSlug: null,
+            name: 'Created key',
+            scopes: ['admin:keys'],
+            createdAt: '2026-04-26T00:00:00.000Z',
+            revokedAt: null,
+            lastUsedAt: null
+          }
+        }
+      });
+    }
+
+    if (body.type === 'control.api-keys.list') {
+      return Response.json({
+        type: 'control.api-keys.list.result',
+        result: {
+          data: [
+            {
+              id: 'project-key',
+              projectSlug: 'demo',
+              name: 'Demo key',
+              scopes: ['table:create', 'table:read'],
+              createdAt: '2026-04-26T00:00:00.000Z',
+              revokedAt: null,
+              lastUsedAt: null
+            }
+          ]
+        }
+      });
+    }
+
+    return Response.json({
+      type: 'control.projects.list.result',
       result: {
         data: [
           {
@@ -39,8 +104,8 @@ function createEnv(): Env {
           }
         ]
       }
-    })
-  );
+    });
+  });
 
   const project = new FakeDurableObjectNamespace((name) => async () => {
     if (name === 'project:demo') {
@@ -110,7 +175,7 @@ function createEnv(): Env {
   });
 
   return {
-    REGISTRY_DO: registry as never,
+    CONTROL_PLANE_DO: controlPlane as never,
     PROJECT_DO: project as never,
     TABLE_DO: table as never,
     RATE_LIMIT_DO: table as never,
@@ -169,7 +234,8 @@ describe('api routes', () => {
       {
         method: 'POST',
         headers: {
-          'content-type': 'application/json'
+          'content-type': 'application/json',
+          authorization: 'Bearer sfk_project-key.any-secret'
         },
         body: JSON.stringify({
           values: {
@@ -190,6 +256,60 @@ describe('api routes', () => {
         }
       },
       ignoredKeys: []
+    });
+  });
+
+  it('rejects protected row creation without credentials', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          values: {
+            name: 'Ada'
+          }
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(401);
+  });
+
+  it('creates api keys through bootstrap admin auth', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/keys',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: 'Created key',
+          scopes: ['admin:keys']
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({
+      apiKey: 'sfk_created-key.secret',
+      record: {
+        id: 'created-key',
+        projectSlug: null,
+        name: 'Created key',
+        scopes: ['admin:keys'],
+        createdAt: '2026-04-26T00:00:00.000Z',
+        revokedAt: null,
+        lastUsedAt: null
+      }
     });
   });
 });

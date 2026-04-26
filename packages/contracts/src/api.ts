@@ -1,6 +1,7 @@
 import { z } from 'zod';
+import { createApiKeyInputSchema, createApiKeyResultSchema, apiKeyPrincipalSchema } from './auth';
 import { defaultAuthModeSchema, projectConfigSchema, tableConfigSchema } from './project';
-import { projectSlugSchema, rowIdSchema, spreadsheetIdSchema, tableSlugSchema } from './ids';
+import { apiKeyIdSchema, projectSlugSchema, rowIdSchema, spreadsheetIdSchema, tableSlugSchema } from './ids';
 import { listRowsResultSchema, rowEnvelopeSchema, rowRecordSchema, tableSchemaSchema } from './table';
 
 export const createProjectInputSchema = z.object({
@@ -32,6 +33,14 @@ export const createRowInputSchema = z.object({
 export const updateRowInputSchema = z.object({
   values: rowRecordSchema
 });
+
+export const adminCreateApiKeyInputSchema = createApiKeyInputSchema;
+
+export const adminListApiKeysResultSchema = z.object({
+  data: z.array(apiKeyPrincipalSchema)
+});
+
+export const adminCreateApiKeyResultSchema = createApiKeyResultSchema;
 
 export const projectSummarySchema = z.object({
   slug: projectSlugSchema,
@@ -94,6 +103,10 @@ export const rowParamsSchema = z.object({
   id: rowIdSchema
 });
 
+export const apiKeyParamsSchema = z.object({
+  id: apiKeyIdSchema
+});
+
 export type CreateProjectInput = z.infer<typeof createProjectInputSchema>;
 export type CreateTableInput = z.infer<typeof createTableInputSchema>;
 export type CreateRowInput = z.infer<typeof createRowInputSchema>;
@@ -108,3 +121,6 @@ export type UpdateRowResult = z.infer<typeof updateRowResultSchema>;
 export type DeleteRowResult = z.infer<typeof deleteRowResultSchema>;
 export type GetSchemaResult = z.infer<typeof getSchemaResultSchema>;
 export type ReindexTableResult = z.infer<typeof reindexTableResultSchema>;
+export type AdminCreateApiKeyInput = z.infer<typeof adminCreateApiKeyInputSchema>;
+export type AdminListApiKeysResult = z.infer<typeof adminListApiKeysResultSchema>;
+export type AdminCreateApiKeyResult = z.infer<typeof adminCreateApiKeyResultSchema>;
