@@ -1,4 +1,5 @@
 import { Scalar } from '@scalar/hono-api-reference';
+import type { Context } from 'hono';
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import {
   adminCreateApiKeyInputSchema,
@@ -57,7 +58,18 @@ import type { Env } from './env';
 
 type AppVariables = {
   requestId: string;
+  verifiedApiKeyCredential?: {
+    credential: string;
+    record: ApiKeyPrincipal | null;
+  };
+  rateLimit?: {
+    limit: number;
+    remaining: number;
+    resetAtMs: number;
+  };
 };
+
+type AppContext = Context<{ Bindings: Env; Variables: AppVariables }>;
 
 type AuthContext =
   | { kind: 'anonymous' }
@@ -224,6 +236,20 @@ async function verifyApiKeyCredential(env: Env, credential: string): Promise<Api
   }).result.record;
 }
 
+async function verifyApiKeyCredentialCached(c: AppContext, credential: string): Promise<ApiKeyPrincipal | null> {
+  const cached = c.get('verifiedApiKeyCredential');
+  if (cached?.credential === credential) {
+    return cached.record;
+  }
+
+  const record = await verifyApiKeyCredential(c.env, credential);
+  c.set('verifiedApiKeyCredential', {
+    credential,
+    record
+  });
+  return record;
+}
+
 function getRateLimitConfiguration(env: Env) {
   const maxRequests = Number.parseInt(env.RATE_LIMIT_MAX_REQUESTS ?? '300', 10);
   const windowSeconds = Number.parseInt(env.RATE_LIMIT_WINDOW_SECONDS ?? '60', 10);
@@ -249,7 +275,7 @@ function getRateLimitRouteFamily(path: string) {
   return 'data';
 }
 
-async function resolveRateLimitPrincipal(c: { req: { header(name: string): string | undefined; method: string; path: string }; env: Env }) {
+async function resolveRateLimitPrincipal(c: AppContext) {
   const authorization = c.req.header('authorization');
   if (authorization?.startsWith('Bearer ')) {
     const credential = authorization.slice('Bearer '.length).trim();
@@ -257,7 +283,7 @@ async function resolveRateLimitPrincipal(c: { req: { header(name: string): strin
       return 'bootstrap-admin';
     }
 
-    const record = await verifyApiKeyCredential(c.env, credential);
+    const record = await verifyApiKeyCredentialCached(c, credential);
     if (record) {
       return `api-key:${record.id}`;
     }
@@ -266,7 +292,7 @@ async function resolveRateLimitPrincipal(c: { req: { header(name: string): strin
   return getRateLimitPrincipal(c);
 }
 
-async function enforceRateLimit(c: { req: { header(name: string): string | undefined; method: string; path: string }; env: Env }) {
+async function enforceRateLimit(c: AppContext) {
   const config = getRateLimitConfiguration(c.env);
   if (config.maxRequests <= 0) {
     return;
@@ -286,6 +312,12 @@ async function enforceRateLimit(c: { req: { header(name: string): string | undef
     result: { allowed: boolean; remaining: number; resetAtMs: number };
   }).result;
 
+  c.set('rateLimit', {
+    limit: config.maxRequests,
+    remaining: result.remaining,
+    resetAtMs: result.resetAtMs
+  });
+
   if (!result.allowed) {
     throw new TooManyRequestsError('Rate limit exceeded.', {
       principal,
@@ -302,7 +334,7 @@ async function hashApiKeySecret(secret: string) {
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
 }
 
-async function authenticateRequest(c: { req: { header(name: string): string | undefined }; env: Env }): Promise<AuthContext> {
+async function authenticateRequest(c: AppContext): Promise<AuthContext> {
   const authorization = c.req.header('authorization');
   if (!authorization) {
     return { kind: 'anonymous' };
@@ -321,7 +353,7 @@ async function authenticateRequest(c: { req: { header(name: string): string | un
     return { kind: 'bootstrap-admin' };
   }
 
-  const record = await verifyApiKeyCredential(c.env, credential);
+  const record = await verifyApiKeyCredentialCached(c, credential);
   if (!record) {
     throw new UnauthorizedError('Invalid API key.');
   }
@@ -741,6 +773,14 @@ function createApp() {
 
     await next();
 
+    c.res.headers.set('x-request-id', c.get('requestId'));
+    const rateLimit = c.get('rateLimit');
+    if (rateLimit) {
+      c.res.headers.set('x-ratelimit-limit', String(rateLimit.limit));
+      c.res.headers.set('x-ratelimit-remaining', String(rateLimit.remaining));
+      c.res.headers.set('x-ratelimit-reset', new Date(rateLimit.resetAtMs).toISOString());
+    }
+
     console.info(
       JSON.stringify({
         event: 'request.complete',
@@ -759,13 +799,31 @@ function createApp() {
   });
 
   app.onError((error, c) => {
+    console.error(
+      JSON.stringify({
+        event: 'request.error',
+        method: c.req.method,
+        path: c.req.path,
+        requestId: c.get('requestId'),
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+        errorMessage: error instanceof Error ? error.message : String(error)
+      })
+    );
     const { status, body } = toErrorResponse(error);
-    return new Response(JSON.stringify(body), {
+    const response = new Response(JSON.stringify(body), {
       status,
       headers: {
-        'content-type': 'application/json'
+        'content-type': 'application/json',
+        'x-request-id': c.get('requestId')
       }
     });
+    const rateLimit = c.get('rateLimit');
+    if (rateLimit) {
+      response.headers.set('x-ratelimit-limit', String(rateLimit.limit));
+      response.headers.set('x-ratelimit-remaining', String(rateLimit.remaining));
+      response.headers.set('x-ratelimit-reset', new Date(rateLimit.resetAtMs).toISOString());
+    }
+    return response;
   });
 
   app.openapi(healthRoute, (c) =>

@@ -551,6 +551,84 @@ describe('TableDO', () => {
     expect(sheet.requestedRanges).toContain("'Users'!A2:A");
   });
 
+  it('avoids a full-sheet resync for stale point reads when a narrow upstream lookup is sufficient', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-26T12:00:00.000Z'));
+
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'secondary'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 1
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    sheet.requestedRanges = [];
+    sheet.rows.push(['row-2', 'Grace']);
+    vi.setSystemTime(new Date('2026-04-26T12:00:03.000Z'));
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.get',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-2'
+      }
+    );
+
+    expect(response).toMatchObject({
+      type: 'table.row.get.result',
+      result: {
+        data: {
+          id: 'row-2'
+        }
+      }
+    });
+    expect(sheet.requestedRanges).not.toContain("'Users'");
+    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+
+    vi.useRealTimers();
+  });
+
   it('repairs cached row numbers after delete without forcing a full-sheet sync', async () => {
     const sheet: SheetState = {
       rows: [
@@ -916,6 +994,96 @@ describe('TableDO', () => {
         }
       )
     ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  it('avoids a full-sheet resync for stale updates when a narrow row-id repair is sufficient', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-26T12:00:00.000Z'));
+
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Grace']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'secondary'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          sheetGid: 1,
+          indexedFields: ['name'],
+          cacheTtlSeconds: 1
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    sheet.requestedRanges = [];
+    sheet.rows = [
+      ['_id', 'name'],
+      ['row-2', 'Grace'],
+      ['row-1', 'Ada']
+    ];
+    vi.setSystemTime(new Date('2026-04-26T12:00:03.000Z'));
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.update',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-1',
+        input: {
+          values: {
+            name: 'Ada Lovelace'
+          }
+        }
+      }
+    );
+
+    expect(response).toMatchObject({
+      type: 'table.row.update.result',
+      result: {
+        data: {
+          rowNumber: 3
+        }
+      }
+    });
+    expect(sheet.requestedRanges).not.toContain("'Users'");
+    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+
+    vi.useRealTimers();
   });
 
   it('includes header-defined fields in schema output even when rows are empty or sparse', async () => {
