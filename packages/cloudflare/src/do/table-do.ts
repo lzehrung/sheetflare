@@ -1,21 +1,21 @@
 import {
   BadRequestError,
   ForbiddenError,
+  type GetTableCacheStatusResult,
   type GetSchemaResult,
   type ListRowsQuery,
   NotFoundError,
   type RowEnvelope,
   type RowRecord,
+  type TableCacheStatus,
   type TableConfig,
   type TableDoRequest,
   type TableDoResponse
 } from '@sheetflare/contracts';
 import {
-  decodeOffsetCursor,
-  encodeOffsetCursor,
+  applyListRowsQuery,
   generateRowId,
   inferTableSchema,
-  normalizeListQuery,
   normalizeRowValues,
   pickKnownColumns
 } from '@sheetflare/domain';
@@ -28,49 +28,19 @@ type TableMetaRow = {
   value: string;
 };
 
-function compareValues(
-  left: RowRecord[string] | undefined,
-  right: RowRecord[string] | undefined
-) {
-  const leftComparable = Array.isArray(left) ? JSON.stringify(left) : left;
-  const rightComparable = Array.isArray(right) ? JSON.stringify(right) : right;
+type CachedRowRow = {
+  row_id: string;
+  row_number: number;
+  values_json: string;
+};
 
-  if (leftComparable === rightComparable) return 0;
-  if (leftComparable === null) return -1;
-  if (rightComparable === null) return 1;
-  return String(leftComparable).localeCompare(String(rightComparable), undefined, {
-    numeric: true,
-    sensitivity: 'base'
-  });
-}
-
-function sortRows(rows: RowEnvelope[], sort: string | null): RowEnvelope[] {
-  if (!sort) return rows;
-
-  const [field, rawDirection] = sort.split(':');
-  const direction = rawDirection === 'desc' ? -1 : 1;
-  if (!field) return rows;
-
-  return [...rows].sort((left, right) => {
-    if (field === 'rowNumber') {
-      return (left.rowNumber - right.rowNumber) * direction;
-    }
-
-    return compareValues(left.values[field], right.values[field]) * direction;
-  });
-}
-
-function filterFields(rows: RowEnvelope[], fields: string[] | null) {
-  if (!fields || fields.length === 0) return rows;
-
-  const allowed = new Set(fields);
-  return rows.map((row) => ({
-    ...row,
-    values: Object.fromEntries(
-      Object.entries(row.values).filter(([key]) => allowed.has(key))
-    )
-  }));
-}
+type SyncMeta = {
+  status: TableCacheStatus['status'];
+  rowCount: number;
+  lastSyncStartedAt: string | null;
+  lastSyncCompletedAt: string | null;
+  lastSyncError: string | null;
+};
 
 function getProjectStub(env: CloudflareEnv, projectSlug: string) {
   return env.PROJECT_DO.get(env.PROJECT_DO.idFromName(`project:${projectSlug}`));
@@ -78,6 +48,7 @@ function getProjectStub(env: CloudflareEnv, projectSlug: string) {
 
 export class TableDO {
   private readonly sheets: GoogleSheetsService;
+  private activeSync: Promise<TableCacheStatus> | null = null;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -109,6 +80,19 @@ export class TableDO {
     this.ctx.storage.sql.exec(`
       CREATE INDEX IF NOT EXISTS idx_row_index_row_number
       ON row_index(row_number)
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS cached_rows (
+        row_id TEXT PRIMARY KEY,
+        row_number INTEGER NOT NULL,
+        values_json TEXT NOT NULL
+      )
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_cached_rows_row_number
+      ON cached_rows(row_number)
     `);
   }
 
@@ -154,10 +138,15 @@ export class TableDO {
           type: 'table.schema.get.result',
           result: await this.getSchema(body.projectSlug, body.tableSlug)
         };
+      case 'table.cache.get':
+        return {
+          type: 'table.cache.get.result',
+          result: await this.getCacheStatus(body.projectSlug, body.tableSlug)
+        };
       case 'table.reindex':
         return {
           type: 'table.reindex.result',
-          result: await this.reindex(body.projectSlug, body.tableSlug)
+          result: await this.syncCache(body.projectSlug, body.tableSlug, { force: true })
         };
     }
   }
@@ -187,15 +176,13 @@ export class TableDO {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    const query = normalizeListQuery(rawQuery);
-    const offset = decodeOffsetCursor(query.cursor);
-    const rows = filterFields(sortRows(await this.sheets.readAllRows(config), query.sort), query.fields);
-    const page = rows.slice(offset, offset + query.limit);
-    const nextOffset = offset + page.length;
+    await this.ensureCacheReady(config);
+    const rows = this.listCachedRows();
+    const result = applyListRowsQuery(rows, rawQuery);
 
     return {
-      data: page,
-      nextCursor: nextOffset < rows.length ? encodeOffsetCursor(nextOffset) : null
+      data: result.data,
+      nextCursor: result.nextCursor
     };
   }
 
@@ -205,7 +192,13 @@ export class TableDO {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    const resolved = await this.resolveRowById(config, rowId);
+    await this.ensureCacheReady(config);
+    let resolved = this.getCachedRow(rowId);
+    if (!resolved) {
+      await this.syncCache(config.projectSlug, config.tableSlug, { force: true });
+      resolved = this.getCachedRow(rowId);
+    }
+
     if (!resolved) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
@@ -221,6 +214,7 @@ export class TableDO {
       throw new ForbiddenError(`Creates are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
+    await this.ensureCacheReady(config);
     const headers = await this.getHeaders(config);
     const providedId = input[config.idColumn];
     const rowId = typeof providedId === 'string' && providedId.length > 0 ? providedId : generateRowId();
@@ -232,6 +226,12 @@ export class TableDO {
     const rowNumber = await this.sheets.appendRow(config, headers, values);
 
     this.upsertRowIndex(rowId, rowNumber);
+    this.upsertCachedRow({
+      id: rowId,
+      rowNumber,
+      values
+    });
+    this.markCacheFreshAfterMutation();
 
     return {
       data: {
@@ -249,6 +249,7 @@ export class TableDO {
       throw new ForbiddenError(`Updates are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
+    await this.ensureCacheReady(config);
     const headers = await this.getHeaders(config);
     const existingRow = await this.resolveRowById(config, rowId);
     if (!existingRow) {
@@ -266,6 +267,12 @@ export class TableDO {
     const { values, ignoredKeys } = pickKnownColumns(mergedValues, headers);
     await this.sheets.writeRow(config, existingRow.rowNumber, headers, values);
     this.upsertRowIndex(rowId, existingRow.rowNumber);
+    this.upsertCachedRow({
+      id: rowId,
+      rowNumber: existingRow.rowNumber,
+      values
+    });
+    this.markCacheFreshAfterMutation();
 
     return {
       data: {
@@ -290,7 +297,7 @@ export class TableDO {
 
     await this.sheets.deleteRow(config, existingRow.rowNumber);
     this.deleteRowIndex(rowId);
-    await this.reindex(projectSlug, tableSlug);
+    await this.syncCache(projectSlug, tableSlug, { force: true });
 
     return {
       ok: true as const,
@@ -304,32 +311,126 @@ export class TableDO {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    const rows = await this.sheets.readAllRows(config);
+    await this.ensureCacheReady(config);
+    const rows = this.listCachedRows();
     return {
       data: inferTableSchema(rows.slice(0, 100))
     };
   }
 
-  private async reindex(projectSlug: string, tableSlug: string) {
+  private async getCacheStatus(projectSlug: string, tableSlug: string): Promise<GetTableCacheStatusResult> {
     const config = await this.getTableConfig(projectSlug, tableSlug);
-    const rows = await this.sheets.readAllRows(config);
-
-    this.ctx.storage.sql.exec(`DELETE FROM row_index`);
-    for (const row of rows) {
-      this.upsertRowIndex(row.id, row.rowNumber);
-    }
-
     return {
-      ok: true as const,
-      rowCount: rows.length
+      data: this.computeCacheStatus(config)
     };
   }
 
+  private async ensureCacheReady(config: GoogleSheetTableConfig) {
+    const cacheStatus = this.computeCacheStatus(config);
+    if (cacheStatus.status === 'ready' && !cacheStatus.stale) {
+      return cacheStatus;
+    }
+
+    return this.syncCache(config.projectSlug, config.tableSlug, {
+      force: cacheStatus.rowCount === 0 || cacheStatus.status === 'error'
+    });
+  }
+
+  private async syncCache(
+    projectSlug: string,
+    tableSlug: string,
+    options: { force: boolean }
+  ) {
+    if (this.activeSync) {
+      const cache = await this.activeSync;
+      if (!options.force || !cache.stale) {
+        return {
+          ok: true as const,
+          rowCount: cache.rowCount,
+          cache
+        };
+      }
+    }
+
+    const config = await this.getTableConfig(projectSlug, tableSlug);
+    const currentStatus = this.computeCacheStatus(config);
+    if (!options.force && currentStatus.status === 'ready' && !currentStatus.stale) {
+      return {
+        ok: true as const,
+        rowCount: currentStatus.rowCount,
+        cache: currentStatus
+      };
+    }
+
+    const syncPromise = this.performSync(config);
+    this.activeSync = syncPromise;
+
+    try {
+      const cache = await syncPromise;
+      return {
+        ok: true as const,
+        rowCount: cache.rowCount,
+        cache
+      };
+    } finally {
+      if (this.activeSync === syncPromise) {
+        this.activeSync = null;
+      }
+    }
+  }
+
+  private async performSync(config: GoogleSheetTableConfig): Promise<TableCacheStatus> {
+    const startedAt = new Date().toISOString();
+    this.setSyncMeta({
+      ...this.getSyncMeta(),
+      status: 'syncing',
+      lastSyncStartedAt: startedAt,
+      lastSyncError: null
+    });
+
+    try {
+      const headers = await this.sheets.readHeaders(config);
+      this.setMeta('headers', JSON.stringify(headers));
+      const rows = await this.sheets.readAllRows(config);
+
+      this.ctx.storage.sql.exec(`DELETE FROM row_index`);
+      this.ctx.storage.sql.exec(`DELETE FROM cached_rows`);
+
+      for (const row of rows) {
+        this.upsertRowIndex(row.id, row.rowNumber);
+        this.upsertCachedRow(row);
+      }
+
+      const completedAt = new Date().toISOString();
+      this.setSyncMeta({
+        status: 'ready',
+        rowCount: rows.length,
+        lastSyncStartedAt: startedAt,
+        lastSyncCompletedAt: completedAt,
+        lastSyncError: null
+      });
+
+      return this.computeCacheStatus(config);
+    } catch (error) {
+      this.setSyncMeta({
+        ...this.getSyncMeta(),
+        status: 'error',
+        lastSyncStartedAt: startedAt,
+        lastSyncError: error instanceof Error ? error.message : 'Unknown sync error'
+      });
+      throw error;
+    }
+  }
+
   private async resolveRowById(config: GoogleSheetTableConfig, rowId: string): Promise<RowEnvelope | null> {
-    const rowNumberHint = this.lookupRowNumber(rowId);
+    await this.ensureCacheReady(config);
+
+    const cached = this.getCachedRow(rowId);
+    const rowNumberHint = cached?.rowNumber ?? this.lookupRowNumber(rowId);
     const result = await this.sheets.findRowById(config, rowId, rowNumberHint);
     if (!result) {
       this.deleteRowIndex(rowId);
+      this.deleteCachedRow(rowId);
       return null;
     }
 
@@ -341,7 +442,33 @@ export class TableDO {
     }
 
     this.upsertRowIndex(rowId, result.row.rowNumber);
+    this.upsertCachedRow(result.row);
     return result.row;
+  }
+
+  private listCachedRows(): RowEnvelope[] {
+    const rows = this.ctx.storage.sql
+      .exec(`SELECT row_id, row_number, values_json FROM cached_rows ORDER BY row_number ASC`)
+      .toArray() as CachedRowRow[];
+
+    return rows.map((row) => ({
+      id: row.row_id,
+      rowNumber: row.row_number,
+      values: JSON.parse(row.values_json) as RowRecord
+    }));
+  }
+
+  private getCachedRow(rowId: string): RowEnvelope | null {
+    const row = this.ctx.storage.sql
+      .exec(`SELECT row_id, row_number, values_json FROM cached_rows WHERE row_id = ?`, rowId)
+      .one() as CachedRowRow | null;
+
+    if (!row) return null;
+    return {
+      id: row.row_id,
+      rowNumber: row.row_number,
+      values: JSON.parse(row.values_json) as RowRecord
+    };
   }
 
   private lookupRowNumber(rowId: string): number | null {
@@ -369,6 +496,25 @@ export class TableDO {
 
   private deleteRowIndex(rowId: string) {
     this.ctx.storage.sql.exec(`DELETE FROM row_index WHERE row_id = ?`, rowId);
+  }
+
+  private upsertCachedRow(row: RowEnvelope) {
+    this.ctx.storage.sql.exec(
+      `
+      INSERT INTO cached_rows (row_id, row_number, values_json)
+      VALUES (?, ?, ?)
+      ON CONFLICT(row_id) DO UPDATE SET
+        row_number = excluded.row_number,
+        values_json = excluded.values_json
+      `,
+      row.id,
+      row.rowNumber,
+      JSON.stringify(row.values)
+    );
+  }
+
+  private deleteCachedRow(rowId: string) {
+    this.ctx.storage.sql.exec(`DELETE FROM cached_rows WHERE row_id = ?`, rowId);
   }
 
   private async getHeaders(config: GoogleSheetTableConfig): Promise<string[]> {
@@ -400,5 +546,67 @@ export class TableDO {
       key,
       value
     );
+  }
+
+  private getSyncMeta(): SyncMeta {
+    return {
+      status: (this.getMeta('sync.status') as SyncMeta['status'] | null) ?? 'idle',
+      rowCount: Number(this.getMeta('sync.rowCount') ?? '0'),
+      lastSyncStartedAt: this.getMeta('sync.lastSyncStartedAt'),
+      lastSyncCompletedAt: this.getMeta('sync.lastSyncCompletedAt'),
+      lastSyncError: this.getMeta('sync.lastSyncError')
+    };
+  }
+
+  private setSyncMeta(meta: SyncMeta) {
+    this.setMeta('sync.status', meta.status);
+    this.setMeta('sync.rowCount', String(meta.rowCount));
+    if (meta.lastSyncStartedAt) this.setMeta('sync.lastSyncStartedAt', meta.lastSyncStartedAt);
+    else this.deleteMeta('sync.lastSyncStartedAt');
+    if (meta.lastSyncCompletedAt) this.setMeta('sync.lastSyncCompletedAt', meta.lastSyncCompletedAt);
+    else this.deleteMeta('sync.lastSyncCompletedAt');
+    if (meta.lastSyncError) this.setMeta('sync.lastSyncError', meta.lastSyncError);
+    else this.deleteMeta('sync.lastSyncError');
+  }
+
+  private deleteMeta(key: string) {
+    this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, key);
+  }
+
+  private computeCacheStatus(config: GoogleSheetTableConfig): TableCacheStatus {
+    const meta = this.getSyncMeta();
+    const lastSyncMs = meta.lastSyncCompletedAt ? Date.parse(meta.lastSyncCompletedAt) : Number.NaN;
+    const stale = !meta.lastSyncCompletedAt || Number.isNaN(lastSyncMs)
+      ? true
+      : Date.now() - lastSyncMs > config.cacheTtlSeconds * 1000;
+
+    return {
+      status: meta.status,
+      cacheTtlSeconds: config.cacheTtlSeconds,
+      stale,
+      rowCount: meta.rowCount,
+      lastSyncStartedAt: meta.lastSyncStartedAt,
+      lastSyncCompletedAt: meta.lastSyncCompletedAt,
+      lastSyncError: meta.lastSyncError
+    };
+  }
+
+  private markCacheFreshAfterMutation() {
+    const now = new Date().toISOString();
+    this.setSyncMeta({
+      status: 'ready',
+      rowCount: this.countCachedRows(),
+      lastSyncStartedAt: now,
+      lastSyncCompletedAt: now,
+      lastSyncError: null
+    });
+  }
+
+  private countCachedRows() {
+    const row = this.ctx.storage.sql
+      .exec(`SELECT COUNT(*) AS count FROM cached_rows`)
+      .one() as { count: number } | null;
+
+    return row?.count ?? 0;
   }
 }

@@ -8,6 +8,7 @@ import type {
   CreateRowInput,
   CreateTableInput,
   DeleteRowResult,
+  GetTableCacheStatusResult,
   GetRowResult,
   GetSchemaResult,
   ReindexTableResult,
@@ -57,6 +58,7 @@ export type TableDoRequest =
   | { type: 'table.row.update'; projectSlug: string; tableSlug: string; rowId: string; input: UpdateRowInput }
   | { type: 'table.row.delete'; projectSlug: string; tableSlug: string; rowId: string }
   | { type: 'table.schema.get'; projectSlug: string; tableSlug: string }
+  | { type: 'table.cache.get'; projectSlug: string; tableSlug: string }
   | { type: 'table.reindex'; projectSlug: string; tableSlug: string };
 
 export type TableDoResponse =
@@ -66,4 +68,5 @@ export type TableDoResponse =
   | { type: 'table.row.update.result'; result: UpdateRowResult }
   | { type: 'table.row.delete.result'; result: DeleteRowResult }
   | { type: 'table.schema.get.result'; result: GetSchemaResult }
+  | { type: 'table.cache.get.result'; result: GetTableCacheStatusResult }
   | { type: 'table.reindex.result'; result: ReindexTableResult };

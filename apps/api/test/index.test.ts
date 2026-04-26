@@ -165,6 +165,23 @@ function createEnv(): Env {
       });
     }
 
+    if (body.type === 'table.cache.get') {
+      return Response.json({
+        type: 'table.cache.get.result',
+        result: {
+          data: {
+            status: 'ready',
+            cacheTtlSeconds: 15,
+            stale: false,
+            rowCount: 2,
+            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
+            lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
+            lastSyncError: null
+          }
+        }
+      });
+    }
+
     return Response.json({
       type: 'table.rows.list.result',
       result: {
@@ -309,6 +326,32 @@ describe('api routes', () => {
         createdAt: '2026-04-26T00:00:00.000Z',
         revokedAt: null,
         lastUsedAt: null
+      }
+    });
+  });
+
+  it('returns table cache status for admin requests', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects/demo/tables/users/cache',
+      {
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: {
+        status: 'ready',
+        cacheTtlSeconds: 15,
+        stale: false,
+        rowCount: 2,
+        lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
+        lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
+        lastSyncError: null
       }
     });
   });

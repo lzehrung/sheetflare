@@ -21,6 +21,7 @@ import {
   type ControlPlaneDoResponse,
   type CreateRowResult,
   type GetRowResult,
+  type GetTableCacheStatusResult,
   type GetSchemaResult,
   type ListRowsResult,
   type ProjectDoResponse,
@@ -316,6 +317,19 @@ function createApp() {
     });
 
     return c.json((response as { type: 'table.schema.get.result'; result: GetSchemaResult }).result);
+  });
+
+  app.get('/v1/admin/projects/:project/tables/:table/cache', zValidator('param', adminProjectTableParamsSchema), async (c) => {
+    const auth = await authenticateRequest(c);
+    const { project, table } = c.req.valid('param');
+    assertProjectScope(auth, 'admin:projects', project);
+    const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
+      type: 'table.cache.get',
+      projectSlug: project,
+      tableSlug: table
+    });
+
+    return c.json((response as { type: 'table.cache.get.result'; result: GetTableCacheStatusResult }).result);
   });
 
   app.post('/v1/admin/projects/:project/tables/:table/reindex', zValidator('param', adminProjectTableParamsSchema), async (c) => {

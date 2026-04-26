@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { createApiKeyInputSchema, createApiKeyResultSchema, apiKeyPrincipalSchema } from './auth';
 import { defaultAuthModeSchema, projectConfigSchema, tableConfigSchema } from './project';
 import { apiKeyIdSchema, projectSlugSchema, rowIdSchema, spreadsheetIdSchema, tableSlugSchema } from './ids';
-import { listRowsResultSchema, rowEnvelopeSchema, rowRecordSchema, tableSchemaSchema } from './table';
+import { listRowsResultSchema, rowEnvelopeSchema, rowRecordSchema, tableCacheStatusSchema, tableSchemaSchema } from './table';
 
 export const createProjectInputSchema = z.object({
   slug: projectSlugSchema,
@@ -85,7 +85,12 @@ export const getSchemaResultSchema = z.object({
 
 export const reindexTableResultSchema = z.object({
   ok: z.literal(true),
-  rowCount: z.number().int().nonnegative()
+  rowCount: z.number().int().nonnegative(),
+  cache: tableCacheStatusSchema
+});
+
+export const getTableCacheStatusResultSchema = z.object({
+  data: tableCacheStatusSchema
 });
 
 export const adminProjectParamsSchema = z.object({
@@ -121,6 +126,7 @@ export type UpdateRowResult = z.infer<typeof updateRowResultSchema>;
 export type DeleteRowResult = z.infer<typeof deleteRowResultSchema>;
 export type GetSchemaResult = z.infer<typeof getSchemaResultSchema>;
 export type ReindexTableResult = z.infer<typeof reindexTableResultSchema>;
+export type GetTableCacheStatusResult = z.infer<typeof getTableCacheStatusResultSchema>;
 export type AdminCreateApiKeyInput = z.infer<typeof adminCreateApiKeyInputSchema>;
 export type AdminListApiKeysResult = z.infer<typeof adminListApiKeysResultSchema>;
 export type AdminCreateApiKeyResult = z.infer<typeof adminCreateApiKeyResultSchema>;
