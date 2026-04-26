@@ -17,6 +17,64 @@ export const rowEnvelopeSchema = z.object({
   values: rowRecordSchema
 });
 
+export const queryScalarValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+
+export const fieldFilterSchema = z
+  .object({
+    eq: queryScalarValueSchema.optional(),
+    neq: queryScalarValueSchema.optional(),
+    gt: z.union([z.string(), z.number()]).optional(),
+    gte: z.union([z.string(), z.number()]).optional(),
+    lt: z.union([z.string(), z.number()]).optional(),
+    lte: z.union([z.string(), z.number()]).optional(),
+    in: z.array(queryScalarValueSchema).min(1).optional(),
+    contains: z.string().min(1).optional(),
+    startsWith: z.string().min(1).optional(),
+    isNull: z.boolean().optional()
+  })
+  .superRefine((value, ctx) => {
+    const activeOperatorCount = Object.values(value).filter((entry) => entry !== undefined).length;
+    if (activeOperatorCount === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'A filter must include at least one operator.'
+      });
+      return;
+    }
+
+    if (activeOperatorCount > 2) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'A filter may include at most two operators.'
+      });
+    }
+
+    const rangeOperators = ['gt', 'gte', 'lt', 'lte'].filter((operator) => value[operator as keyof typeof value] !== undefined);
+    const otherOperators = ['eq', 'neq', 'in', 'contains', 'startsWith', 'isNull'].filter((operator) => value[operator as keyof typeof value] !== undefined);
+    if (otherOperators.length > 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'A filter may only include one non-range operator.'
+      });
+    }
+
+    if (otherOperators.length > 0 && rangeOperators.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Range operators cannot be combined with non-range operators.'
+      });
+    }
+
+    if (rangeOperators.length > 2) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'A filter may include at most two range operators.'
+      });
+    }
+  });
+
+export const rowFilterSchema = z.record(z.string().min(1), fieldFilterSchema);
+
 export const inferredFieldTypeSchema = z.enum([
   'string',
   'number',
@@ -53,7 +111,27 @@ export const listRowsQuerySchema = z.object({
   cursor: z.string().min(1).nullable().optional(),
   sort: z.string().min(1).nullable().optional(),
   fields: z.array(z.string().min(1)).nullable().optional(),
-  filter: z.record(z.string(), z.unknown()).nullable().optional()
+  filter: rowFilterSchema.nullable().optional()
+}).superRefine((value, ctx) => {
+  if (!value.sort) return;
+
+  const sortParts = value.sort.split(':');
+  if (sortParts.length > 2 || sortParts[0]?.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Sort must be in the form "field" or "field:asc|desc".',
+      path: ['sort']
+    });
+    return;
+  }
+
+  if (sortParts.length === 2 && !['asc', 'desc'].includes(sortParts[1]!)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Sort direction must be "asc" or "desc".',
+      path: ['sort']
+    });
+  }
 });
 
 export const listRowsResultSchema = z.object({
@@ -64,6 +142,9 @@ export const listRowsResultSchema = z.object({
 export type RowValue = z.infer<typeof rowValueSchema>;
 export type RowRecord = z.infer<typeof rowRecordSchema>;
 export type RowEnvelope = z.infer<typeof rowEnvelopeSchema>;
+export type QueryScalarValue = z.infer<typeof queryScalarValueSchema>;
+export type FieldFilter = z.infer<typeof fieldFilterSchema>;
+export type RowFilter = z.infer<typeof rowFilterSchema>;
 export type TableSchemaField = z.infer<typeof tableSchemaFieldSchema>;
 export type TableSchema = z.infer<typeof tableSchemaSchema>;
 export type TableCacheStatus = z.infer<typeof tableCacheStatusSchema>;

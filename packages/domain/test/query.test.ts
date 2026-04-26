@@ -1,47 +1,44 @@
 import { describe, expect, it } from 'vitest';
-import { applyListRowsQuery } from '../src';
+import { buildFilterSql, validateFilterCapabilities } from '../src';
+import { BadRequestError } from '@sheetflare/contracts';
 
-const rows = [
-  {
-    id: 'a',
-    rowNumber: 4,
-    values: { name: 'Ada', score: 2 }
-  },
-  {
-    id: 'b',
-    rowNumber: 2,
-    values: { name: 'Grace', score: 10 }
-  },
-  {
-    id: 'c',
-    rowNumber: 3,
-    values: { name: 'Linus', score: 7 }
-  }
-] as const;
+describe('buildFilterSql', () => {
+  it('builds indexed filter sql', () => {
+    const result = buildFilterSql(
+      {
+        status: { eq: 'active' },
+        score: { gte: 10, lt: 20 }
+      },
+      ['status', 'score', '_id']
+    );
 
-describe('applyListRowsQuery', () => {
-  it('sorts, pages, and projects fields', () => {
-    const firstPage = applyListRowsQuery(rows, {
-      sort: 'score:desc',
-      limit: 2,
-      fields: ['name']
-    });
+    expect(result.joins).toHaveLength(2);
+    expect(result.conditions.join(' ')).toContain("value_kind = 'string'");
+    expect(result.conditions.join(' ')).toContain("value_kind = 'number'");
+    expect(result.parameters).toEqual(['status', 'active', 'score', 10, 20]);
+  });
 
-    expect(firstPage.data).toEqual([
-      { id: 'b', rowNumber: 2, values: { name: 'Grace' } },
-      { id: 'c', rowNumber: 3, values: { name: 'Linus' } }
-    ]);
-    expect(firstPage.nextCursor).not.toBeNull();
+  it('rejects non-indexed filters', () => {
+    expect(() =>
+      buildFilterSql(
+        {
+          status: { eq: 'active' }
+        },
+        ['score']
+      )
+    ).toThrow(BadRequestError);
+  });
+});
 
-    const secondPage = applyListRowsQuery(rows, {
-      sort: 'score:desc',
-      limit: 2,
-      cursor: firstPage.nextCursor
-    });
-
-    expect(secondPage.data).toEqual([
-      { id: 'a', rowNumber: 4, values: { name: 'Ada', score: 2 } }
-    ]);
-    expect(secondPage.nextCursor).toBeNull();
+describe('validateFilterCapabilities', () => {
+  it('flags contains as scan-heavy', () => {
+    expect(
+      validateFilterCapabilities(
+        {
+          name: { contains: 'ada' }
+        },
+        ['name']
+      )
+    ).toEqual({ requiresFullScan: true });
   });
 });

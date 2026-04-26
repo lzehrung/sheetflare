@@ -19,6 +19,7 @@ export const tableConfigSchema = z.object({
   sheetTabName: sheetTabNameSchema,
   sheetGid: z.number().int().nonnegative().optional(),
   idColumn: z.string().min(1),
+  indexedFields: z.array(z.string().min(1)).max(32),
   headerRow: z.number().int().positive(),
   dataStartRow: z.number().int().positive(),
   readEnabled: z.boolean(),

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { BadRequestError } from '@sheetflare/contracts';
-import { decodeOffsetCursor, encodeOffsetCursor, normalizeListQuery } from '../src';
+import {
+  decodeQueryCursor,
+  encodeQueryCursor,
+  getListQueryFingerprint,
+  normalizeListQuery
+} from '../src';
 
 describe('normalizeListQuery', () => {
   it('clamps the page size', () => {
@@ -9,13 +14,40 @@ describe('normalizeListQuery', () => {
   });
 });
 
-describe('offset cursors', () => {
-  it('round-trips an offset', () => {
-    const cursor = encodeOffsetCursor(75);
-    expect(decodeOffsetCursor(cursor)).toBe(75);
+describe('query cursors', () => {
+  it('round-trips a cursor payload', () => {
+    const query = normalizeListQuery({
+      sort: 'score:desc',
+      fields: ['name']
+    });
+    const fingerprint = getListQueryFingerprint(query);
+    const cursor = encodeQueryCursor({
+      fingerprint,
+      sortField: 'score',
+      sortDirection: 'desc',
+      rowId: 'row-1',
+      rowNumber: 3,
+      value: {
+        kind: 'number',
+        value: 12
+      }
+    });
+
+    expect(decodeQueryCursor(cursor, fingerprint, query.sort)).toEqual({
+      fingerprint,
+      sortField: 'score',
+      sortDirection: 'desc',
+      rowId: 'row-1',
+      rowNumber: 3,
+      value: {
+        kind: 'number',
+        value: 12
+      }
+    });
   });
 
   it('rejects invalid cursors', () => {
-    expect(() => decodeOffsetCursor('bad')).toThrow(BadRequestError);
+    const query = normalizeListQuery({ sort: 'score:desc' });
+    expect(() => decodeQueryCursor('bad', getListQueryFingerprint(query), query.sort)).toThrow(BadRequestError);
   });
 });
