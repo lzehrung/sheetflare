@@ -99,6 +99,20 @@ function assertUniqueManagedRowIds(rows: readonly RowEnvelope[], idColumn: strin
   }
 }
 
+function assertKnownWriteColumns(
+  ignoredKeys: readonly string[],
+  headers: readonly string[]
+) {
+  if (ignoredKeys.length === 0) {
+    return;
+  }
+
+  throw new BadRequestError('Write payload contains unknown columns.', {
+    ignoredKeys,
+    headers
+  });
+}
+
 function buildCacheConfigSignature(config: {
   spreadsheetId: string;
   googleCredentialRef: string;
@@ -436,6 +450,7 @@ export class TableDO {
       [config.idColumn]: rowId
     });
     const { values, ignoredKeys } = pickKnownColumns(normalizedValues, headers);
+    assertKnownWriteColumns(ignoredKeys, headers);
     const rowNumber = await this.getSheetsClient(config).appendRow(config, headers, values);
 
     this.upsertRowIndex(rowId, rowNumber);
@@ -458,7 +473,7 @@ export class TableDO {
         rowNumber,
         values
       },
-      ignoredKeys
+      ignoredKeys: []
     };
   }
 
@@ -472,7 +487,9 @@ export class TableDO {
     const headers = await this.getHeaders(config, {
       bypassCache: cacheState.staleReason === 'ttl-expired'
     });
-    const existingRow = await this.resolveRowById(config, rowId);
+    const existingRow = await this.resolveRowById(config, rowId, {
+      verifyUnique: false
+    });
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
@@ -486,6 +503,7 @@ export class TableDO {
       [config.idColumn]: rowId
     });
     const { values, ignoredKeys } = pickKnownColumns(mergedValues, headers);
+    assertKnownWriteColumns(ignoredKeys, headers);
     await this.getSheetsClient(config).writeRow(config, existingRow.rowNumber, headers, values);
     this.upsertRowIndex(rowId, existingRow.rowNumber);
     this.upsertCachedRow({
@@ -507,7 +525,7 @@ export class TableDO {
         rowNumber: existingRow.rowNumber,
         values
       },
-      ignoredKeys
+      ignoredKeys: []
     };
   }
 
@@ -518,7 +536,9 @@ export class TableDO {
     }
 
     await this.ensurePointOperationReady(config);
-    const existingRow = await this.resolveRowById(config, rowId);
+    const existingRow = await this.resolveRowById(config, rowId, {
+      verifyUnique: false
+    });
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
@@ -639,8 +659,9 @@ export class TableDO {
 
     try {
       const sheets = this.getSheetsClient(config);
-      const headers = await sheets.readHeaders(config);
-      const rows = await sheets.readAllRows(config);
+      const snapshot = await sheets.readTableSnapshot(config);
+      const headers = snapshot.headers;
+      const rows = snapshot.rows;
       assertUniqueManagedRowIds(rows, config.idColumn);
       const schema = inferTableSchema(headers, rows);
       this.clearCacheTables('staging');
@@ -692,10 +713,14 @@ export class TableDO {
     }
   }
 
-  private async resolveRowById(config: ResolvedTableConfig, rowId: string): Promise<RowEnvelope | null> {
+  private async resolveRowById(
+    config: ResolvedTableConfig,
+    rowId: string,
+    options?: { verifyUnique?: boolean }
+  ): Promise<RowEnvelope | null> {
     const cached = this.getCachedRow(rowId);
     const rowNumberHint = cached?.rowNumber ?? this.lookupRowNumber(rowId);
-    const result = await this.getSheetsClient(config).findRowById(config, rowId, rowNumberHint);
+    const result = await this.getSheetsClient(config).findRowById(config, rowId, rowNumberHint, options);
     if (!result) {
       this.deleteRowIndex(rowId);
       this.deleteCachedRow(rowId);

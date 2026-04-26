@@ -543,6 +543,201 @@ describe('TableDO', () => {
     ]);
   });
 
+  it('rejects create writes with unknown columns instead of silently dropping them', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.row.create',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          input: {
+            values: {
+              name: 'Ada',
+              status: 'active'
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Write payload contains unknown columns.'
+    });
+  });
+
+  it('rejects update writes with unknown columns instead of silently dropping them', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.row.update',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          rowId: 'row-1',
+          input: {
+            values: {
+              status: 'active'
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Write payload contains unknown columns.'
+    });
+  });
+
+  it('updates a cached row through the hinted row number without rescanning the managed id column', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    sheet.requestedRanges = [];
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.update',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-1',
+        input: {
+          values: {
+            name: 'Ada Lovelace'
+          }
+        }
+      }
+    );
+
+    expect(response).toMatchObject({
+      type: 'table.row.update.result',
+      result: {
+        data: {
+          rowNumber: 2
+        }
+      }
+    });
+    expect(sheet.requestedRanges).not.toContain("'Users'!A2:A");
+  });
+
   it('resolves uncached point reads through the narrow row-id lookup path', async () => {
     const sheet: SheetState = {
       rows: [
