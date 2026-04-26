@@ -411,6 +411,7 @@ export class TableDO {
       rowNumber,
       values
     });
+    this.refreshSchemaMeta(headers);
     this.markCacheFreshAfterMutation(config);
 
     return {
@@ -459,6 +460,7 @@ export class TableDO {
       rowNumber: existingRow.rowNumber,
       values
     });
+    this.refreshSchemaMeta(headers);
     this.markCacheFreshAfterMutation(config);
 
     return {
@@ -487,6 +489,7 @@ export class TableDO {
     this.deleteRowIndex(rowId);
     this.deleteCachedRow(rowId);
     await this.refreshCachedRowNumbersAfterDelete(config);
+    this.refreshSchemaMeta(await this.getHeaders(config));
 
     return {
       ok: true as const,
@@ -501,10 +504,8 @@ export class TableDO {
     }
 
     await this.ensureQueryCacheReady(config);
-    const headers = await this.getHeaders(config);
-    const rows = this.listCachedRows();
     return {
-      data: inferTableSchema(headers, rows.slice(0, 100))
+      data: this.getSchemaMeta(await this.getHeaders(config))
     };
   }
 
@@ -595,6 +596,7 @@ export class TableDO {
       const headers = await sheets.readHeaders(config);
       const rows = await sheets.readAllRows(config);
       assertUniqueManagedRowIds(rows, config.idColumn);
+      const schema = inferTableSchema(headers, rows);
       this.clearCacheTables('staging');
 
       for (const row of rows) {
@@ -607,6 +609,7 @@ export class TableDO {
 
       const completedAt = new Date().toISOString();
       this.setMeta('headers', JSON.stringify(headers));
+      this.setMeta('schema', JSON.stringify(schema));
       this.setMeta('config.signature', buildCacheConfigSignature(config));
       this.setSyncMeta({
         status: 'ready',
@@ -806,6 +809,17 @@ export class TableDO {
     return headers;
   }
 
+  private getSchemaMeta(headers: string[]) {
+    const cachedSchema = this.getMeta('schema');
+    if (cachedSchema) {
+      return JSON.parse(cachedSchema) as GetSchemaResult['data'];
+    }
+
+    const schema = inferTableSchema(headers, this.listCachedRows());
+    this.setMeta('schema', JSON.stringify(schema));
+    return schema;
+  }
+
   private getCacheState(config: GoogleSheetTableConfig & { googleCredentialRef?: string }): CacheState {
     const meta = this.getSyncMeta();
     const lastSyncMs = meta.lastSyncCompletedAt ? Date.parse(meta.lastSyncCompletedAt) : Number.NaN;
@@ -914,6 +928,10 @@ export class TableDO {
       lastSyncCompletedAt: now,
       lastSyncError: null
     });
+  }
+
+  private refreshSchemaMeta(headers: string[]) {
+    this.setMeta('schema', JSON.stringify(inferTableSchema(headers, this.listCachedRows())));
   }
 
   private countCachedRows(kind: 'live' | 'staging' = 'live') {

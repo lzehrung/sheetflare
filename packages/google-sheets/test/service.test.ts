@@ -166,6 +166,54 @@ describe('GoogleSheetsService.readAllRows', () => {
     ]);
   });
 
+  it('rejects rows with blank managed ids instead of fabricating row-number ids', async () => {
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes('/values/')) {
+          return Response.json({
+            values: [
+              ['_id', 'name'],
+              ['', 'Ada']
+            ]
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    await expect(service.readAllRows({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Blank managed row id detected in column _id at row 2.'
+    });
+  });
+
   it('retries transient read failures before succeeding', async () => {
     let valueFetchCount = 0;
     const service = new GoogleSheetsService({

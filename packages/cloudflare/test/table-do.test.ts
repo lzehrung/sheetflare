@@ -1148,6 +1148,121 @@ describe('TableDO', () => {
     });
   });
 
+  it('builds schema metadata from the full cached dataset instead of a 100-row sample', async () => {
+    const rows = Array.from({ length: 101 }, (_, index) =>
+      index === 100
+        ? ['row-101', '101']
+        : [`row-${index + 1}`, '']
+    );
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'score'],
+        ...rows
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.schema.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect(response).toMatchObject({
+      type: 'table.schema.get.result',
+      result: {
+        data: {
+          fields: [
+            { name: '_id', inferredType: 'string', nullable: false },
+            { name: 'score', inferredType: 'number', nullable: true }
+          ]
+        }
+      }
+    });
+  });
+
+  it('fails list syncs when a managed row id is blank', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.rows.list',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          query: {}
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Blank managed row id detected in column _id at row 2.'
+    });
+  });
+
   it('keeps scan-based pagination stable when the cursor row disappears between pages', async () => {
     const sheet: SheetState = {
       rows: [
