@@ -24,7 +24,6 @@ import {
   rowParamsSchema,
   tableConfigSchema,
   BadRequestError,
-  NotFoundError,
   toErrorResponse,
   UnauthorizedError,
   updateRowInputSchema,
@@ -46,6 +45,7 @@ import {
   type ListRowsQuery,
   type ListRowsResult,
   type ProjectDoResponse,
+  type ResolvedProjectTableResult,
   type ReindexTableResult,
   type RateLimitDoResponse,
   type TableDoResponse,
@@ -80,6 +80,18 @@ type AuthContext =
 const healthResponseSchema = z.object({
   ok: z.literal(true),
   service: z.string()
+});
+
+const readyResponseSchema = z.object({
+  ok: z.literal(true),
+  service: z.string(),
+  checks: z.object({
+    controlPlane: z.literal('ok'),
+    rateLimit: z.literal('ok'),
+    defaultGoogleCredential: z.enum(['configured', 'missing']),
+    bootstrapAdmin: z.enum(['configured', 'missing'])
+  }),
+  notes: z.array(z.string())
 });
 
 const errorResponseSchema = z.object({
@@ -421,20 +433,16 @@ async function loadProject(c: { env: Env }, projectSlug: string) {
 }
 
 async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug: string) {
-  const projectState = await loadProject(c, projectSlug);
-  const table = projectState.tables.find((entry) => entry.tableSlug === tableSlug);
-  if (!table) {
-    throw new NotFoundError(`Table ${projectSlug}/${tableSlug} was not found.`);
-  }
+  const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, projectSlug), {
+    type: 'project.table.resolve',
+    projectSlug,
+    tableSlug
+  });
 
-  return {
-    projectState,
-    resolvedConfig: {
-      ...table,
-      spreadsheetId: projectState.project.spreadsheetId,
-      googleCredentialRef: projectState.project.googleCredentialRef
-    }
-  };
+  return (response as {
+    type: 'project.table.resolve.result';
+    result: { data: ResolvedProjectTableResult };
+  }).result.data;
 }
 
 async function getApiKeyRecord(c: { env: Env }, apiKeyId: string) {
@@ -488,6 +496,18 @@ const healthRoute = createRoute({
     200: {
       description: 'Health check',
       content: jsonContent(healthResponseSchema)
+    }
+  }
+});
+
+const readyRoute = createRoute({
+  method: 'get',
+  path: '/ready',
+  tags: ['System'],
+  responses: {
+    200: {
+      description: 'Readiness check',
+      content: jsonContent(readyResponseSchema)
     }
   }
 });
@@ -851,6 +871,44 @@ function createApp() {
     })
   );
 
+  app.openapi(readyRoute, async (c) => {
+    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+      type: 'control.projects.list'
+    });
+    await doRpc<RateLimitDoResponse>(getRateLimitStub(c.env, 'ready:system'), {
+      type: 'rate-limit.check',
+      key: c.get('requestId'),
+      limit: 1,
+      windowSeconds: 1
+    });
+
+    const hasDefaultGoogleCredential = Boolean(
+      c.env.GOOGLE_CLIENT_EMAIL?.trim() && c.env.GOOGLE_PRIVATE_KEY?.trim()
+    );
+    const hasBootstrapAdmin = Boolean(c.env.ADMIN_BEARER_TOKEN?.trim());
+    const notes: string[] = [];
+
+    if (!hasDefaultGoogleCredential) {
+      notes.push('Default Google service-account credential is not configured. Project-specific credentials may still work.');
+    }
+
+    if (!hasBootstrapAdmin) {
+      notes.push('Bootstrap admin bearer token is not configured. Admin access must use API keys.');
+    }
+
+    return c.json({
+      ok: true,
+      service: 'sheetflare-api',
+      checks: {
+        controlPlane: 'ok',
+        rateLimit: 'ok',
+        defaultGoogleCredential: hasDefaultGoogleCredential ? 'configured' : 'missing',
+        bootstrapAdmin: hasBootstrapAdmin ? 'configured' : 'missing'
+      },
+      notes
+    });
+  });
+
   app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', {
     type: 'http',
     scheme: 'bearer',
@@ -941,36 +999,36 @@ function createApp() {
   });
 
   app.openapi(listRowsRoute, async (c) => {
-    const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
+    const params = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
-    const { projectState, resolvedConfig } = await loadProjectTable(c, project, table);
-    if (projectState.project.defaultAuthMode !== 'public-read') {
-      assertProjectScope(auth, 'table:read', project);
+    const tableAccess = await loadProjectTable(c, params.project, params.table);
+    if (tableAccess.project.defaultAuthMode !== 'public-read') {
+      assertProjectScope(auth, 'table:read', params.project);
     }
     const query = parseListRowsQuery(c);
-    const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
+    const response = await doRpc<TableDoResponse>(getTableStub(c.env, params.project, params.table), {
       type: 'table.rows.list',
-      projectSlug: project,
-      tableSlug: table,
+      projectSlug: params.project,
+      tableSlug: params.table,
       query,
-      resolvedConfig
+      resolvedConfig: tableAccess.resolvedConfig
     });
 
     return c.json((response as { type: 'table.rows.list.result'; result: ListRowsResult }).result);
   });
 
   app.openapi(getSchemaRoute, async (c) => {
-    const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
+    const params = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
-    const { projectState, resolvedConfig } = await loadProjectTable(c, project, table);
-    if (projectState.project.defaultAuthMode !== 'public-read') {
-      assertProjectScope(auth, 'table:read', project);
+    const tableAccess = await loadProjectTable(c, params.project, params.table);
+    if (tableAccess.project.defaultAuthMode !== 'public-read') {
+      assertProjectScope(auth, 'table:read', params.project);
     }
-    const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
+    const response = await doRpc<TableDoResponse>(getTableStub(c.env, params.project, params.table), {
       type: 'table.schema.get',
-      projectSlug: project,
-      tableSlug: table,
-      resolvedConfig
+      projectSlug: params.project,
+      tableSlug: params.table,
+      resolvedConfig: tableAccess.resolvedConfig
     });
 
     return c.json((response as { type: 'table.schema.get.result'; result: GetSchemaResult }).result);
@@ -1003,18 +1061,18 @@ function createApp() {
   });
 
   app.openapi(getRowRoute, async (c) => {
-    const { project, table, id } = parsePathParams(c, rowParamsSchema);
+    const params = parsePathParams(c, rowParamsSchema);
     const auth = await authenticateRequest(c);
-    const { projectState, resolvedConfig } = await loadProjectTable(c, project, table);
-    if (projectState.project.defaultAuthMode !== 'public-read') {
-      assertProjectScope(auth, 'table:read', project);
+    const tableAccess = await loadProjectTable(c, params.project, params.table);
+    if (tableAccess.project.defaultAuthMode !== 'public-read') {
+      assertProjectScope(auth, 'table:read', params.project);
     }
-    const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
+    const response = await doRpc<TableDoResponse>(getTableStub(c.env, params.project, params.table), {
       type: 'table.row.get',
-      projectSlug: project,
-      tableSlug: table,
-      rowId: id,
-      resolvedConfig
+      projectSlug: params.project,
+      tableSlug: params.table,
+      rowId: params.id,
+      resolvedConfig: tableAccess.resolvedConfig
     });
 
     return c.json((response as { type: 'table.row.get.result'; result: GetRowResult }).result);

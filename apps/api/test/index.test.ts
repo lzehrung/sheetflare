@@ -27,6 +27,7 @@ class FakeDurableObjectNamespace {
 
 function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
   const rateLimitRequests: Array<{ name: string; key: string }> = [];
+  const projectRequests: string[] = [];
   const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown> }> = [];
   let verifyApiKeyCallCount = 0;
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
@@ -152,8 +153,27 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
     });
   });
 
-  const project = new FakeDurableObjectNamespace((name) => async () => {
-    if (name === 'project:demo') {
+  const project = new FakeDurableObjectNamespace(() => async (request) => {
+    const body = (await request.json()) as { type: string };
+    projectRequests.push(body.type);
+    const table = {
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    };
+
+    if (body.type === 'project.get') {
       return Response.json({
         type: 'project.get.result',
         result: {
@@ -166,24 +186,29 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
             updatedAt: '2026-04-26T00:00:00.000Z',
             defaultAuthMode: 'private'
           },
-          tables: [
-            {
-              projectSlug: 'demo',
-              tableSlug: 'users',
-              sheetTabName: 'Users',
-              idColumn: '_id',
-              indexedFields: ['_id'],
-              headerRow: 1,
-              dataStartRow: 2,
-              readEnabled: true,
-              createEnabled: true,
-              updateEnabled: true,
-              deleteEnabled: true,
-              cacheTtlSeconds: 15,
-              createdAt: '2026-04-26T00:00:00.000Z',
-              updatedAt: '2026-04-26T00:00:00.000Z'
+          tables: [table]
+        }
+      });
+    }
+
+    if (body.type === 'project.table.resolve') {
+      return Response.json({
+        type: 'project.table.resolve.result',
+        result: {
+          data: {
+            project: {
+              slug: 'demo',
+              spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
+              defaultAuthMode: 'private'
+            },
+            table,
+            resolvedConfig: {
+              ...table,
+              spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default'
             }
-          ]
+          }
         }
       });
     }
@@ -191,21 +216,7 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
     return Response.json({
       type: 'project.table.create.result',
       result: {
-        data: {
-          projectSlug: 'demo',
-          tableSlug: 'users',
-          sheetTabName: 'Users',
-          idColumn: '_id',
-          headerRow: 1,
-          dataStartRow: 2,
-          readEnabled: true,
-          createEnabled: true,
-          updateEnabled: true,
-          deleteEnabled: true,
-          cacheTtlSeconds: 15,
-          createdAt: '2026-04-26T00:00:00.000Z',
-          updatedAt: '2026-04-26T00:00:00.000Z'
-        }
+        data: table
       }
     });
   });
@@ -309,6 +320,10 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
     value: tableRequests,
     enumerable: false
   });
+  Object.defineProperty(env, '__projectRequests', {
+    value: projectRequests,
+    enumerable: false
+  });
   Object.defineProperty(env, '__verifyApiKeyCallCount', {
     get: () => verifyApiKeyCallCount,
     enumerable: false
@@ -355,6 +370,24 @@ describe('api routes', () => {
           updatedAt: '2026-04-26T00:00:00.000Z'
         }
       ]
+    });
+  });
+
+  it('reports internal readiness separately from liveness', async () => {
+    const app = createApp();
+    const response = await app.request('/ready', {}, createEnv());
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      service: 'sheetflare-api',
+      checks: {
+        controlPlane: 'ok',
+        rateLimit: 'ok',
+        defaultGoogleCredential: 'configured',
+        bootstrapAdmin: 'configured'
+      },
+      notes: []
     });
   });
 
@@ -680,7 +713,10 @@ describe('api routes', () => {
 
   it('passes resolved table config to public-read route durable-object calls', async () => {
     const app = createApp();
-    const env = createEnv() as Env & { __tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown> }> };
+    const env = createEnv() as Env & {
+      __tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown> }>;
+      __projectRequests: string[];
+    };
 
     const response = await app.request(
       '/v1/projects/demo/tables/users/rows',
@@ -702,6 +738,8 @@ describe('api routes', () => {
         googleCredentialRef: 'default'
       })
     });
+    expect(env.__projectRequests).toContain('project.table.resolve');
+    expect(env.__projectRequests).not.toContain('project.get');
   });
 
   it('serves an OpenAPI document with the expected API surface', async () => {

@@ -35,6 +35,19 @@ export function joinUrl(baseUrl: string, path: string) {
   return `${normalizedBase}${normalizedPath}`;
 }
 
+function summarizeBody(bodyText: string) {
+  const normalized = bodyText.trim().replace(/\s+/g, ' ');
+  if (normalized.length <= 240) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, 237)}...`;
+}
+
+function formatRequestLabel(options: { method?: HttpMethod; path: string }) {
+  return `${options.method ?? 'GET'} ${options.path}`;
+}
+
 export async function requestJson<T>(options: {
   baseUrl: string;
   path: string;
@@ -57,18 +70,37 @@ export async function requestJson<T>(options: {
   const response = await fetch(joinUrl(options.baseUrl, options.path), init);
 
   const text = await response.text();
-  const data = text.length > 0 ? JSON.parse(text) as T : null;
 
   if (options.expectedStatus !== undefined && response.status !== options.expectedStatus) {
+    const requestId = response.headers.get('x-request-id');
+    const bodySummary = text.trim().length > 0 ? summarizeBody(text) : null;
     throw new ScriptError(
-      `Expected ${options.method ?? 'GET'} ${options.path} to return ${options.expectedStatus}, received ${response.status}.`
+      [
+        `Expected ${formatRequestLabel(options)} to return ${options.expectedStatus}, received ${response.status}.`,
+        requestId ? `requestId=${requestId}` : null,
+        bodySummary ? `body=${bodySummary}` : null
+      ].filter(Boolean).join(' ')
     );
   }
 
-  return {
-    response,
-    data
-  };
+  if (text.length === 0) {
+    return {
+      response,
+      data: null
+    };
+  }
+
+  try {
+    return {
+      response,
+      data: JSON.parse(text) as T
+    };
+  } catch {
+    throw new ScriptError(
+      `Expected ${formatRequestLabel(options)} to return JSON, received invalid JSON body: ${summarizeBody(text)}`
+    );
+  }
+
 }
 
 export function assert(condition: unknown, message: string): asserts condition {

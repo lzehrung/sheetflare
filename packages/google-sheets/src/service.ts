@@ -8,6 +8,7 @@ import {
   type RowRecord,
   type TableConfig
 } from '@sheetflare/contracts';
+import { parseManagedRowId } from '@sheetflare/domain';
 
 const googleSheetsScope = 'https://www.googleapis.com/auth/spreadsheets';
 const defaultOauthTokenUrl = 'https://oauth2.googleapis.com/token';
@@ -215,14 +216,25 @@ function buildRowEnvelope(config: GoogleSheetTableConfig, layout: HeaderLayout, 
 }
 
 function getManagedRowId(value: RowRecord[string] | undefined, idColumn: string, rowNumber: number) {
-  if (value === null || value === undefined || (typeof value === 'string' && value.trim().length === 0)) {
+  const parsed = parseManagedRowId(value);
+  if (parsed.ok) {
+    return parsed.rowId;
+  }
+
+  if (parsed.reason === 'missing') {
     throw new BadRequestError(`Blank managed row id detected in column ${idColumn} at row ${rowNumber}.`, {
       idColumn,
       rowNumber
     });
   }
 
-  return String(value);
+  throw new BadRequestError(
+    `Managed row id in column ${idColumn} at row ${rowNumber} must be a non-blank string, number, or boolean.`,
+    {
+      idColumn,
+      rowNumber
+    }
+  );
 }
 
 export class GoogleSheetsService {
@@ -320,9 +332,8 @@ export class GoogleSheetsService {
         rowIdValue: parseSheetCellValue(cells[0]),
         rowNumber: config.dataStartRow + index
       }))
-      .filter((entry) => entry.rowIdValue !== null)
       .map((entry) => ({
-        rowId: String(entry.rowIdValue),
+        rowId: getManagedRowId(entry.rowIdValue, config.idColumn, entry.rowNumber),
         rowNumber: entry.rowNumber
       }));
   }

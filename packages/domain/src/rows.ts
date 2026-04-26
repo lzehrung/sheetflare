@@ -1,5 +1,9 @@
 import type { RowRecord } from '@sheetflare/contracts';
 
+export type ManagedRowIdParseResult =
+  | { ok: true; rowId: string }
+  | { ok: false; reason: 'missing' | 'invalid-type' };
+
 export function normalizeRowValues(input: RowRecord): RowRecord {
   const output: RowRecord = {};
 
@@ -10,6 +14,39 @@ export function normalizeRowValues(input: RowRecord): RowRecord {
   }
 
   return output;
+}
+
+export function parseManagedRowId(value: RowRecord[string] | undefined): ManagedRowIdParseResult {
+  if (value === null || value === undefined) {
+    return {
+      ok: false,
+      reason: 'missing'
+    };
+  }
+
+  if (typeof value === 'string') {
+    return value.trim().length > 0
+      ? {
+          ok: true,
+          rowId: value
+        }
+      : {
+          ok: false,
+          reason: 'missing'
+        };
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return {
+      ok: true,
+      rowId: String(value)
+    };
+  }
+
+  return {
+    ok: false,
+    reason: 'invalid-type'
+  };
 }
 
 export function pickKnownColumns(
