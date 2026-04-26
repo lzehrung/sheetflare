@@ -15,6 +15,7 @@ import {
 import {
   assertQueryableField,
   buildFilterSql,
+  compareStableStrings,
   compareQueryValues,
   compareRangeQueryValues,
   decodeQueryCursor,
@@ -1361,7 +1362,7 @@ export class TableDO {
       }
     }
 
-    const rowIdComparison = row.id.localeCompare(cursor.rowId);
+    const rowIdComparison = compareStableStrings(row.id, cursor.rowId);
     return direction === 'desc' ? rowIdComparison < 0 : rowIdComparison > 0;
   }
 
@@ -1374,7 +1375,7 @@ export class TableDO {
     }
 
     if (cursor.sortField === 'id') {
-      return String(value ?? '').localeCompare(cursor.rowId);
+      return compareStableStrings(String(value ?? ''), cursor.rowId);
     }
 
     const comparableValue = Array.isArray(value) ? JSON.stringify(value) : value;
@@ -1400,7 +1401,7 @@ function queryDirectionAwareOrderBy(
   return [
     `CASE ${alias}.${kindColumn} WHEN 'null' THEN 0 WHEN 'boolean' THEN 1 WHEN 'number' THEN 2 WHEN 'string' THEN 3 ELSE 4 END ${sqlDirection}`,
     `${alias}.${numberColumn} ${sqlDirection}`,
-    `${alias}.${textColumn} ${sqlDirection}`,
+    `${alias}.${textColumn} COLLATE BINARY ${sqlDirection}`,
     `${alias}.${booleanColumn} ${sqlDirection}`,
     `cr.row_id ${sqlDirection}`
   ].join(', ');

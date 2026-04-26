@@ -1,5 +1,6 @@
 import type { FieldFilter, ListRowsQuery, QueryScalarValue, RowFilter } from '@sheetflare/contracts';
 import { BadRequestError } from '@sheetflare/contracts';
+import { compareStableStrings } from './strings';
 
 function base64UrlEncode(input: string): string {
   return btoa(input).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
@@ -22,7 +23,7 @@ function stableStringify(value: unknown): string {
   if (typeof value !== 'object') return JSON.stringify(value);
 
   const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) =>
-    left.localeCompare(right)
+    compareStableStrings(left, right)
   );
   return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`).join(',')}}`;
 }
