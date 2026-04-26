@@ -34,6 +34,11 @@ export type GoogleSheetTableConfig = TableConfig & {
   spreadsheetId: string;
 };
 
+export interface RowLookupResult {
+  row: RowEnvelope;
+  duplicateCount: number;
+}
+
 export interface GoogleServiceAccountConfig {
   clientEmail: string;
   privateKey: string;
@@ -168,7 +173,7 @@ export class GoogleSheetsService {
   }
 
   async readAllRows(config: GoogleSheetTableConfig): Promise<RowEnvelope[]> {
-    const range = `${escapeSheetName(config.sheetTabName)}!${config.headerRow}:${Math.max(config.dataStartRow, config.headerRow) + 20000}`;
+    const range = `${escapeSheetName(config.sheetTabName)}`;
     const values = await this.readValues(config.spreadsheetId, range);
     const headers = (values[0] ?? []).map((header) => header.trim()).filter(Boolean);
     if (headers.length === 0) return [];
@@ -179,6 +184,33 @@ export class GoogleSheetsService {
     return rows
       .map((cells, index) => buildRowEnvelope(config, headers, config.dataStartRow + index, cells))
       .filter((row) => Object.values(row.values).some((value) => value !== null));
+  }
+
+  async findRowById(
+    config: GoogleSheetTableConfig,
+    rowId: string,
+    rowNumberHint?: number | null
+  ): Promise<RowLookupResult | null> {
+    if (rowNumberHint) {
+      const hintedRow = await this.readSingleRow(config, rowNumberHint).catch(() => null);
+      if (hintedRow && String(hintedRow.values[config.idColumn] ?? '') === rowId) {
+        return {
+          row: hintedRow,
+          duplicateCount: 1
+        };
+      }
+    }
+
+    const rows = await this.readAllRows(config);
+    const matches = rows.filter((row) => String(row.values[config.idColumn] ?? '') === rowId);
+    if (matches.length === 0) {
+      return null;
+    }
+
+    return {
+      row: matches[0]!,
+      duplicateCount: matches.length
+    };
   }
 
   async readSingleRow(config: GoogleSheetTableConfig, rowNumber: number): Promise<RowEnvelope> {

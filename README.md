@@ -28,10 +28,39 @@ Set these in `apps/api/wrangler.jsonc` for local development or through Cloudfla
 - `GOOGLE_PRIVATE_KEY`
 - `ADMIN_BEARER_TOKEN`
 
-`ADMIN_BEARER_TOKEN` is optional. When set, `/v1/admin/*` routes require `Authorization: Bearer <token>`.
+`ADMIN_BEARER_TOKEN` is the bootstrap admin credential for self-hosted setups. Use it to create scoped API keys, then prefer those keys for normal operation.
+
+## Auth Model
+
+- Admin routes use either the bootstrap bearer token or an API key with the relevant admin scope.
+- Data routes use scoped API keys unless the project is configured with `defaultAuthMode: "public-read"`.
+- API keys are stored in the control-plane durable object with hashed secrets, revocation timestamps, and last-used timestamps.
+
+Example bootstrap flow:
+
+```powershell
+$headers = @{
+  Authorization = "Bearer <ADMIN_BEARER_TOKEN>"
+  "Content-Type" = "application/json"
+}
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8787/v1/admin/keys `
+  -Headers $headers `
+  -Body '{"name":"local-admin","scopes":["admin:projects","admin:keys","table:read","table:create","table:update","table:delete"]}'
+```
+
+The response includes the full API key exactly once.
+
+## Row Identity
+
+- Managed tables require a stable ID column.
+- The gateway treats row numbers as a cache only.
+- Updates and deletes re-resolve rows by ID before mutating the sheet, which keeps the system correct when rows are re-ordered manually in Google Sheets.
 
 ## Notes
 
-- Project listing is handled by a dedicated `RegistryDO`, not an arbitrary project durable object.
+- Project listing and API keys are handled by a dedicated `ControlPlaneDO`.
 - The Google Sheets adapter uses service-account JWT exchange and the Sheets REST API directly, so the worker does not depend on Node-only Google SDKs.
 - `npm run build`, `npm run typecheck`, and `npm test` all pass from the repo root.
