@@ -33,9 +33,27 @@ export class BadRequestError extends AppError {
   }
 }
 
+export class BadGatewayError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super(message, 'BAD_GATEWAY', 502, details);
+  }
+}
+
 export class UnauthorizedError extends AppError {
   constructor(message = 'Unauthorized', details?: unknown) {
     super(message, 'UNAUTHORIZED', 401, details);
+  }
+}
+
+export class TooManyRequestsError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super(message, 'TOO_MANY_REQUESTS', 429, details);
+  }
+}
+
+export class ServiceUnavailableError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super(message, 'SERVICE_UNAVAILABLE', 503, details);
   }
 }
 

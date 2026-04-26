@@ -19,6 +19,8 @@
   "vars": {
     "GOOGLE_CLIENT_EMAIL": "",
     "GOOGLE_PRIVATE_KEY": "",
-    "ADMIN_BEARER_TOKEN": ""
+    "ADMIN_BEARER_TOKEN": "",
+    "RATE_LIMIT_MAX_REQUESTS": "300",
+    "RATE_LIMIT_WINDOW_SECONDS": "60"
   }
 }

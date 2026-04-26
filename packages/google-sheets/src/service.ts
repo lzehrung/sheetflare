@@ -1,8 +1,19 @@
-import { BadRequestError, NotFoundError, type RowEnvelope, type RowRecord, type TableConfig } from '@sheetflare/contracts';
+import {
+  BadGatewayError,
+  BadRequestError,
+  NotFoundError,
+  ServiceUnavailableError,
+  TooManyRequestsError,
+  type RowEnvelope,
+  type RowRecord,
+  type TableConfig
+} from '@sheetflare/contracts';
 
 const googleSheetsScope = 'https://www.googleapis.com/auth/spreadsheets';
 const defaultOauthTokenUrl = 'https://oauth2.googleapis.com/token';
 const defaultSheetsApiBaseUrl = 'https://sheets.googleapis.com/v4/spreadsheets';
+const defaultRequestTimeoutMs = 15_000;
+const defaultRetryCount = 2;
 
 type FetchLike = typeof fetch;
 
@@ -46,6 +57,7 @@ export interface GoogleServiceAccountConfig {
   oauthTokenUrl?: string;
   sheetsApiBaseUrl?: string;
   now?: () => number;
+  delay?: (ms: number) => Promise<void>;
 }
 
 export function serializeSheetCell(value: RowRecord[string]): string | number | boolean {
@@ -156,6 +168,7 @@ export class GoogleSheetsService {
   private readonly oauthTokenUrl: string;
   private readonly sheetsApiBaseUrl: string;
   private readonly now: () => number;
+  private readonly delay: (ms: number) => Promise<void>;
   private tokenCache: { value: string; expiresAtMs: number } | null = null;
 
   constructor(private readonly config: GoogleServiceAccountConfig) {
@@ -163,6 +176,7 @@ export class GoogleSheetsService {
     this.oauthTokenUrl = config.oauthTokenUrl ?? defaultOauthTokenUrl;
     this.sheetsApiBaseUrl = config.sheetsApiBaseUrl ?? defaultSheetsApiBaseUrl;
     this.now = config.now ?? Date.now;
+    this.delay = config.delay ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   async readHeaders(config: GoogleSheetTableConfig): Promise<string[]> {
@@ -235,7 +249,7 @@ export class GoogleSheetsService {
   async appendRow(config: GoogleSheetTableConfig, headers: readonly string[], values: RowRecord): Promise<number> {
     const accessToken = await this.getAccessToken();
     const range = `${escapeSheetName(config.sheetTabName)}!A${config.dataStartRow}`;
-    const response = await this.fetchImpl(
+    const response = await this.authorizedRequest(
       `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
       {
         method: 'POST',
@@ -246,6 +260,10 @@ export class GoogleSheetsService {
         body: JSON.stringify({
           values: [headers.map((header) => serializeSheetCell(values[header] ?? null))]
         })
+      },
+      {
+        operation: `append row for ${config.projectSlug}/${config.tableSlug}`,
+        maxRetries: 0
       }
     );
 
@@ -257,7 +275,7 @@ export class GoogleSheetsService {
     const accessToken = await this.getAccessToken();
     const endColumn = columnNumberToA1(headers.length);
     const range = `${escapeSheetName(config.sheetTabName)}!A${rowNumber}:${endColumn}${rowNumber}`;
-    const response = await this.fetchImpl(
+    const response = await this.authorizedRequest(
       `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`,
       {
         method: 'PUT',
@@ -268,6 +286,10 @@ export class GoogleSheetsService {
         body: JSON.stringify({
           values: [headers.map((header) => serializeSheetCell(values[header] ?? null))]
         })
+      },
+      {
+        operation: `write row for ${config.projectSlug}/${config.tableSlug}`,
+        maxRetries: 0
       }
     );
 
@@ -277,7 +299,7 @@ export class GoogleSheetsService {
   async deleteRow(config: GoogleSheetTableConfig, rowNumber: number): Promise<void> {
     const accessToken = await this.getAccessToken();
     const sheetId = config.sheetGid ?? (await this.lookupSheetId(config.spreadsheetId, config.sheetTabName));
-    const response = await this.fetchImpl(
+    const response = await this.authorizedRequest(
       `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}:batchUpdate`,
       {
         method: 'POST',
@@ -299,6 +321,10 @@ export class GoogleSheetsService {
             }
           ]
         })
+      },
+      {
+        operation: `delete row for ${config.projectSlug}/${config.tableSlug}`,
+        maxRetries: 0
       }
     );
 
@@ -307,12 +333,16 @@ export class GoogleSheetsService {
 
   private async readValues(spreadsheetId: string, range: string): Promise<string[][]> {
     const accessToken = await this.getAccessToken();
-    const response = await this.fetchImpl(
+    const response = await this.authorizedRequest(
       `${this.sheetsApiBaseUrl}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}`,
       {
         headers: {
           authorization: `Bearer ${accessToken}`
         }
+      },
+      {
+        operation: `read values for range ${range}`,
+        maxRetries: defaultRetryCount
       }
     );
 
@@ -322,12 +352,16 @@ export class GoogleSheetsService {
 
   private async lookupSheetId(spreadsheetId: string, sheetTabName: string): Promise<number> {
     const accessToken = await this.getAccessToken();
-    const response = await this.fetchImpl(
+    const response = await this.authorizedRequest(
       `${this.sheetsApiBaseUrl}/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties`,
       {
         headers: {
           authorization: `Bearer ${accessToken}`
         }
+      },
+      {
+        operation: `lookup sheet id for ${sheetTabName}`,
+        maxRetries: defaultRetryCount
       }
     );
 
@@ -348,16 +382,23 @@ export class GoogleSheetsService {
     }
 
     const assertion = await this.createJwtAssertion(now);
-    const response = await this.fetchImpl(this.oauthTokenUrl, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/x-www-form-urlencoded'
+    const response = await this.requestWithRetry(
+      this.oauthTokenUrl,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({
+          grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+          assertion
+        })
       },
-      body: new URLSearchParams({
-        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        assertion
-      })
-    });
+      {
+        operation: 'fetch Google OAuth access token',
+        maxRetries: defaultRetryCount
+      }
+    );
 
     const body = await this.parseJson<GoogleTokenResponse>(response);
     this.tokenCache = {
@@ -403,10 +444,145 @@ export class GoogleSheetsService {
     return `${signingInput}.${base64UrlEncode(new Uint8Array(signature))}`;
   }
 
+  private async authorizedRequest(
+    input: string,
+    init: RequestInit,
+    options: { operation: string; maxRetries: number }
+  ): Promise<Response> {
+    let hasRetriedForAuth = false;
+    let currentInit = init;
+
+    while (true) {
+      const response = await this.requestWithRetry(input, currentInit, options);
+      if (response.status !== 401 || hasRetriedForAuth) {
+        return response;
+      }
+
+      this.tokenCache = null;
+      hasRetriedForAuth = true;
+      const nextToken = await this.getAccessToken();
+      currentInit = {
+        ...init,
+        headers: {
+          ...(init.headers ?? {}),
+          authorization: `Bearer ${nextToken}`
+        }
+      };
+    }
+  }
+
+  private async requestWithRetry(
+    input: string,
+    init: RequestInit,
+    options: { operation: string; maxRetries: number }
+  ): Promise<Response> {
+    for (let attempt = 0; ; attempt += 1) {
+      let response: Response;
+      try {
+        response = await this.fetchWithTimeout(input, init);
+      } catch (error) {
+        if (attempt >= options.maxRetries) {
+          if (error instanceof ServiceUnavailableError) {
+            throw error;
+          }
+
+          throw new ServiceUnavailableError(`Google Sheets request timed out during ${options.operation}.`, {
+            operation: options.operation
+          });
+        }
+
+        await this.delay(this.getRetryDelayMs(attempt));
+        continue;
+      }
+
+      if (!this.isRetryableStatus(response.status) || attempt >= options.maxRetries) {
+        return response;
+      }
+
+      await this.delay(this.getRetryDelayMs(attempt));
+    }
+  }
+
+  private async fetchWithTimeout(input: string, init: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), defaultRequestTimeoutMs);
+
+    try {
+      return await this.fetchImpl(input, {
+        ...init,
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new ServiceUnavailableError('Google Sheets request timed out.');
+      }
+
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private isRetryableStatus(status: number) {
+    return status === 429 || status >= 500;
+  }
+
+  private getRetryDelayMs(attempt: number) {
+    return 250 * 2 ** attempt;
+  }
+
+  private getGoogleErrorMessage(bodyText: string) {
+    try {
+      const body = JSON.parse(bodyText) as {
+        error?: {
+          message?: string;
+          status?: string;
+        };
+      };
+
+      return body.error?.message ?? body.error?.status ?? bodyText;
+    } catch {
+      return bodyText;
+    }
+  }
+
   private async parseJson<T = unknown>(response: Response): Promise<T> {
     if (!response.ok) {
       const bodyText = await response.text();
-      throw new BadRequestError(`Google Sheets API request failed with ${response.status}.`, bodyText);
+      const message = this.getGoogleErrorMessage(bodyText);
+
+      if (response.status === 401 || response.status === 403) {
+        throw new BadGatewayError('Google Sheets authentication or permission check failed.', {
+          status: response.status,
+          message
+        });
+      }
+
+      if (response.status === 404) {
+        throw new NotFoundError('Google Sheets resource was not found.', {
+          status: response.status,
+          message
+        });
+      }
+
+      if (response.status === 429) {
+        throw new TooManyRequestsError('Google Sheets API quota was exceeded.', {
+          status: response.status,
+          message
+        });
+      }
+
+      if (response.status >= 500) {
+        throw new ServiceUnavailableError('Google Sheets API is temporarily unavailable.', {
+          status: response.status,
+          message
+        });
+      }
+
+      throw new BadRequestError(`Google Sheets API request failed with ${response.status}.`, {
+        status: response.status,
+        message
+      });
     }
 
     if (response.status === 204) {

@@ -25,7 +25,7 @@ class FakeDurableObjectNamespace {
   }
 }
 
-function createEnv(): Env {
+function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
     const body = (await request.json()) as { type: string; apiKeyId?: string; hash?: string; projectSlug?: string | null };
 
@@ -249,14 +249,27 @@ function createEnv(): Env {
     });
   });
 
+  const rateLimit = new FakeDurableObjectNamespace(() => async () =>
+    Response.json({
+      type: 'rate-limit.check.result',
+      result: {
+        allowed: options?.rateLimitAllowed ?? true,
+        remaining: options?.rateLimitAllowed === false ? 0 : 299,
+        resetAtMs: Date.parse('2026-04-26T00:01:00.000Z')
+      }
+    })
+  );
+
   return {
     CONTROL_PLANE_DO: controlPlane as never,
     PROJECT_DO: project as never,
     TABLE_DO: table as never,
-    RATE_LIMIT_DO: table as never,
+    RATE_LIMIT_DO: rateLimit as never,
     GOOGLE_CLIENT_EMAIL: 'service@example.com',
     GOOGLE_PRIVATE_KEY: 'private-key',
-    ADMIN_BEARER_TOKEN: 'secret'
+    ADMIN_BEARER_TOKEN: 'secret',
+    RATE_LIMIT_MAX_REQUESTS: '300',
+    RATE_LIMIT_WINDOW_SECONDS: '60'
   };
 }
 
@@ -368,6 +381,33 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  it('returns 429 when the edge rate limit is exceeded', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects',
+      {
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      createEnv({ rateLimitAllowed: false })
+    );
+
+    expect(response.status).toBe(429);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'TOO_MANY_REQUESTS',
+        message: 'Rate limit exceeded.',
+        details: {
+          key: 'bootstrap-admin',
+          maxRequests: 300,
+          windowSeconds: 60,
+          resetAt: '2026-04-26T00:01:00.000Z'
+        }
+      }
+    });
   });
 
   it('creates api keys through bootstrap admin auth', async () => {

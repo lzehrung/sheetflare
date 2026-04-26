@@ -72,3 +72,22 @@ export type TableDoResponse =
   | { type: 'table.schema.get.result'; result: GetSchemaResult }
   | { type: 'table.cache.get.result'; result: GetTableCacheStatusResult }
   | { type: 'table.reindex.result'; result: ReindexTableResult };
+
+export type RateLimitDoRequest =
+  | {
+      type: 'rate-limit.check';
+      key: string;
+      limit: number;
+      windowSeconds: number;
+      nowMs?: number;
+    };
+
+export type RateLimitDoResponse =
+  | {
+      type: 'rate-limit.check.result';
+      result: {
+        allowed: boolean;
+        remaining: number;
+        resetAtMs: number;
+      };
+    };

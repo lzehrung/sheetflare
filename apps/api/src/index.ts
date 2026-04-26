@@ -45,7 +45,9 @@ import {
   type ListRowsResult,
   type ProjectDoResponse,
   type ReindexTableResult,
+  type RateLimitDoResponse,
   type TableDoResponse,
+  TooManyRequestsError,
   type UpdateRowInput,
   type UpdateRowResult,
   type UpsertTableResult
@@ -178,6 +180,10 @@ function getTableStub(env: Env, projectSlug: string, tableSlug: string) {
   return env.TABLE_DO.get(env.TABLE_DO.idFromName(`table:${projectSlug}:${tableSlug}`));
 }
 
+function getRateLimitStub(env: Env) {
+  return env.RATE_LIMIT_DO.get(env.RATE_LIMIT_DO.idFromName('global-rate-limit'));
+}
+
 function parseApiKey(value: string) {
   if (!value.startsWith('sfk_')) {
     throw new UnauthorizedError('Invalid API key.');
@@ -192,6 +198,67 @@ function parseApiKey(value: string) {
     apiKeyId: value.slice(4, separatorIndex),
     secret: value.slice(separatorIndex + 1)
   };
+}
+
+function getRateLimitConfiguration(env: Env) {
+  const maxRequests = Number.parseInt(env.RATE_LIMIT_MAX_REQUESTS ?? '300', 10);
+  const windowSeconds = Number.parseInt(env.RATE_LIMIT_WINDOW_SECONDS ?? '60', 10);
+
+  return {
+    maxRequests: Number.isFinite(maxRequests) && maxRequests > 0 ? maxRequests : 300,
+    windowSeconds: Number.isFinite(windowSeconds) && windowSeconds > 0 ? windowSeconds : 60
+  };
+}
+
+function getRateLimitKey(c: { req: { header(name: string): string | undefined; method: string; path: string } ; env: Env }) {
+  const authorization = c.req.header('authorization');
+  if (authorization?.startsWith('Bearer ')) {
+    const credential = authorization.slice('Bearer '.length).trim();
+    if (c.env.ADMIN_BEARER_TOKEN && credential === c.env.ADMIN_BEARER_TOKEN) {
+      return 'bootstrap-admin';
+    }
+
+    if (credential.startsWith('sfk_')) {
+      const separatorIndex = credential.indexOf('.');
+      if (separatorIndex > 4) {
+        return `api-key:${credential.slice(4, separatorIndex)}`;
+      }
+    }
+  }
+
+  const forwardedFor = c.req.header('cf-connecting-ip')
+    ?? c.req.header('x-forwarded-for')?.split(',')[0]?.trim()
+    ?? 'anonymous';
+  return `client:${forwardedFor}`;
+}
+
+async function enforceRateLimit(c: { req: { header(name: string): string | undefined; method: string; path: string }; env: Env }) {
+  const config = getRateLimitConfiguration(c.env);
+  if (config.maxRequests <= 0) {
+    return;
+  }
+
+  const key = getRateLimitKey(c);
+  const response = await doRpc<RateLimitDoResponse>(getRateLimitStub(c.env), {
+    type: 'rate-limit.check',
+    key: `${c.req.method}:${key}`,
+    limit: config.maxRequests,
+    windowSeconds: config.windowSeconds
+  });
+
+  const result = (response as {
+    type: 'rate-limit.check.result';
+    result: { allowed: boolean; remaining: number; resetAtMs: number };
+  }).result;
+
+  if (!result.allowed) {
+    throw new TooManyRequestsError('Rate limit exceeded.', {
+      key,
+      maxRequests: config.maxRequests,
+      windowSeconds: config.windowSeconds,
+      resetAt: new Date(result.resetAtMs).toISOString()
+    });
+  }
 }
 
 async function hashApiKeySecret(secret: string) {
@@ -659,6 +726,11 @@ function createApp() {
         requestId: c.get('requestId')
       })
     );
+  });
+
+  app.use('/v1/*', async (c, next) => {
+    await enforceRateLimit(c);
+    await next();
   });
 
   app.onError((error, c) => {
