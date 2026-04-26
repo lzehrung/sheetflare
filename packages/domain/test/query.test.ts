@@ -28,6 +28,30 @@ describe('buildFilterSql', () => {
       )
     ).toThrow(BadRequestError);
   });
+
+  it('escapes literal wildcard characters in string filters', () => {
+    const result = buildFilterSql(
+      {
+        name: { startsWith: 'a_%\\' }
+      },
+      ['name']
+    );
+
+    expect(result.conditions).toContain("cf0.value_kind = 'string' AND cf0.value_text LIKE ? ESCAPE '\\'");
+    expect(result.parameters).toEqual(['name', 'a\\_\\%\\\\%']);
+  });
+
+  it('treats neq as not-equal across kinds instead of same-kind only', () => {
+    const result = buildFilterSql(
+      {
+        score: { neq: 10 }
+      },
+      ['score']
+    );
+
+    expect(result.conditions).toContain("(cf0.value_kind != 'number' OR cf0.value_number != ?)");
+    expect(result.parameters).toEqual(['score', 10]);
+  });
 });
 
 describe('validateFilterCapabilities', () => {
@@ -51,6 +75,11 @@ describe('compareQueryValues', () => {
     expect(compareQueryValues(2, '2')).toBeLessThan(0);
     expect(compareQueryValues('alpha', ['alpha'])).toBeLessThan(0);
   });
+
+  it('uses stable binary string ordering', () => {
+    expect(compareQueryValues('ab1', 'a_1')).toBeGreaterThan(0);
+    expect(compareQueryValues('B', 'a')).toBeLessThan(0);
+  });
 });
 
 describe('compareRangeQueryValues', () => {
@@ -63,7 +92,7 @@ describe('compareRangeQueryValues', () => {
 
   it('compares matching numeric and string kinds', () => {
     expect(compareRangeQueryValues(10, 2)).toBeGreaterThan(0);
-    expect(compareRangeQueryValues('10', '2')).toBeGreaterThan(0);
+    expect(compareRangeQueryValues('10', '2')).toBeLessThan(0);
   });
 });
 

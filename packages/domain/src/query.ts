@@ -1,5 +1,6 @@
 import type { FieldFilter, QueryScalarValue, RowEnvelope, RowFilter, RowRecord } from '@sheetflare/contracts';
 import { BadRequestError } from '@sheetflare/contracts';
+import { compareStableStrings } from './strings';
 
 export type SqlParameter = string | number | boolean | null;
 
@@ -50,10 +51,7 @@ export function compareQueryValues(
     return leftComparable - rightComparable;
   }
 
-  return String(leftComparable).localeCompare(String(rightComparable), undefined, {
-    numeric: true,
-    sensitivity: 'base'
-  });
+  return compareStableStrings(String(leftComparable), String(rightComparable));
 }
 
 export function compareRangeQueryValues(
@@ -69,10 +67,7 @@ export function compareRangeQueryValues(
   }
 
   if (typeof value === 'string' && typeof expected === 'string') {
-    return value.localeCompare(expected, undefined, {
-      numeric: true,
-      sensitivity: 'base'
-    });
+    return compareStableStrings(value, expected);
   }
 
   return null;
@@ -85,18 +80,22 @@ export function sortRows(
   const direction = sort.direction === 'desc' ? -1 : 1;
   return [...rows].sort((left, right) => {
     if (sort.field === 'rowNumber') {
-      return (left.rowNumber - right.rowNumber) * direction || left.id.localeCompare(right.id) * direction;
+      return (left.rowNumber - right.rowNumber) * direction || compareStableStrings(left.id, right.id) * direction;
     }
 
     if (sort.field === 'id') {
-      return left.id.localeCompare(right.id) * direction;
+      return compareStableStrings(left.id, right.id) * direction;
     }
 
     return (
       compareQueryValues(left.values[sort.field], right.values[sort.field]) * direction ||
-      left.id.localeCompare(right.id) * direction
+      compareStableStrings(left.id, right.id) * direction
     );
   });
+}
+
+function escapeLikePattern(value: string) {
+  return value.replace(/[\\%_]/g, '\\$&');
 }
 
 export function assertQueryableField(
@@ -292,11 +291,11 @@ function applyScalarFilter(options: {
       throw new BadRequestError('startsWith is not supported for this field.');
     }
     if (options.kindSql) {
-      conditions.push(`${options.kindSql} = 'string' AND ${options.textSql} LIKE ?`);
-      parameters.push(`${definition.startsWith}%`);
+      conditions.push(`${options.kindSql} = 'string' AND ${options.textSql} LIKE ? ESCAPE '\\'`);
+      parameters.push(`${escapeLikePattern(definition.startsWith)}%`);
     } else {
-      conditions.push(`${options.textSql} LIKE ?`);
-      parameters.push(`${definition.startsWith}%`);
+      conditions.push(`${options.textSql} LIKE ? ESCAPE '\\'`);
+      parameters.push(`${escapeLikePattern(definition.startsWith)}%`);
     }
   }
 
@@ -305,11 +304,11 @@ function applyScalarFilter(options: {
       throw new BadRequestError('contains is not supported for this field.');
     }
     if (options.kindSql) {
-      conditions.push(`${options.kindSql} = 'string' AND ${options.textSql} LIKE ?`);
-      parameters.push(`%${definition.contains}%`);
+      conditions.push(`${options.kindSql} = 'string' AND ${options.textSql} LIKE ? ESCAPE '\\'`);
+      parameters.push(`%${escapeLikePattern(definition.contains)}%`);
     } else {
-      conditions.push(`${options.textSql} LIKE ?`);
-      parameters.push(`%${definition.contains}%`);
+      conditions.push(`${options.textSql} LIKE ? ESCAPE '\\'`);
+      parameters.push(`%${escapeLikePattern(definition.contains)}%`);
     }
   }
 }
@@ -342,20 +341,29 @@ function buildEqualityClause(
 
   if (kind === 'boolean') {
     return {
-      sql: `${options.kindSql} = 'boolean' AND ${options.booleanSql!} ${operator} ?`,
+      sql:
+        operator === '='
+          ? `${options.kindSql} = 'boolean' AND ${options.booleanSql!} = ?`
+          : `(${options.kindSql} != 'boolean' OR ${options.booleanSql!} != ?)`,
       parameters: [value ? 1 : 0]
     };
   }
 
   if (kind === 'number') {
     return {
-      sql: `${options.kindSql} = 'number' AND ${options.numberSql!} ${operator} ?`,
+      sql:
+        operator === '='
+          ? `${options.kindSql} = 'number' AND ${options.numberSql!} = ?`
+          : `(${options.kindSql} != 'number' OR ${options.numberSql!} != ?)`,
       parameters: [value]
     };
   }
 
   return {
-    sql: `${options.kindSql} = 'string' AND ${options.textSql!} ${operator} ?`,
+    sql:
+      operator === '='
+        ? `${options.kindSql} = 'string' AND ${options.textSql!} = ?`
+        : `(${options.kindSql} != 'string' OR ${options.textSql!} != ?)`,
     parameters: [value]
   };
 }
@@ -392,7 +400,7 @@ function buildRangeClause(
   }
 
   return {
-    sql: `${options.kindSql} = 'string' AND ${options.textSql!} ${sqlOperator} ?`,
+    sql: `${options.kindSql} = 'string' AND ${options.textSql!} COLLATE BINARY ${sqlOperator} ?`,
     parameters: [value]
   };
 }
