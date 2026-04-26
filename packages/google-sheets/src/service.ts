@@ -50,6 +50,11 @@ export interface RowLookupResult {
   duplicateCount: number;
 }
 
+export type RowReference = {
+  rowId: string;
+  rowNumber: number;
+};
+
 type HeaderLayoutEntry = {
   name: string;
   columnNumber: number;
@@ -271,18 +276,8 @@ export class GoogleSheetsService {
       hintedRow = await this.readSingleRow(config, rowNumberHint, layout).catch(() => null);
     }
 
-    const idColumnLetter = columnNumberToA1(layout.idColumnNumber);
-    const idColumnValues = await this.readValues(
-      config.spreadsheetId,
-      `${escapeSheetName(config.sheetTabName)}!${idColumnLetter}${config.dataStartRow}:${idColumnLetter}`
-    );
-
-    const matchRowNumbers = idColumnValues
-      .map((cells, index) => ({
-        rowNumber: config.dataStartRow + index,
-        value: cells[0]
-      }))
-      .filter((entry) => entry.value !== undefined && String(parseSheetCellValue(entry.value)) === rowId)
+    const matchRowNumbers = (await this.readRowReferences(config, layout))
+      .filter((entry) => entry.rowId === rowId)
       .map((entry) => entry.rowNumber);
 
     const duplicateCount = matchRowNumbers.length;
@@ -303,6 +298,29 @@ export class GoogleSheetsService {
       row: resolvedRow,
       duplicateCount
     };
+  }
+
+  async readRowReferences(
+    config: GoogleSheetTableConfig,
+    layout?: HeaderLayout
+  ): Promise<RowReference[]> {
+    const resolvedLayout = layout ?? await this.readHeaderLayout(config);
+    const idColumnLetter = columnNumberToA1(resolvedLayout.idColumnNumber);
+    const idColumnValues = await this.readValues(
+      config.spreadsheetId,
+      `${escapeSheetName(config.sheetTabName)}!${idColumnLetter}${config.dataStartRow}:${idColumnLetter}`
+    );
+
+    return idColumnValues
+      .map((cells, index) => ({
+        rowIdValue: parseSheetCellValue(cells[0]),
+        rowNumber: config.dataStartRow + index
+      }))
+      .filter((entry) => entry.rowIdValue !== null)
+      .map((entry) => ({
+        rowId: String(entry.rowIdValue),
+        rowNumber: entry.rowNumber
+      }));
   }
 
   async readSingleRow(

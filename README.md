@@ -63,6 +63,13 @@ Credential model:
 - Admin routes use either the bootstrap bearer token or an API key with the relevant admin scope.
 - Data routes use scoped API keys unless the project is configured with `defaultAuthMode: "public-read"`.
 - API keys are stored in the control-plane durable object with hashed secrets, revocation timestamps, and last-used timestamps.
+- Supported scopes are intentionally small and exact:
+  - `admin:projects`
+  - `admin:keys`
+  - `table:read`
+  - `table:create`
+  - `table:update`
+  - `table:delete`
 
 Example bootstrap flow:
 
@@ -102,7 +109,8 @@ The response includes the full API key exactly once.
   - cached headers
   - sync metadata
 - Writes update the cache immediately after successful upstream mutation.
-- Deletes force a full sync afterward so row numbers stay consistent.
+- Deletes normally repair cached row numbers through a narrow managed-ID scan instead of forcing a full row-data resync.
+- If the post-delete row reference scan does not match the local cache shape, the table falls back to a full sync for safety.
 - Table config changes that affect cache shape, indexing, or sheet layout automatically mark the cache stale and force a resync on the next read or write.
 
 Operator endpoints:
