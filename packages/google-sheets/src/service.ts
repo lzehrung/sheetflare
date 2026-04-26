@@ -50,6 +50,17 @@ export interface RowLookupResult {
   duplicateCount: number;
 }
 
+type HeaderLayoutEntry = {
+  name: string;
+  columnNumber: number;
+};
+
+type HeaderLayout = {
+  headers: string[];
+  entries: HeaderLayoutEntry[];
+  idColumnNumber: number;
+};
+
 export interface GoogleServiceAccountConfig {
   clientEmail: string;
   privateKey: string;
@@ -142,11 +153,44 @@ function parseUpdatedRangeRowNumber(updatedRange: string | undefined): number {
   return Number(match[1]);
 }
 
-function buildRowEnvelope(config: GoogleSheetTableConfig, headers: readonly string[], rowNumber: number, cells: readonly string[]): RowEnvelope {
+function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: string): HeaderLayout {
+  const entries: HeaderLayoutEntry[] = [];
+
+  for (const [index, rawHeader] of (headerRow ?? []).entries()) {
+    const header = rawHeader.trim();
+    if (!header) {
+      continue;
+    }
+
+    entries.push({
+      name: header,
+      columnNumber: index + 1
+    });
+  }
+
+  if (entries.length === 0) {
+    throw new NotFoundError('No headers found for the requested sheet range.');
+  }
+
+  const idEntry = entries.find((entry) => entry.name === idColumn);
+  if (!idEntry) {
+    throw new NotFoundError(`Required id column ${idColumn} was not found in the header row.`, {
+      idColumn
+    });
+  }
+
+  return {
+    headers: entries.map((entry) => entry.name),
+    entries,
+    idColumnNumber: idEntry.columnNumber
+  };
+}
+
+function buildRowEnvelope(config: GoogleSheetTableConfig, layout: HeaderLayout, rowNumber: number, cells: readonly string[]): RowEnvelope {
   const values: RowRecord = {};
 
-  for (const [index, header] of headers.entries()) {
-    values[header] = parseSheetCellValue(cells[index]);
+  for (const entry of layout.entries) {
+    values[entry.name] = parseSheetCellValue(cells[entry.columnNumber - 1]);
   }
 
   const rawId = values[config.idColumn];
@@ -179,15 +223,18 @@ export class GoogleSheetsService {
     this.delay = config.delay ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
+  private async readHeaderLayout(config: GoogleSheetTableConfig): Promise<HeaderLayout> {
+    const values = await this.readValues(
+      config.spreadsheetId,
+      `${escapeSheetName(config.sheetTabName)}!${config.headerRow}:${config.headerRow}`
+    );
+
+    return buildHeaderLayout(values[0], config.idColumn);
+  }
+
   async readHeaders(config: GoogleSheetTableConfig): Promise<string[]> {
-    const values = await this.readValues(config.spreadsheetId, `${escapeSheetName(config.sheetTabName)}!${config.headerRow}:${config.headerRow}`);
-    const headers = trimHeaders(values[0]);
-
-    if (headers.length === 0) {
-      throw new NotFoundError(`No headers found for table ${config.projectSlug}/${config.tableSlug}.`);
-    }
-
-    return headers;
+    const layout = await this.readHeaderLayout(config);
+    return layout.headers;
   }
 
   async readAllRows(config: GoogleSheetTableConfig): Promise<RowEnvelope[]> {
@@ -195,13 +242,12 @@ export class GoogleSheetsService {
     const values = await this.readValues(config.spreadsheetId, range);
     const headerIndex = Math.max(config.headerRow - 1, 0);
     const dataIndex = Math.max(config.dataStartRow - 1, headerIndex + 1);
-    const headers = trimHeaders(values[headerIndex]);
-    if (headers.length === 0) return [];
+    const layout = buildHeaderLayout(values[headerIndex], config.idColumn);
 
     const rows = values.slice(dataIndex);
 
     return rows
-      .map((cells, index) => buildRowEnvelope(config, headers, config.dataStartRow + index, cells))
+      .map((cells, index) => buildRowEnvelope(config, layout, config.dataStartRow + index, cells))
       .filter((row) => Object.values(row.values).some((value) => value !== null));
   }
 
@@ -210,30 +256,53 @@ export class GoogleSheetsService {
     rowId: string,
     rowNumberHint?: number | null
   ): Promise<RowLookupResult | null> {
+    const layout = await this.readHeaderLayout(config);
     let hintedRow: RowEnvelope | null = null;
     if (rowNumberHint) {
-      hintedRow = await this.readSingleRow(config, rowNumberHint).catch(() => null);
+      hintedRow = await this.readSingleRow(config, rowNumberHint, layout).catch(() => null);
     }
 
-    const rows = await this.readAllRows(config);
-    const matches = rows.filter((row) => String(row.values[config.idColumn] ?? '') === rowId);
-    if (matches.length === 0) {
+    const idColumnLetter = columnNumberToA1(layout.idColumnNumber);
+    const idColumnValues = await this.readValues(
+      config.spreadsheetId,
+      `${escapeSheetName(config.sheetTabName)}!${idColumnLetter}${config.dataStartRow}:${idColumnLetter}`
+    );
+
+    const matchRowNumbers = idColumnValues
+      .map((cells, index) => ({
+        rowNumber: config.dataStartRow + index,
+        value: cells[0]
+      }))
+      .filter((entry) => entry.value !== undefined && String(parseSheetCellValue(entry.value)) === rowId)
+      .map((entry) => entry.rowNumber);
+
+    const duplicateCount = matchRowNumbers.length;
+    if (duplicateCount === 0) {
       return null;
     }
 
-    const resolvedRow = hintedRow && String(hintedRow.values[config.idColumn] ?? '') === rowId
-      ? hintedRow
-      : matches[0]!;
+    if (hintedRow && matchRowNumbers.includes(hintedRow.rowNumber)) {
+      return {
+        row: hintedRow,
+        duplicateCount
+      };
+    }
+
+    const resolvedRow = await this.readSingleRow(config, matchRowNumbers[0]!, layout);
 
     return {
       row: resolvedRow,
-      duplicateCount: matches.length
+      duplicateCount
     };
   }
 
-  async readSingleRow(config: GoogleSheetTableConfig, rowNumber: number): Promise<RowEnvelope> {
-    const [headers, values] = await Promise.all([
-      this.readHeaders(config),
+  async readSingleRow(
+    config: GoogleSheetTableConfig,
+    rowNumber: number,
+    layout?: HeaderLayout
+  ): Promise<RowEnvelope> {
+    const [resolvedLayout, values] = await Promise.all([
+      layout ? Promise.resolve(layout) : this.readHeaderLayout(config),
       this.readValues(config.spreadsheetId, `${escapeSheetName(config.sheetTabName)}!${rowNumber}:${rowNumber}`)
     ]);
 
@@ -242,7 +311,7 @@ export class GoogleSheetsService {
       throw new NotFoundError(`Row ${rowNumber} was not found in ${config.projectSlug}/${config.tableSlug}.`);
     }
 
-    return buildRowEnvelope(config, headers, rowNumber, row);
+    return buildRowEnvelope(config, resolvedLayout, rowNumber, row);
   }
 
   async appendRow(config: GoogleSheetTableConfig, headers: readonly string[], values: RowRecord): Promise<number> {

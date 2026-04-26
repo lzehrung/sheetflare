@@ -36,6 +36,7 @@ const testPrivateKey = [
 
 type SheetState = {
   rows: string[][];
+  requestedRanges: string[];
 };
 
 function decodeRangeFromUrl(url: string) {
@@ -54,15 +55,24 @@ function decodeRangeFromUrl(url: string) {
   return decodeURIComponent(withoutAppend);
 }
 
+function columnLettersToIndex(columnLetters: string) {
+  let result = 0;
+  for (const letter of columnLetters) {
+    result = result * 26 + (letter.charCodeAt(0) - 64);
+  }
+
+  return result - 1;
+}
+
 function createSheetsFetch(sheet: SheetState) {
   return async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
 
-    if (url.includes('oauth2.googleapis.com/token')) {
-      return Response.json({
-        access_token: 'token',
-        expires_in: 3600
-      });
+      if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
     }
 
     if (url.includes(':batchUpdate')) {
@@ -80,6 +90,8 @@ function createSheetsFetch(sheet: SheetState) {
     if (!range) {
       throw new Error(`Unexpected request: ${url}`);
     }
+
+    sheet.requestedRanges.push(range);
 
     if (init?.method === 'PUT') {
       const rowNumber = Number(range.match(/!(?:[A-Z]+)?(\d+):/)?.[1]);
@@ -109,6 +121,17 @@ function createSheetsFetch(sheet: SheetState) {
       const end = Number(singleRowMatch[2]);
       return Response.json({
         values: sheet.rows.slice(start, end)
+      });
+    }
+
+    const singleColumnMatch = range.match(/^'Users'!([A-Z]+)(\d+):\1$/);
+    if (singleColumnMatch) {
+      const columnIndex = columnLettersToIndex(singleColumnMatch[1]);
+      const startRow = Number(singleColumnMatch[2]) - 1;
+      return Response.json({
+        values: sheet.rows
+          .slice(startRow)
+          .map((row) => [row[columnIndex] ?? ''])
       });
     }
 
@@ -187,7 +210,8 @@ describe('TableDO', () => {
         ['_id', 'name'],
         ['row-1', 'Ada'],
         ['row-2', 'Grace']
-      ]
+      ],
+      requestedRanges: []
     };
     vi.stubGlobal('fetch', createSheetsFetch(sheet));
     const env = createTestEnv();
@@ -229,6 +253,8 @@ describe('TableDO', () => {
       }
     );
 
+    sheet.requestedRanges = [];
+
     sheet.rows = [
       ['_id', 'name'],
       ['row-2', 'Grace'],
@@ -261,6 +287,7 @@ describe('TableDO', () => {
       ['row-2', 'Grace'],
       ['row-1', 'Ada Lovelace']
     ]);
+    expect(sheet.requestedRanges).not.toContain("'Users'");
   });
 
   it('rejects create-row requests when the managed id already exists', async () => {
@@ -268,7 +295,8 @@ describe('TableDO', () => {
       rows: [
         ['_id', 'name'],
         ['row-1', 'Ada']
-      ]
+      ],
+      requestedRanges: []
     };
     vi.stubGlobal('fetch', createSheetsFetch(sheet));
     const env = createTestEnv();
@@ -323,7 +351,8 @@ describe('TableDO', () => {
         ['_id', 'name', 'status'],
         ['row-1', 'Ada', 'active'],
         ['row-2', 'Grace', 'inactive']
-      ]
+      ],
+      requestedRanges: []
     };
     vi.stubGlobal('fetch', createSheetsFetch(sheet));
     const env = createTestEnv();
@@ -423,7 +452,8 @@ describe('TableDO', () => {
         ['_id', 'name'],
         ['row-1', 'Ada'],
         ['row-1', 'Grace']
-      ]
+      ],
+      requestedRanges: []
     };
     vi.stubGlobal('fetch', createSheetsFetch(sheet));
     const env = createTestEnv();
