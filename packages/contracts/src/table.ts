@@ -107,7 +107,7 @@ export const tableCacheStatusSchema = z.object({
 });
 
 export const listRowsQuerySchema = z.object({
-  limit: z.number().int().positive().max(500).optional(),
+  limit: z.coerce.number().int().positive().max(500).optional(),
   cursor: z.string().min(1).nullable().optional(),
   sort: z.string().min(1).nullable().optional(),
   fields: z.array(z.string().min(1)).nullable().optional(),
