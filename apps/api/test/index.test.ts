@@ -27,23 +27,34 @@ class FakeDurableObjectNamespace {
 
 function createEnv(): Env {
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
-    const body = (await request.json()) as { type: string; apiKeyId?: string; hash?: string };
+    const body = (await request.json()) as { type: string; apiKeyId?: string; hash?: string; projectSlug?: string | null };
 
     if (body.type === 'control.api-key.verify') {
       return Response.json({
         type: 'control.api-key.verify.result',
         result: {
-          record: body.apiKeyId === 'project-key'
-            ? {
-                id: 'project-key',
-                projectSlug: 'demo',
-                name: 'Demo key',
-                scopes: ['table:create', 'table:read'],
-                createdAt: '2026-04-26T00:00:00.000Z',
-                revokedAt: null,
-                lastUsedAt: null
-              }
-            : null
+          record:
+            body.apiKeyId === 'project-key'
+              ? {
+                  id: 'project-key',
+                  projectSlug: 'demo',
+                  name: 'Demo key',
+                  scopes: ['table:create', 'table:read'],
+                  createdAt: '2026-04-26T00:00:00.000Z',
+                  revokedAt: null,
+                  lastUsedAt: null
+                }
+              : body.apiKeyId === 'project-admin-key'
+                ? {
+                    id: 'project-admin-key',
+                    projectSlug: 'demo',
+                    name: 'Demo admin key',
+                    scopes: ['admin:projects', 'admin:keys', 'table:read'],
+                    createdAt: '2026-04-26T00:00:00.000Z',
+                    revokedAt: null,
+                    lastUsedAt: null
+                  }
+                : null
         }
       });
     }
@@ -80,7 +91,7 @@ function createEnv(): Env {
           data: [
             {
               id: 'project-key',
-              projectSlug: 'demo',
+              projectSlug: body.projectSlug ?? 'demo',
               name: 'Demo key',
               scopes: ['table:create', 'table:read'],
               createdAt: '2026-04-26T00:00:00.000Z',
@@ -88,6 +99,35 @@ function createEnv(): Env {
               lastUsedAt: null
             }
           ]
+        }
+      });
+    }
+
+    if (body.type === 'control.api-key.get') {
+      return Response.json({
+        type: 'control.api-key.get.result',
+        result: {
+          record: body.apiKeyId === 'project-key'
+            ? {
+                id: 'project-key',
+                projectSlug: 'demo',
+                name: 'Demo key',
+                scopes: ['table:create', 'table:read'],
+                createdAt: '2026-04-26T00:00:00.000Z',
+                revokedAt: null,
+                lastUsedAt: null
+              }
+            : body.apiKeyId === 'global-key'
+              ? {
+                  id: 'global-key',
+                  projectSlug: null,
+                  name: 'Global key',
+                  scopes: ['admin:keys'],
+                  createdAt: '2026-04-26T00:00:00.000Z',
+                  revokedAt: null,
+                  lastUsedAt: null
+                }
+              : null
         }
       });
     }
@@ -150,7 +190,11 @@ function createEnv(): Env {
   });
 
   const table = new FakeDurableObjectNamespace(() => async (request) => {
-    const body = (await request.json()) as { type: string; input?: { values?: Record<string, unknown> } };
+    const body = (await request.json()) as {
+      type: string;
+      input?: { values?: Record<string, unknown> };
+      query?: unknown;
+    };
 
     if (body.type === 'table.row.create') {
       return Response.json({
@@ -183,11 +227,24 @@ function createEnv(): Env {
       });
     }
 
+    if (body.type === 'table.rows.list') {
+      return Response.json({
+        type: 'table.rows.list.result',
+        result: {
+          data: body.query ? [{ id: 'row-1', rowNumber: 2, values: { matched: true } }] : [],
+          nextCursor: null
+        }
+      });
+    }
+
     return Response.json({
-      type: 'table.rows.list.result',
+      type: 'table.row.get.result',
       result: {
-        data: [],
-        nextCursor: null
+        data: {
+          id: 'row-1',
+          rowNumber: 2,
+          values: {}
+        }
       }
     });
   });
@@ -242,6 +299,21 @@ describe('api routes', () => {
         }
       ]
     });
+  });
+
+  it('rejects global project listing for project-scoped admin keys', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-admin-key.any-secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(401);
   });
 
   it('creates rows against the table durable object', async () => {
@@ -331,6 +403,44 @@ describe('api routes', () => {
     });
   });
 
+  it('rejects project-scoped key creation outside the caller project', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/keys',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer sfk_project-admin-key.any-secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: 'Wrong key',
+          projectSlug: 'other',
+          scopes: ['table:read']
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(401);
+  });
+
+  it('rejects revoking another project or global key with a project-scoped admin key', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/keys/global-key',
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer sfk_project-admin-key.any-secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(401);
+  });
+
   it('returns table cache status for admin requests', async () => {
     const app = createApp();
     const response = await app.request(
@@ -354,6 +464,33 @@ describe('api routes', () => {
         lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
         lastSyncError: null
       }
+    });
+  });
+
+  it('parses filter queries for row listing', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows?filter=%7B%22status%22%3A%7B%22eq%22%3A%22active%22%7D%7D',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: [
+        {
+          id: 'row-1',
+          rowNumber: 2,
+          values: {
+            matched: true
+          }
+        }
+      ],
+      nextCursor: null
     });
   });
 

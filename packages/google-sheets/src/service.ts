@@ -145,6 +145,12 @@ function buildRowEnvelope(config: GoogleSheetTableConfig, headers: readonly stri
   };
 }
 
+function trimHeaders(row: readonly string[] | undefined): string[] {
+  return (row ?? [])
+    .map((header) => header.trim())
+    .filter((header) => header.length > 0);
+}
+
 export class GoogleSheetsService {
   private readonly fetchImpl: FetchLike;
   private readonly oauthTokenUrl: string;
@@ -161,9 +167,7 @@ export class GoogleSheetsService {
 
   async readHeaders(config: GoogleSheetTableConfig): Promise<string[]> {
     const values = await this.readValues(config.spreadsheetId, `${escapeSheetName(config.sheetTabName)}!${config.headerRow}:${config.headerRow}`);
-    const headers = (values[0] ?? [])
-      .map((header) => header.trim())
-      .filter((header) => header.length > 0);
+    const headers = trimHeaders(values[0]);
 
     if (headers.length === 0) {
       throw new NotFoundError(`No headers found for table ${config.projectSlug}/${config.tableSlug}.`);
@@ -175,11 +179,12 @@ export class GoogleSheetsService {
   async readAllRows(config: GoogleSheetTableConfig): Promise<RowEnvelope[]> {
     const range = `${escapeSheetName(config.sheetTabName)}`;
     const values = await this.readValues(config.spreadsheetId, range);
-    const headers = (values[0] ?? []).map((header) => header.trim()).filter(Boolean);
+    const headerIndex = Math.max(config.headerRow - 1, 0);
+    const dataIndex = Math.max(config.dataStartRow - 1, headerIndex + 1);
+    const headers = trimHeaders(values[headerIndex]);
     if (headers.length === 0) return [];
 
-    const rowOffset = Math.max(config.dataStartRow - config.headerRow - 1, 0);
-    const rows = values.slice(1 + rowOffset);
+    const rows = values.slice(dataIndex);
 
     return rows
       .map((cells, index) => buildRowEnvelope(config, headers, config.dataStartRow + index, cells))

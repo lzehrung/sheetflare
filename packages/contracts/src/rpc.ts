@@ -24,6 +24,7 @@ export type ControlPlaneDoRequest =
   | { type: 'control.project.upsert'; summary: { slug: string; name: string; spreadsheetId: string; tableCount: number; updatedAt: string } }
   | { type: 'control.api-key.create'; input: AdminCreateApiKeyInput }
   | { type: 'control.api-keys.list'; projectSlug?: string | null }
+  | { type: 'control.api-key.get'; apiKeyId: string }
   | { type: 'control.api-key.verify'; apiKeyId: string; hash: string }
   | { type: 'control.api-key.touch'; apiKeyId: string; usedAt: string }
   | { type: 'control.api-key.revoke'; apiKeyId: string; revokedAt: string };
@@ -33,6 +34,7 @@ export type ControlPlaneDoResponse =
   | { type: 'control.project.upsert.result'; result: { ok: true } }
   | { type: 'control.api-key.create.result'; result: AdminCreateApiKeyResult }
   | { type: 'control.api-keys.list.result'; result: AdminListApiKeysResult }
+  | { type: 'control.api-key.get.result'; result: { record: ApiKeyPrincipal | null } }
   | { type: 'control.api-key.verify.result'; result: { record: ApiKeyPrincipal | null } }
   | { type: 'control.api-key.touch.result'; result: { ok: true } }
   | { type: 'control.api-key.revoke.result'; result: { ok: true } };
