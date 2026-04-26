@@ -92,7 +92,7 @@ $env:SHEETFLARE_BASE_URL = "https://your-staging-worker.workers.dev"
 Set the bootstrap token locally:
 
 ```powershell
-$env:SHEETFLARE_ADMIN_BEARER = "<ADMIN_BEARER_TOKEN>"
+$env:SHEETFLARE_ADMIN_CREDENTIAL = "<ADMIN_BEARER_TOKEN>"
 ```
 
 Create a scoped admin key:
@@ -103,9 +103,16 @@ npm run ops:create-admin-key
 
 Keep the returned API key. Prefer it for routine admin use. Treat the bootstrap token as break-glass only.
 
+Optional faster path:
+
+- set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON`
+- run `npm run ops:bootstrap`
+
+That script can create projects, tables, and initial API keys in one pass.
+
 ## 7. Create staging projects and tables
 
-Use the admin UI or admin API to create:
+Use the admin API, or use `npm run ops:bootstrap`, to create:
 
 - one private project
 - one public-read project
@@ -155,7 +162,7 @@ npm run smoke:staging
 
 The smoke suite checks:
 
-- health endpoint
+- readiness endpoint
 - admin access
 - private-table anonymous rejection
 - private-table keyed reads
@@ -184,6 +191,12 @@ Create admin key:
 
 ```powershell
 npm run ops:create-admin-key
+```
+
+Bootstrap projects, tables, and keys:
+
+```powershell
+npm run ops:bootstrap
 ```
 
 Get cache status:

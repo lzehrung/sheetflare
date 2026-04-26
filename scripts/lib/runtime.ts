@@ -20,6 +20,26 @@ export function requireEnv(name: string) {
   return value;
 }
 
+export function getFirstEnv(...names: string[]) {
+  for (const name of names) {
+    const value = getEnv(name);
+    if (value) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+export function requireAdminCredential() {
+  const credential = getFirstEnv('SHEETFLARE_ADMIN_CREDENTIAL', 'SHEETFLARE_ADMIN_BEARER');
+  if (!credential) {
+    throw new ScriptError('Missing required environment variable SHEETFLARE_ADMIN_CREDENTIAL (or legacy SHEETFLARE_ADMIN_BEARER).');
+  }
+
+  return credential;
+}
+
 export function readJsonEnv<T>(name: string): T {
   const value = requireEnv(name);
   try {

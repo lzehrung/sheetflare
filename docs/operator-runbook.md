@@ -26,7 +26,7 @@ $env:SHEETFLARE_BASE_URL = "https://your-worker.example.workers.dev"
 2. Set the bootstrap bearer token:
 
 ```powershell
-$env:SHEETFLARE_ADMIN_BEARER = "<ADMIN_BEARER_TOKEN>"
+$env:SHEETFLARE_ADMIN_CREDENTIAL = "<ADMIN_BEARER_TOKEN>"
 ```
 
 3. Create a scoped admin key and stop using the bootstrap token for routine work:
@@ -36,7 +36,14 @@ $env:SHEETFLARE_ADMIN_KEY_NAME = "ops-admin"
 npm run ops:create-admin-key
 ```
 
+Bootstrap projects, tables, and API keys from one JSON config:
+
+```powershell
+npm run ops:bootstrap
+```
+
 Treat `ADMIN_BEARER_TOKEN` as break-glass only.
+For routine scripts, set `SHEETFLARE_ADMIN_CREDENTIAL` to the scoped admin API key instead.
 
 ## Check Cache Status
 
@@ -186,7 +193,7 @@ npm run smoke:staging
 
 The smoke script verifies:
 
-- health endpoint
+- readiness endpoint
 - admin route access
 - private-table anonymous rejection
 - private-table keyed reads
