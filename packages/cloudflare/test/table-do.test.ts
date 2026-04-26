@@ -909,18 +909,75 @@ describe('TableDO', () => {
       doRpc<TableDoResponse>(
         env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
         {
-          type: 'table.row.update',
+          type: 'table.rows.list',
           projectSlug: 'demo',
           tableSlug: 'users',
-          rowId: 'row-1',
-          input: {
-            values: {
-              name: 'Broken'
-            }
-          }
+          query: {}
         }
       )
     ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  it('includes header-defined fields in schema output even when rows are empty or sparse', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name', 'status', 'notes'],
+        ['row-1', 'Ada', 'active', ''],
+        ['row-2', 'Grace', '', '']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'secondary'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.schema.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect(response).toMatchObject({
+      type: 'table.schema.get.result',
+      result: {
+        data: {
+          fields: [
+            { name: '_id', inferredType: 'string', nullable: false },
+            { name: 'name', inferredType: 'string', nullable: false },
+            { name: 'notes', inferredType: 'unknown', nullable: true },
+            { name: 'status', inferredType: 'json', nullable: true }
+          ]
+        }
+      }
+    });
   });
 
   it('keeps scan-based pagination stable when the cursor row disappears between pages', async () => {

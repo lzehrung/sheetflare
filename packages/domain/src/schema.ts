@@ -22,11 +22,18 @@ function inferScalarType(value: unknown): TableSchemaField['inferredType'] {
   return 'string';
 }
 
-export function inferTableSchema(rows: readonly RowEnvelope[]) {
+export function inferTableSchema(headers: readonly string[], rows: readonly RowEnvelope[]) {
   const fieldState = new Map<
     string,
     { inferredType: TableSchemaField['inferredType']; nullable: boolean }
   >();
+
+  for (const header of headers) {
+    fieldState.set(header, {
+      inferredType: 'unknown',
+      nullable: false
+    });
+  }
 
   for (const row of rows) {
     for (const [name, value] of Object.entries(row.values)) {
@@ -54,7 +61,7 @@ export function inferTableSchema(rows: readonly RowEnvelope[]) {
       .map(([name, value]) => ({
         name,
         inferredType: value.inferredType,
-        nullable: value.nullable
+        nullable: value.inferredType === 'unknown' ? true : value.nullable
       })),
     inferredAt: new Date().toISOString()
   };

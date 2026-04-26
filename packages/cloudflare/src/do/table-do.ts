@@ -68,6 +68,24 @@ type ResolvedTableConfig = GoogleSheetTableConfig & {
 
 const maxFullScanRows = 10_000;
 
+function assertUniqueManagedRowIds(rows: readonly RowEnvelope[], idColumn: string) {
+  const seen = new Map<string, number>();
+  for (const row of rows) {
+    const duplicateRowNumber = seen.get(row.id);
+    if (duplicateRowNumber !== undefined) {
+      throw new BadRequestError(`Duplicate managed row id detected for ${row.id}.`, {
+        rowId: row.id,
+        duplicateRowCount: 2,
+        firstRowNumber: duplicateRowNumber,
+        secondRowNumber: row.rowNumber,
+        idColumn
+      });
+    }
+
+    seen.set(row.id, row.rowNumber);
+  }
+}
+
 function buildCacheConfigSignature(config: {
   spreadsheetId: string;
   googleCredentialRef: string;
@@ -413,9 +431,10 @@ export class TableDO {
     }
 
     await this.ensureCacheReady(config);
+    const headers = await this.getHeaders(config);
     const rows = this.listCachedRows();
     return {
-      data: inferTableSchema(rows.slice(0, 100))
+      data: inferTableSchema(headers, rows.slice(0, 100))
     };
   }
 
@@ -493,6 +512,7 @@ export class TableDO {
       const sheets = this.getSheetsClient(config);
       const headers = await sheets.readHeaders(config);
       const rows = await sheets.readAllRows(config);
+      assertUniqueManagedRowIds(rows, config.idColumn);
 
       this.ctx.storage.sql.exec(`DELETE FROM row_index`);
       this.ctx.storage.sql.exec(`DELETE FROM cached_rows`);

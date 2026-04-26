@@ -8,6 +8,12 @@ describe('inferTableSchema', () => {
 
     expect(
       inferTableSchema([
+        'active',
+        'createdAt',
+        'score',
+        'tags',
+        'notes'
+      ], [
         {
           id: '1',
           rowNumber: 2,
@@ -33,6 +39,7 @@ describe('inferTableSchema', () => {
       fields: [
         { name: 'active', inferredType: 'boolean', nullable: false },
         { name: 'createdAt', inferredType: 'datetime', nullable: false },
+        { name: 'notes', inferredType: 'unknown', nullable: true },
         { name: 'score', inferredType: 'number', nullable: false },
         { name: 'tags', inferredType: 'json', nullable: true }
       ],
