@@ -7,6 +7,7 @@ export interface CloudflareEnv {
   RATE_LIMIT_DO: DurableObjectNamespace;
   GOOGLE_CLIENT_EMAIL: string;
   GOOGLE_PRIVATE_KEY: string;
+  GOOGLE_CREDENTIALS_JSON?: string;
   ADMIN_BEARER_TOKEN?: string;
   RATE_LIMIT_MAX_REQUESTS?: string;
   RATE_LIMIT_WINDOW_SECONDS?: string;

@@ -12,5 +12,9 @@
     "@sheetflare/contracts": "*",
     "@sheetflare/domain": "*",
     "@sheetflare/google-sheets": "*"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.9.0"
   }
 }

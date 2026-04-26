@@ -210,7 +210,7 @@ function getRateLimitConfiguration(env: Env) {
   };
 }
 
-function getRateLimitKey(c: { req: { header(name: string): string | undefined; method: string; path: string } ; env: Env }) {
+function getRateLimitPrincipal(c: { req: { header(name: string): string | undefined; method: string; path: string } ; env: Env }) {
   const authorization = c.req.header('authorization');
   if (authorization?.startsWith('Bearer ')) {
     const credential = authorization.slice('Bearer '.length).trim();
@@ -232,16 +232,25 @@ function getRateLimitKey(c: { req: { header(name: string): string | undefined; m
   return `client:${forwardedFor}`;
 }
 
+function getRateLimitRouteFamily(path: string) {
+  if (path.startsWith('/v1/admin/')) {
+    return 'admin';
+  }
+
+  return 'data';
+}
+
 async function enforceRateLimit(c: { req: { header(name: string): string | undefined; method: string; path: string }; env: Env }) {
   const config = getRateLimitConfiguration(c.env);
   if (config.maxRequests <= 0) {
     return;
   }
 
-  const key = getRateLimitKey(c);
+  const principal = getRateLimitPrincipal(c);
+  const routeFamily = getRateLimitRouteFamily(c.req.path);
   const response = await doRpc<RateLimitDoResponse>(getRateLimitStub(c.env), {
     type: 'rate-limit.check',
-    key: `${c.req.method}:${key}`,
+    key: `${routeFamily}:${c.req.method}:${principal}`,
     limit: config.maxRequests,
     windowSeconds: config.windowSeconds
   });
@@ -253,7 +262,8 @@ async function enforceRateLimit(c: { req: { header(name: string): string | undef
 
   if (!result.allowed) {
     throw new TooManyRequestsError('Rate limit exceeded.', {
-      key,
+      principal,
+      routeFamily,
       maxRequests: config.maxRequests,
       windowSeconds: config.windowSeconds,
       resetAt: new Date(result.resetAtMs).toISOString()

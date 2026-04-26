@@ -30,6 +30,7 @@ import {
 import { GoogleSheetsService, type GoogleSheetTableConfig } from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from '../types';
 import { doRpc } from '../rpc';
+import { resolveGoogleCredential } from '../google-credentials';
 
 type TableMetaRow = {
   key: string;
@@ -59,6 +60,10 @@ type SyncMeta = {
   lastSyncError: string | null;
 };
 
+type ResolvedTableConfig = GoogleSheetTableConfig & {
+  googleCredentialRef: string;
+};
+
 const maxFullScanRows = 10_000;
 
 function getProjectStub(env: CloudflareEnv, projectSlug: string) {
@@ -66,17 +71,13 @@ function getProjectStub(env: CloudflareEnv, projectSlug: string) {
 }
 
 export class TableDO {
-  private readonly sheets: GoogleSheetsService;
+  private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
   private activeSync: Promise<TableCacheStatus> | null = null;
 
   constructor(
     private readonly ctx: DurableObjectState,
     private readonly env: CloudflareEnv
   ) {
-    this.sheets = new GoogleSheetsService({
-      clientEmail: env.GOOGLE_CLIENT_EMAIL,
-      privateKey: env.GOOGLE_PRIVATE_KEY
-    });
     this.initialize();
   }
 
@@ -197,9 +198,9 @@ export class TableDO {
     }
   }
 
-  private async getTableConfig(projectSlug: string, tableSlug: string): Promise<GoogleSheetTableConfig> {
+  private async getTableConfig(projectSlug: string, tableSlug: string): Promise<ResolvedTableConfig> {
     const result = await doRpc<
-      { type: 'project.get.result'; result: { project: { spreadsheetId: string }; tables: TableConfig[] } }
+      { type: 'project.get.result'; result: { project: { spreadsheetId: string; googleCredentialRef: string }; tables: TableConfig[] } }
     >(getProjectStub(this.env, projectSlug), {
       type: 'project.get',
       projectSlug
@@ -212,8 +213,21 @@ export class TableDO {
 
     return {
       ...table,
-      spreadsheetId: result.result.project.spreadsheetId
+      spreadsheetId: result.result.project.spreadsheetId,
+      googleCredentialRef: result.result.project.googleCredentialRef
     };
+  }
+
+  private getSheetsClient(config: { googleCredentialRef: string }) {
+    const existing = this.sheetsByCredentialRef.get(config.googleCredentialRef);
+    if (existing) {
+      return existing;
+    }
+
+    const credential = resolveGoogleCredential(this.env, config.googleCredentialRef);
+    const service = new GoogleSheetsService(credential);
+    this.sheetsByCredentialRef.set(config.googleCredentialRef, service);
+    return service;
   }
 
   private async listRows(projectSlug: string, tableSlug: string, rawQuery: ListRowsQuery) {
@@ -268,7 +282,7 @@ export class TableDO {
       [config.idColumn]: rowId
     });
     const { values, ignoredKeys } = pickKnownColumns(normalizedValues, headers);
-    const rowNumber = await this.sheets.appendRow(config, headers, values);
+    const rowNumber = await this.getSheetsClient(config).appendRow(config, headers, values);
 
     this.upsertRowIndex(rowId, rowNumber);
     this.upsertCachedRow({
@@ -315,7 +329,7 @@ export class TableDO {
       [config.idColumn]: rowId
     });
     const { values, ignoredKeys } = pickKnownColumns(mergedValues, headers);
-    await this.sheets.writeRow(config, existingRow.rowNumber, headers, values);
+    await this.getSheetsClient(config).writeRow(config, existingRow.rowNumber, headers, values);
     this.upsertRowIndex(rowId, existingRow.rowNumber);
     this.upsertCachedRow({
       id: rowId,
@@ -350,7 +364,7 @@ export class TableDO {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
 
-    await this.sheets.deleteRow(config, existingRow.rowNumber);
+    await this.getSheetsClient(config).deleteRow(config, existingRow.rowNumber);
     this.deleteRowIndex(rowId);
     await this.syncCache(projectSlug, tableSlug, { force: true });
 
@@ -434,7 +448,7 @@ export class TableDO {
     }
   }
 
-  private async performSync(config: GoogleSheetTableConfig): Promise<TableCacheStatus> {
+  private async performSync(config: ResolvedTableConfig): Promise<TableCacheStatus> {
     const startedAt = new Date().toISOString();
     this.setSyncMeta({
       ...this.getSyncMeta(),
@@ -444,9 +458,10 @@ export class TableDO {
     });
 
     try {
-      const headers = await this.sheets.readHeaders(config);
+      const sheets = this.getSheetsClient(config);
+      const headers = await sheets.readHeaders(config);
       this.setMeta('headers', JSON.stringify(headers));
-      const rows = await this.sheets.readAllRows(config);
+      const rows = await sheets.readAllRows(config);
 
       this.ctx.storage.sql.exec(`DELETE FROM row_index`);
       this.ctx.storage.sql.exec(`DELETE FROM cached_rows`);
@@ -479,12 +494,12 @@ export class TableDO {
     }
   }
 
-  private async resolveRowById(config: GoogleSheetTableConfig, rowId: string): Promise<RowEnvelope | null> {
+  private async resolveRowById(config: ResolvedTableConfig, rowId: string): Promise<RowEnvelope | null> {
     await this.ensureCacheReady(config);
 
     const cached = this.getCachedRow(rowId);
     const rowNumberHint = cached?.rowNumber ?? this.lookupRowNumber(rowId);
-    const result = await this.sheets.findRowById(config, rowId, rowNumberHint);
+    const result = await this.getSheetsClient(config).findRowById(config, rowId, rowNumberHint);
     if (!result) {
       this.deleteRowIndex(rowId);
       this.deleteCachedRow(rowId);
@@ -576,13 +591,13 @@ export class TableDO {
     this.ctx.storage.sql.exec(`DELETE FROM cached_cells WHERE row_id = ?`, rowId);
   }
 
-  private async getHeaders(config: GoogleSheetTableConfig): Promise<string[]> {
+  private async getHeaders(config: ResolvedTableConfig): Promise<string[]> {
     const cachedHeaders = this.getMeta('headers');
     if (cachedHeaders) {
       return JSON.parse(cachedHeaders) as string[];
     }
 
-    const headers = await this.sheets.readHeaders(config);
+    const headers = await this.getSheetsClient(config).readHeaders(config);
     this.setMeta('headers', JSON.stringify(headers));
     return headers;
   }
