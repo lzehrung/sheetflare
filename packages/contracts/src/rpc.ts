@@ -1,5 +1,8 @@
 import type {
+  AdminCreateApiKeyInput,
+  AdminCreateApiKeyResult,
   AdminGetProjectResult,
+  AdminListApiKeysResult,
   AdminListProjectsResult,
   CreateProjectInput,
   CreateRowInput,
@@ -12,15 +15,26 @@ import type {
   UpdateRowResult,
   UpsertTableResult
 } from './api';
+import type { ApiKeyPrincipal } from './auth';
 import type { ListRowsQuery, ListRowsResult } from './table';
 
-export type RegistryDoRequest =
-  | { type: 'registry.projects.list' }
-  | { type: 'registry.project.upsert'; summary: { slug: string; name: string; spreadsheetId: string; tableCount: number; updatedAt: string } };
+export type ControlPlaneDoRequest =
+  | { type: 'control.projects.list' }
+  | { type: 'control.project.upsert'; summary: { slug: string; name: string; spreadsheetId: string; tableCount: number; updatedAt: string } }
+  | { type: 'control.api-key.create'; input: AdminCreateApiKeyInput }
+  | { type: 'control.api-keys.list'; projectSlug?: string | null }
+  | { type: 'control.api-key.verify'; apiKeyId: string; hash: string }
+  | { type: 'control.api-key.touch'; apiKeyId: string; usedAt: string }
+  | { type: 'control.api-key.revoke'; apiKeyId: string; revokedAt: string };
 
-export type RegistryDoResponse =
-  | { type: 'registry.projects.list.result'; result: AdminListProjectsResult }
-  | { type: 'registry.project.upsert.result'; result: { ok: true } };
+export type ControlPlaneDoResponse =
+  | { type: 'control.projects.list.result'; result: AdminListProjectsResult }
+  | { type: 'control.project.upsert.result'; result: { ok: true } }
+  | { type: 'control.api-key.create.result'; result: AdminCreateApiKeyResult }
+  | { type: 'control.api-keys.list.result'; result: AdminListApiKeysResult }
+  | { type: 'control.api-key.verify.result'; result: { record: ApiKeyPrincipal | null } }
+  | { type: 'control.api-key.touch.result'; result: { ok: true } }
+  | { type: 'control.api-key.revoke.result'; result: { ok: true } };
 
 export type ProjectDoRequest =
   | { type: 'project.get'; projectSlug: string }

@@ -1,5 +1,6 @@
 import {
   type AdminGetProjectResult,
+  type ControlPlaneDoResponse,
   type CreateProjectInput,
   type CreateTableInput,
   NotFoundError,
@@ -7,7 +8,6 @@ import {
   type ProjectDoRequest,
   type ProjectDoResponse,
   type ProjectSummary,
-  type RegistryDoResponse,
   type TableConfig
 } from '@sheetflare/contracts';
 import type { CloudflareEnv } from '../types';
@@ -40,8 +40,8 @@ type TableRow = {
   updated_at: string;
 };
 
-function getRegistryStub(env: CloudflareEnv) {
-  return env.REGISTRY_DO.get(env.REGISTRY_DO.idFromName('registry'));
+function getControlPlaneStub(env: CloudflareEnv) {
+  return env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
 }
 
 export class ProjectDO {
@@ -242,8 +242,8 @@ export class ProjectDO {
 
   private async syncRegistry(projectSlug: string) {
     const summary = this.getProjectSummary(projectSlug);
-    await doRpc<RegistryDoResponse>(getRegistryStub(this.env), {
-      type: 'registry.project.upsert',
+    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), {
+      type: 'control.project.upsert',
       summary
     });
   }

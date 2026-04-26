@@ -1,7 +1,7 @@
 import type { DurableObjectNamespace } from '@cloudflare/workers-types';
 
 export interface CloudflareEnv {
-  REGISTRY_DO: DurableObjectNamespace;
+  CONTROL_PLANE_DO: DurableObjectNamespace;
   PROJECT_DO: DurableObjectNamespace;
   TABLE_DO: DurableObjectNamespace;
   RATE_LIMIT_DO: DurableObjectNamespace;
