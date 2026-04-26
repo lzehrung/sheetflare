@@ -28,6 +28,7 @@ npm run smoke:staging
 ## Operator Scripts
 
 - `npm run ops:create-admin-key`
+- `npm run ops:bootstrap`
 - `npm run ops:cache`
 - `npm run ops:reindex`
 - `npm run smoke:staging`

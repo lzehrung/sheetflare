@@ -15,6 +15,7 @@
     "dev:api": "npm --workspace @sheetflare/api run dev",
     "dev:admin": "npm --workspace @sheetflare/admin run dev",
     "ops:create-admin-key": "tsx scripts/create-admin-key.ts",
+    "ops:bootstrap": "tsx scripts/bootstrap-staging.ts",
     "ops:cache": "tsx scripts/get-cache-status.ts",
     "ops:reindex": "tsx scripts/reindex-table.ts",
     "smoke:staging": "tsx scripts/smoke-staging.ts"

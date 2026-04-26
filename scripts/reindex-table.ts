@@ -1,8 +1,8 @@
-import { logStep, requestJson, requireEnv } from './lib/runtime';
+import { logStep, requestJson, requireAdminCredential, requireEnv } from './lib/runtime';
 
 async function main() {
   const baseUrl = requireEnv('SHEETFLARE_BASE_URL');
-  const bearer = requireEnv('SHEETFLARE_ADMIN_BEARER');
+  const bearer = requireAdminCredential();
   const project = requireEnv('SHEETFLARE_PROJECT');
   const table = requireEnv('SHEETFLARE_TABLE');
 

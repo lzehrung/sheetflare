@@ -56,7 +56,7 @@ Set non-secret vars in `apps/api/wrangler.jsonc` or via your deployment system.
 
 ```powershell
 $env:SHEETFLARE_BASE_URL = "https://your-worker.example.workers.dev"
-$env:SHEETFLARE_ADMIN_BEARER = "<ADMIN_BEARER_TOKEN>"
+$env:SHEETFLARE_ADMIN_CREDENTIAL = "<ADMIN_BEARER_TOKEN>"
 ```
 
 2. Run the staging smoke suite:
@@ -78,7 +78,7 @@ npm run ops:cache
 The smoke suite expects:
 
 - `SHEETFLARE_BASE_URL`
-- `SHEETFLARE_ADMIN_BEARER`
+- `SHEETFLARE_ADMIN_CREDENTIAL`
 - `SHEETFLARE_PRIVATE_PROJECT`
 - `SHEETFLARE_PRIVATE_TABLE`
 - `SHEETFLARE_PRIVATE_READ_KEY`

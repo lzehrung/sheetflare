@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ScriptError, requestJson } from './runtime';
+import { ScriptError, getFirstEnv, requestJson, requireAdminCredential } from './runtime';
 
 describe('requestJson', () => {
   afterEach(() => {
@@ -49,6 +49,39 @@ describe('requestJson', () => {
       })
     ).rejects.toThrow(
       'Expected GET /health to return JSON, received invalid JSON body: <html>oops</html>'
+    );
+  });
+});
+
+describe('admin credential helpers', () => {
+  afterEach(() => {
+    delete process.env.SHEETFLARE_ADMIN_CREDENTIAL;
+    delete process.env.SHEETFLARE_ADMIN_BEARER;
+  });
+
+  it('prefers the generic admin credential env var', () => {
+    process.env.SHEETFLARE_ADMIN_CREDENTIAL = 'sfk_admin.secret';
+    process.env.SHEETFLARE_ADMIN_BEARER = 'legacy-token';
+
+    expect(requireAdminCredential()).toBe('sfk_admin.secret');
+  });
+
+  it('falls back to the legacy bootstrap env var', () => {
+    process.env.SHEETFLARE_ADMIN_BEARER = 'legacy-token';
+
+    expect(requireAdminCredential()).toBe('legacy-token');
+  });
+
+  it('returns the first configured env var', () => {
+    process.env.A = '';
+    process.env.B = 'value-b';
+
+    expect(getFirstEnv('A', 'B', 'C')).toBe('value-b');
+  });
+
+  it('throws when no admin credential env var exists', () => {
+    expect(() => requireAdminCredential()).toThrow(
+      'Missing required environment variable SHEETFLARE_ADMIN_CREDENTIAL (or legacy SHEETFLARE_ADMIN_BEARER).'
     );
   });
 });

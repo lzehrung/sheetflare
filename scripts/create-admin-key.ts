@@ -1,4 +1,4 @@
-import { assertPresent, logStep, logSuccess, readJsonEnv, requestJson, requireEnv } from './lib/runtime';
+import { assertPresent, logStep, logSuccess, readJsonEnv, requestJson, requireAdminCredential, requireEnv } from './lib/runtime';
 
 type CreateApiKeyResponse = {
   apiKey: string;
@@ -12,7 +12,7 @@ type CreateApiKeyResponse = {
 
 async function main() {
   const baseUrl = requireEnv('SHEETFLARE_BASE_URL');
-  const bearer = requireEnv('SHEETFLARE_ADMIN_BEARER');
+  const bearer = requireAdminCredential();
   const name = process.env.SHEETFLARE_ADMIN_KEY_NAME?.trim() || 'staging-admin';
   const scopes = process.env.SHEETFLARE_ADMIN_KEY_SCOPES?.trim()
     ? process.env.SHEETFLARE_ADMIN_KEY_SCOPES.split(',').map((entry) => entry.trim()).filter(Boolean)
