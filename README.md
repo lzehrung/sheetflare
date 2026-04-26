@@ -48,6 +48,7 @@ Credential model:
 - By default, projects use the shared gateway credential ref: `default`.
 - `default` resolves to `GOOGLE_CLIENT_EMAIL` + `GOOGLE_PRIVATE_KEY`.
 - `GOOGLE_CREDENTIALS_JSON` is optional and allows named per-project refs without changing the API shape.
+- Project creation validates the referenced credential immediately, so bad named refs fail in the control plane instead of later on the data plane.
 - Example:
   `{"analytics":{"clientEmail":"svc@example.com","privateKey":"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"}}`
 
@@ -84,6 +85,7 @@ The response includes the full API key exactly once.
 
 - Managed tables require a stable ID column.
 - The gateway treats row numbers as a cache only.
+- Row creation rejects duplicate managed IDs.
 - Updates and deletes re-resolve rows by ID before mutating the sheet, which keeps the system correct when rows are re-ordered manually in Google Sheets.
 
 ## Cache And Sync
@@ -98,6 +100,7 @@ The response includes the full API key exactly once.
   - sync metadata
 - Writes update the cache immediately after successful upstream mutation.
 - Deletes force a full sync afterward so row numbers stay consistent.
+- Table config changes that affect cache shape, indexing, or sheet layout automatically mark the cache stale and force a resync on the next read or write.
 
 Operator endpoints:
 
@@ -146,4 +149,5 @@ Performance notes:
 - Google Sheets read paths use bounded retry/backoff for transient upstream failures, while mutation paths avoid automatic replay to reduce duplicate-write risk.
 - Non-timeout transport failures are reported distinctly from actual request timeouts.
 - Rate limits are bucketed by route family (`admin` vs `data`) so normal data traffic does not consume the same budget as control-plane reads from the same principal.
+- Rate-limit principals are derived only from verified credentials; unverified API-key-shaped strings fall back to the anonymous/IP bucket.
 - `npm run build`, `npm run typecheck`, and `npm test` all pass from the repo root.

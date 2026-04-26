@@ -575,6 +575,26 @@ describe('api routes', () => {
     ]);
   });
 
+  it('falls back to the anonymous client bucket for unverified api-key shaped credentials', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __rateLimitRequests: Array<{ key: string }> };
+
+    const response = await app.request(
+      '/v1/admin/projects',
+      {
+        headers: {
+          authorization: 'Bearer sfk_forged-key.any-secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(401);
+    expect(env.__rateLimitRequests.map((entry) => entry.key)).toEqual([
+      'admin:GET:client:anonymous'
+    ]);
+  });
+
   it('serves an OpenAPI document with the expected API surface', async () => {
     const app = createApp();
     const response = await app.request('/doc', {}, createEnv());

@@ -12,7 +12,7 @@ import {
 } from '@sheetflare/contracts';
 import type { CloudflareEnv } from '../types';
 import { doRpc } from '../rpc';
-import { defaultGoogleCredentialRef } from '../google-credentials';
+import { defaultGoogleCredentialRef, resolveGoogleCredential } from '../google-credentials';
 
 type ProjectRow = {
   slug: string;
@@ -137,6 +137,9 @@ export class ProjectDO {
 
   private async createProject(input: CreateProjectInput): Promise<AdminGetProjectResult> {
     const now = new Date().toISOString();
+    const googleCredentialRef = input.googleCredentialRef ?? defaultGoogleCredentialRef;
+
+    resolveGoogleCredential(this.env, googleCredentialRef);
 
     this.ctx.storage.sql.exec(
       `
@@ -153,7 +156,7 @@ export class ProjectDO {
       input.slug,
       input.name,
       input.spreadsheetId,
-      input.googleCredentialRef ?? defaultGoogleCredentialRef,
+      googleCredentialRef,
       input.defaultAuthMode ?? 'private',
       now,
       now

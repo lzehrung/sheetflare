@@ -200,6 +200,30 @@ function parseApiKey(value: string) {
   };
 }
 
+async function verifyApiKeyCredential(env: Env, credential: string): Promise<ApiKeyPrincipal | null> {
+  if (!credential.startsWith('sfk_')) {
+    return null;
+  }
+
+  let parsed: ReturnType<typeof parseApiKey>;
+  try {
+    parsed = parseApiKey(credential);
+  } catch {
+    return null;
+  }
+
+  const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
+    type: 'control.api-key.verify',
+    apiKeyId: parsed.apiKeyId,
+    hash: await hashApiKeySecret(parsed.secret)
+  });
+
+  return (response as {
+    type: 'control.api-key.verify.result';
+    result: { record: ApiKeyPrincipal | null };
+  }).result.record;
+}
+
 function getRateLimitConfiguration(env: Env) {
   const maxRequests = Number.parseInt(env.RATE_LIMIT_MAX_REQUESTS ?? '300', 10);
   const windowSeconds = Number.parseInt(env.RATE_LIMIT_WINDOW_SECONDS ?? '60', 10);
@@ -211,21 +235,6 @@ function getRateLimitConfiguration(env: Env) {
 }
 
 function getRateLimitPrincipal(c: { req: { header(name: string): string | undefined; method: string; path: string } ; env: Env }) {
-  const authorization = c.req.header('authorization');
-  if (authorization?.startsWith('Bearer ')) {
-    const credential = authorization.slice('Bearer '.length).trim();
-    if (c.env.ADMIN_BEARER_TOKEN && credential === c.env.ADMIN_BEARER_TOKEN) {
-      return 'bootstrap-admin';
-    }
-
-    if (credential.startsWith('sfk_')) {
-      const separatorIndex = credential.indexOf('.');
-      if (separatorIndex > 4) {
-        return `api-key:${credential.slice(4, separatorIndex)}`;
-      }
-    }
-  }
-
   const forwardedFor = c.req.header('cf-connecting-ip')
     ?? c.req.header('x-forwarded-for')?.split(',')[0]?.trim()
     ?? 'anonymous';
@@ -240,13 +249,30 @@ function getRateLimitRouteFamily(path: string) {
   return 'data';
 }
 
+async function resolveRateLimitPrincipal(c: { req: { header(name: string): string | undefined; method: string; path: string }; env: Env }) {
+  const authorization = c.req.header('authorization');
+  if (authorization?.startsWith('Bearer ')) {
+    const credential = authorization.slice('Bearer '.length).trim();
+    if (c.env.ADMIN_BEARER_TOKEN && credential === c.env.ADMIN_BEARER_TOKEN) {
+      return 'bootstrap-admin';
+    }
+
+    const record = await verifyApiKeyCredential(c.env, credential);
+    if (record) {
+      return `api-key:${record.id}`;
+    }
+  }
+
+  return getRateLimitPrincipal(c);
+}
+
 async function enforceRateLimit(c: { req: { header(name: string): string | undefined; method: string; path: string }; env: Env }) {
   const config = getRateLimitConfiguration(c.env);
   if (config.maxRequests <= 0) {
     return;
   }
 
-  const principal = getRateLimitPrincipal(c);
+  const principal = await resolveRateLimitPrincipal(c);
   const routeFamily = getRateLimitRouteFamily(c.req.path);
   const response = await doRpc<RateLimitDoResponse>(getRateLimitStub(c.env), {
     type: 'rate-limit.check',
@@ -295,18 +321,7 @@ async function authenticateRequest(c: { req: { header(name: string): string | un
     return { kind: 'bootstrap-admin' };
   }
 
-  const { apiKeyId, secret } = parseApiKey(credential);
-  const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
-    type: 'control.api-key.verify',
-    apiKeyId,
-    hash: await hashApiKeySecret(secret)
-  });
-
-  const record = (response as {
-    type: 'control.api-key.verify.result';
-    result: { record: ApiKeyPrincipal | null };
-  }).result.record;
-
+  const record = await verifyApiKeyCredential(c.env, credential);
   if (!record) {
     throw new UnauthorizedError('Invalid API key.');
   }
