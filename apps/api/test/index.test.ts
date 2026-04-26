@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { describe, expect, it, vi } from 'vitest';
 import type { Env } from '../src/env';
 import { createApp } from '../src/index';
@@ -354,5 +355,40 @@ describe('api routes', () => {
         lastSyncError: null
       }
     });
+  });
+
+  it('serves an OpenAPI document with the expected API surface', async () => {
+    const app = createApp();
+    const response = await app.request('/doc', {}, createEnv());
+
+    expect(response.status).toBe(200);
+    const document = z.object({
+      openapi: z.string(),
+      info: z.object({
+        title: z.string()
+      }),
+      paths: z.record(z.string(), z.unknown()),
+      components: z.object({
+        securitySchemes: z.record(z.string(), z.unknown())
+      }).optional()
+    }).parse(await response.json());
+
+    expect(document.openapi).toBe('3.0.0');
+    expect(document.info.title).toBe('Sheetflare API');
+    expect(document.paths['/v1/admin/projects']).toBeDefined();
+    expect(document.paths['/v1/projects/{project}/tables/{table}/rows']).toBeDefined();
+    expect(document.paths['/v1/admin/projects/{project}/tables/{table}/cache']).toBeDefined();
+    expect(document.components?.securitySchemes?.bearerAuth).toBeDefined();
+  });
+
+  it('serves the interactive docs page', async () => {
+    const app = createApp();
+    const response = await app.request('/docs', {}, createEnv());
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    const html = await response.text();
+    expect(html).toContain('Sheetflare API Docs');
+    expect(html).toContain('/doc');
   });
 });
