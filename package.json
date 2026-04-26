@@ -1,0 +1,24 @@
+{
+  "name": "sheetflare",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run -ws build",
+    "typecheck": "npm run -ws typecheck",
+    "test": "npm run -ws test",
+    "check": "npm run typecheck && npm run test",
+    "dev:api": "npm --workspace @sheetflare/api run dev",
+    "dev:admin": "npm --workspace @sheetflare/admin run dev"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260418.0",
+    "@types/node": "^24.9.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.5"
+  }
+}
