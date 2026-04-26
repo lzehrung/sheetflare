@@ -185,6 +185,11 @@ const badRequestResponse = {
   content: jsonContent(errorResponseSchema)
 } as const;
 
+const forbiddenResponse = {
+  description: 'Forbidden',
+  content: jsonContent(errorResponseSchema)
+} as const;
+
 const notFoundResponse = {
   description: 'Not found',
   content: jsonContent(errorResponseSchema)
@@ -606,6 +611,7 @@ const listRowsRoute = createRoute({
       content: jsonContent(listRowsResultSchema)
     },
     400: badRequestResponse,
+    403: forbiddenResponse,
     401: unauthorizedResponse,
     404: notFoundResponse
   }
@@ -624,6 +630,7 @@ const getSchemaRoute = createRoute({
       description: 'Get inferred table schema',
       content: jsonContent(getSchemaResultSchema)
     },
+    403: forbiddenResponse,
     401: unauthorizedResponse,
     404: notFoundResponse
   }
@@ -678,6 +685,7 @@ const getRowRoute = createRoute({
       description: 'Get one row by managed ID',
       content: jsonContent(getRowResultSchema)
     },
+    403: forbiddenResponse,
     401: unauthorizedResponse,
     404: notFoundResponse
   }
@@ -701,6 +709,7 @@ const createRowRoute = createRoute({
       content: jsonContent(createRowResultSchema)
     },
     400: badRequestResponse,
+    403: forbiddenResponse,
     401: unauthorizedResponse,
     404: notFoundResponse
   }
@@ -724,6 +733,7 @@ const updateRowRoute = createRoute({
       content: jsonContent(updateRowResultSchema)
     },
     400: badRequestResponse,
+    403: forbiddenResponse,
     401: unauthorizedResponse,
     404: notFoundResponse
   }
@@ -742,6 +752,7 @@ const deleteRowRoute = createRoute({
       description: 'Delete a row',
       content: jsonContent(deleteRowResultSchema)
     },
+    403: forbiddenResponse,
     401: unauthorizedResponse,
     404: notFoundResponse
   }

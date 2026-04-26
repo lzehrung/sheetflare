@@ -112,7 +112,7 @@ That script can create projects, tables, and initial API keys in one pass.
 
 ## 7. Create staging projects and tables
 
-Use the admin API, or use `npm run ops:bootstrap`, to create:
+Use the admin UI, the admin API, or `npm run ops:bootstrap` to create:
 
 - one private project
 - one public-read project
@@ -129,6 +129,14 @@ Set `defaultAuthMode`:
 
 - private project: `"private"`
 - public project: `"public-read"`
+
+The admin UI can now:
+
+- create projects
+- create tables
+- mint scoped API keys
+- inspect cache status
+- force reindex
 
 ## 8. Create the keys needed for smoke testing
 

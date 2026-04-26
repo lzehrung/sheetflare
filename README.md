@@ -128,9 +128,14 @@ Performance notes:
 
 ## Admin UI
 
-- The admin UI expects an operator credential and stores it locally in the browser.
+- The admin UI now supports the minimum real control-plane loop:
+  - create projects
+  - create tables
+  - create scoped API keys
+  - inspect cache status
+  - force reindex
+- Credential persistence is opt-in. You can use the UI in session-only mode or explicitly remember the credential in the browser.
 - Paste either the bootstrap admin token or a scoped admin API key into the auth panel.
-- This keeps the self-host default secure without requiring a separate proxy layer just to browse the control plane.
 
 ## Notes
 
