@@ -261,4 +261,147 @@ describe('GoogleSheetsService.readAllRows', () => {
       message: 'Google Sheets network request failed during fetch Google OAuth access token.'
     });
   });
+
+  it('preserves sparse header column positions when mapping row values', async () => {
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = decodeURIComponent(String(input));
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes("/values/'Users'")) {
+          return Response.json({
+            values: [
+              ['name', '', '_id'],
+              ['Ada', '', 'row-1']
+            ]
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    const rows = await service.readAllRows({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    });
+
+    expect(rows).toEqual([
+      {
+        id: 'row-1',
+        rowNumber: 2,
+        values: {
+          name: 'Ada',
+          _id: 'row-1'
+        }
+      }
+    ]);
+  });
+
+  it('finds rows by scanning only the managed id column when the hint is stale', async () => {
+    const requestedRanges: string[] = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = decodeURIComponent(String(input));
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        const range = url.match(/\/values\/([^?]+)/)?.[1] ?? null;
+        if (!range) {
+          throw new Error(`Unexpected request: ${url}`);
+        }
+
+        requestedRanges.push(range);
+
+        if (range === "'Users'!1:1") {
+          return Response.json({
+            values: [['name', '_id']]
+          });
+        }
+
+        if (range === "'Users'!2:2") {
+          return Response.json({
+            values: [['Ada', 'row-2']]
+          });
+        }
+
+        if (range === "'Users'!B2:B") {
+          return Response.json({
+            values: [['row-2'], ['row-1']]
+          });
+        }
+
+        if (range === "'Users'!3:3") {
+          return Response.json({
+            values: [['Grace', 'row-1']]
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    const result = await service.findRowById({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    }, 'row-1', 2);
+
+    expect(result).toEqual({
+      row: {
+        id: 'row-1',
+        rowNumber: 3,
+        values: {
+          name: 'Grace',
+          _id: 'row-1'
+        }
+      },
+      duplicateCount: 1
+    });
+    expect(requestedRanges).toEqual([
+      "'Users'!1:1",
+      "'Users'!2:2",
+      "'Users'!B2:B",
+      "'Users'!3:3"
+    ]);
+    expect(requestedRanges).not.toContain("'Users'");
+  });
 });
