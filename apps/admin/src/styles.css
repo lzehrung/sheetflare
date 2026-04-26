@@ -111,6 +111,16 @@ body {
   font: inherit;
 }
 
+.field select {
+  width: 100%;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--ink);
+  font: inherit;
+}
+
 .field input:focus {
   outline: 2px solid rgba(216, 95, 56, 0.2);
   border-color: rgba(216, 95, 56, 0.45);
@@ -120,6 +130,10 @@ body {
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.compactActions {
+  margin-top: 16px;
 }
 
 .actions button {
@@ -145,6 +159,61 @@ body {
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 16px;
   margin-top: 20px;
+}
+
+.splitPanel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.stack {
+  display: grid;
+  gap: 14px;
+}
+
+.compactStack {
+  margin-top: 16px;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+}
+
+.toggle input {
+  accent-color: var(--accent);
+}
+
+.selectableCard {
+  cursor: pointer;
+}
+
+.selectedCard {
+  outline: 2px solid rgba(216, 95, 56, 0.4);
+}
+
+.scopeGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.tableForm {
+  padding-bottom: 20px;
+}
+
+.success {
+  margin: 0;
+  color: #195b32;
+}
+
+.success code {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .card {
@@ -220,5 +289,9 @@ body {
   .cardTop {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .splitPanel {
+    grid-template-columns: 1fr;
   }
 }
