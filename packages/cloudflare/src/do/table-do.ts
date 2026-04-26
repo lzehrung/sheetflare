@@ -66,6 +66,28 @@ type ResolvedTableConfig = GoogleSheetTableConfig & {
 
 const maxFullScanRows = 10_000;
 
+function buildCacheConfigSignature(config: {
+  spreadsheetId: string;
+  googleCredentialRef: string;
+  sheetTabName: string;
+  sheetGid?: number | undefined;
+  idColumn: string;
+  indexedFields: readonly string[];
+  headerRow: number;
+  dataStartRow: number;
+}) {
+  return JSON.stringify({
+    spreadsheetId: config.spreadsheetId,
+    googleCredentialRef: config.googleCredentialRef,
+    sheetTabName: config.sheetTabName,
+    sheetGid: config.sheetGid ?? null,
+    idColumn: config.idColumn,
+    indexedFields: [...config.indexedFields].sort((left, right) => left.localeCompare(right)),
+    headerRow: config.headerRow,
+    dataStartRow: config.dataStartRow
+  });
+}
+
 function getProjectStub(env: CloudflareEnv, projectSlug: string) {
   return env.PROJECT_DO.get(env.PROJECT_DO.idFromName(`project:${projectSlug}`));
 }
@@ -277,6 +299,14 @@ export class TableDO {
     const headers = await this.getHeaders(config);
     const providedId = input[config.idColumn];
     const rowId = typeof providedId === 'string' && providedId.length > 0 ? providedId : generateRowId();
+    const existingRow = await this.resolveRowById(config, rowId);
+    if (existingRow) {
+      throw new BadRequestError(`Row ${rowId} already exists.`, {
+        rowId,
+        idColumn: config.idColumn
+      });
+    }
+
     const normalizedValues = normalizeRowValues({
       ...input,
       [config.idColumn]: rowId
@@ -295,7 +325,7 @@ export class TableDO {
       rowNumber,
       values
     });
-    this.markCacheFreshAfterMutation();
+    this.markCacheFreshAfterMutation(config);
 
     return {
       data: {
@@ -341,7 +371,7 @@ export class TableDO {
       rowNumber: existingRow.rowNumber,
       values
     });
-    this.markCacheFreshAfterMutation();
+    this.markCacheFreshAfterMutation(config);
 
     return {
       data: {
@@ -461,6 +491,7 @@ export class TableDO {
       const sheets = this.getSheetsClient(config);
       const headers = await sheets.readHeaders(config);
       this.setMeta('headers', JSON.stringify(headers));
+      this.setMeta('config.signature', buildCacheConfigSignature(config));
       const rows = await sheets.readAllRows(config);
 
       this.ctx.storage.sql.exec(`DELETE FROM row_index`);
@@ -647,12 +678,25 @@ export class TableDO {
     this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, key);
   }
 
-  private computeCacheStatus(config: GoogleSheetTableConfig): TableCacheStatus {
+  private computeCacheStatus(config: GoogleSheetTableConfig & { googleCredentialRef?: string }): TableCacheStatus {
     const meta = this.getSyncMeta();
     const lastSyncMs = meta.lastSyncCompletedAt ? Date.parse(meta.lastSyncCompletedAt) : Number.NaN;
+    const configSignature = 'googleCredentialRef' in config && config.googleCredentialRef
+      ? buildCacheConfigSignature({
+          spreadsheetId: config.spreadsheetId,
+          googleCredentialRef: config.googleCredentialRef,
+          sheetTabName: config.sheetTabName,
+          sheetGid: config.sheetGid,
+          idColumn: config.idColumn,
+          indexedFields: config.indexedFields,
+          headerRow: config.headerRow,
+          dataStartRow: config.dataStartRow
+        })
+      : null;
+    const signatureMatches = !configSignature || this.getMeta('config.signature') === configSignature;
     const stale = !meta.lastSyncCompletedAt || Number.isNaN(lastSyncMs)
       ? true
-      : Date.now() - lastSyncMs > config.cacheTtlSeconds * 1000;
+      : Date.now() - lastSyncMs > config.cacheTtlSeconds * 1000 || !signatureMatches;
 
     return {
       status: meta.status,
@@ -665,8 +709,9 @@ export class TableDO {
     };
   }
 
-  private markCacheFreshAfterMutation() {
+  private markCacheFreshAfterMutation(config: ResolvedTableConfig) {
     const now = new Date().toISOString();
+    this.setMeta('config.signature', buildCacheConfigSignature(config));
     this.setSyncMeta({
       status: 'ready',
       rowCount: this.countCachedRows(),

@@ -118,8 +118,8 @@ function createSheetsFetch(sheet: SheetState) {
 
 function createTestEnv() {
   const partialEnv: Partial<CloudflareEnv> = {
-    GOOGLE_CLIENT_EMAIL: '',
-    GOOGLE_PRIVATE_KEY: '',
+    GOOGLE_CLIENT_EMAIL: 'default@example.com',
+    GOOGLE_PRIVATE_KEY: testPrivateKey,
     GOOGLE_CREDENTIALS_JSON: JSON.stringify({
       secondary: {
         clientEmail: 'secondary@example.com',
@@ -157,6 +157,28 @@ describe('TableDO', () => {
     );
 
     expect((response as { type: 'project.create.result'; result: { project: { googleCredentialRef: string } } }).result.project.googleCredentialRef).toBe('default');
+  });
+
+  it('rejects project creation when a named credential ref is missing', async () => {
+    const env = createTestEnv();
+
+    await expect(
+      doRpc<ProjectDoResponse>(
+        env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+        {
+          type: 'project.create',
+          input: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'missing'
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'NotFoundError',
+      message: 'Google credential "missing" was not found.'
+    });
   });
 
   it('re-resolves stale row numbers by ID before updating', async () => {
@@ -239,6 +261,160 @@ describe('TableDO', () => {
       ['row-2', 'Grace'],
       ['row-1', 'Ada Lovelace']
     ]);
+  });
+
+  it('rejects create-row requests when the managed id already exists', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ]
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'secondary'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.row.create',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          input: {
+            values: {
+              _id: 'row-1',
+              name: 'Duplicate'
+            }
+          }
+        }
+      )
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  it('rebuilds cached indexes when table config changes', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name', 'status'],
+        ['row-1', 'Ada', 'active'],
+        ['row-2', 'Grace', 'inactive']
+      ]
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'secondary'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['name'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['name', 'status'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const cacheStatus = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect((cacheStatus as {
+      type: 'table.cache.get.result';
+      result: { data: { stale: boolean } };
+    }).result.data.stale).toBe(true);
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          filter: {
+            status: {
+              eq: 'active'
+            }
+          }
+        }
+      }
+    );
+
+    const listed = response as {
+      type: 'table.rows.list.result';
+      result: { data: Array<{ id: string }> };
+    };
+
+    expect(listed.result.data.map((row) => row.id)).toEqual(['row-1']);
   });
 
   it('fails hard when duplicate managed IDs are detected upstream', async () => {
