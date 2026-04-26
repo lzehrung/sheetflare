@@ -38,6 +38,16 @@ export const tableSchemaSchema = z.object({
   inferredAt: z.string().datetime()
 });
 
+export const tableCacheStatusSchema = z.object({
+  status: z.enum(['idle', 'syncing', 'ready', 'error']),
+  cacheTtlSeconds: z.number().int().nonnegative(),
+  stale: z.boolean(),
+  rowCount: z.number().int().nonnegative(),
+  lastSyncStartedAt: z.string().datetime().nullable(),
+  lastSyncCompletedAt: z.string().datetime().nullable(),
+  lastSyncError: z.string().nullable()
+});
+
 export const listRowsQuerySchema = z.object({
   limit: z.number().int().positive().max(500).optional(),
   cursor: z.string().min(1).nullable().optional(),
@@ -56,5 +66,6 @@ export type RowRecord = z.infer<typeof rowRecordSchema>;
 export type RowEnvelope = z.infer<typeof rowEnvelopeSchema>;
 export type TableSchemaField = z.infer<typeof tableSchemaFieldSchema>;
 export type TableSchema = z.infer<typeof tableSchemaSchema>;
+export type TableCacheStatus = z.infer<typeof tableCacheStatusSchema>;
 export type ListRowsQuery = z.infer<typeof listRowsQuerySchema>;
 export type ListRowsResult = z.infer<typeof listRowsResultSchema>;

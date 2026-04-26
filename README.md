@@ -59,6 +59,26 @@ The response includes the full API key exactly once.
 - The gateway treats row numbers as a cache only.
 - Updates and deletes re-resolve rows by ID before mutating the sheet, which keeps the system correct when rows are re-ordered manually in Google Sheets.
 
+## Cache And Sync
+
+- Each table durable object maintains a materialized row cache in Durable Object SQLite.
+- Normal reads (`list`, `get`, `schema`) use cached rows instead of rescanning Google Sheets.
+- Cache freshness is controlled by `cacheTtlSeconds` on the table config.
+- When the cache is cold or stale, the table durable object performs a sync from Google Sheets and refreshes:
+  - cached rows
+  - row ID to row number index
+  - cached headers
+  - sync metadata
+- Writes update the cache immediately after successful upstream mutation.
+- Deletes force a full sync afterward so row numbers stay consistent.
+
+Operator endpoints:
+
+- `POST /v1/admin/projects/:project/tables/:table/reindex`
+  Forces a full sync and returns cache status metadata.
+- `GET /v1/admin/projects/:project/tables/:table/cache`
+  Returns current cache status, row count, staleness, and last sync timestamps.
+
 ## Notes
 
 - Project listing and API keys are handled by a dedicated `ControlPlaneDO`.
