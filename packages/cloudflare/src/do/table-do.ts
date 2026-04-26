@@ -15,6 +15,8 @@ import {
 import {
   assertQueryableField,
   buildFilterSql,
+  compareQueryValues,
+  compareRangeQueryValues,
   decodeQueryCursor,
   encodeQueryCursor,
   generateRowId,
@@ -490,8 +492,6 @@ export class TableDO {
     try {
       const sheets = this.getSheetsClient(config);
       const headers = await sheets.readHeaders(config);
-      this.setMeta('headers', JSON.stringify(headers));
-      this.setMeta('config.signature', buildCacheConfigSignature(config));
       const rows = await sheets.readAllRows(config);
 
       this.ctx.storage.sql.exec(`DELETE FROM row_index`);
@@ -503,6 +503,9 @@ export class TableDO {
         this.upsertCachedRow(row);
         this.upsertCachedCells(config, row);
       }
+
+      this.setMeta('headers', JSON.stringify(headers));
+      this.setMeta('config.signature', buildCacheConfigSignature(config));
 
       const completedAt = new Date().toISOString();
       this.setSyncMeta({
@@ -886,10 +889,11 @@ export class TableDO {
     const sorted = sortRows(rows, query.sort);
 
     const startIndex = cursor
-      ? sorted.findIndex((row) => row.id === cursor.rowId) + 1
+      ? sorted.findIndex((row) => this.isRowAfterScanCursor(row, query.sort.field, query.sort.direction, cursor))
       : 0;
-    const page = sorted.slice(startIndex, startIndex + query.limit);
-    const hasMore = startIndex + query.limit < sorted.length;
+    const normalizedStartIndex = startIndex === -1 ? sorted.length : startIndex;
+    const page = sorted.slice(normalizedStartIndex, normalizedStartIndex + query.limit);
+    const hasMore = normalizedStartIndex + query.limit < sorted.length;
     const lastRow = page.at(-1);
 
     return {
@@ -1096,15 +1100,64 @@ export class TableDO {
     expected: string | number,
     operator: '>' | '>=' | '<' | '<='
   ) {
-    if (value === null || Array.isArray(value) || typeof value === 'boolean') {
+    const comparison = compareRangeQueryValues(value, expected);
+    if (comparison === null) {
       return false;
     }
 
-    if (typeof value === 'number' && typeof expected === 'number') {
-      return evaluateComparison(value, expected, operator);
+    return evaluateComparison(comparison, 0, operator);
+  }
+
+  private isRowAfterScanCursor(
+    row: RowEnvelope,
+    sortField: string,
+    direction: 'asc' | 'desc',
+    cursor: NonNullable<ReturnType<typeof decodeQueryCursor>>
+  ) {
+    const valueComparison = this.compareScanCursorValue(
+      sortField === 'rowNumber'
+        ? row.rowNumber
+        : sortField === 'id'
+          ? row.id
+          : this.normalizeCursorSourceValue(row.values[sortField]),
+      cursor
+    );
+
+    if (valueComparison !== 0) {
+      return direction === 'desc' ? valueComparison < 0 : valueComparison > 0;
     }
 
-    return evaluateComparison(String(value), String(expected), operator);
+    if (sortField === 'rowNumber') {
+      const rowNumberComparison = row.rowNumber - cursor.rowNumber;
+      if (rowNumberComparison !== 0) {
+        return direction === 'desc' ? rowNumberComparison < 0 : rowNumberComparison > 0;
+      }
+    }
+
+    const rowIdComparison = row.id.localeCompare(cursor.rowId);
+    return direction === 'desc' ? rowIdComparison < 0 : rowIdComparison > 0;
+  }
+
+  private compareScanCursorValue(
+    value: RowRecord[string] | string | number | null,
+    cursor: NonNullable<ReturnType<typeof decodeQueryCursor>>
+  ) {
+    if (cursor.sortField === 'rowNumber') {
+      return Number(value) - cursor.rowNumber;
+    }
+
+    if (cursor.sortField === 'id') {
+      return String(value ?? '').localeCompare(cursor.rowId);
+    }
+
+    const comparableValue = Array.isArray(value) ? JSON.stringify(value) : value;
+    const cursorValue = cursor.value.kind === 'null'
+      ? null
+      : cursor.value.kind === 'boolean' || cursor.value.kind === 'number' || cursor.value.kind === 'string'
+        ? cursor.value.value
+        : null;
+
+    return compareQueryValues(comparableValue, cursorValue);
   }
 }
 

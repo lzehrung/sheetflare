@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { createApiKeyInputSchema, createApiKeyResultSchema, apiKeyPrincipalSchema } from './auth';
-import { defaultAuthModeSchema, projectConfigSchema, tableConfigSchema } from './project';
+import { defaultAuthModeSchema, maxIndexedFieldCount, projectConfigSchema, tableConfigSchema } from './project';
 import { apiKeyIdSchema, projectSlugSchema, rowIdSchema, spreadsheetIdSchema, tableSlugSchema } from './ids';
 import { listRowsResultSchema, rowEnvelopeSchema, rowRecordSchema, tableCacheStatusSchema, tableSchemaSchema } from './table';
 
@@ -17,7 +17,7 @@ export const createTableInputSchema = z.object({
   sheetTabName: z.string().min(1),
   sheetGid: z.number().int().nonnegative().optional(),
   idColumn: z.string().min(1).optional(),
-  indexedFields: z.array(z.string().min(1)).max(32).optional(),
+  indexedFields: z.array(z.string().min(1)).max(maxIndexedFieldCount).optional(),
   headerRow: z.number().int().positive().optional(),
   dataStartRow: z.number().int().positive().optional(),
   readEnabled: z.boolean().optional(),
@@ -25,6 +25,26 @@ export const createTableInputSchema = z.object({
   updateEnabled: z.boolean().optional(),
   deleteEnabled: z.boolean().optional(),
   cacheTtlSeconds: z.number().int().nonnegative().optional()
+}).superRefine((value, ctx) => {
+  const headerRow = value.headerRow ?? 1;
+  const dataStartRow = value.dataStartRow ?? 2;
+  if (dataStartRow <= headerRow) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'dataStartRow must be greater than headerRow.',
+      path: ['dataStartRow']
+    });
+  }
+
+  const idColumn = value.idColumn ?? '_id';
+  const indexedFields = new Set<string>([idColumn, ...(value.indexedFields ?? [])]);
+  if (indexedFields.size > maxIndexedFieldCount) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `A table may index at most ${maxIndexedFieldCount} fields including the managed ID column.`,
+      path: ['indexedFields']
+    });
+  }
 });
 
 export const createRowInputSchema = z.object({

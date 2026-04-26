@@ -155,12 +155,21 @@ function parseUpdatedRangeRowNumber(updatedRange: string | undefined): number {
 
 function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: string): HeaderLayout {
   const entries: HeaderLayoutEntry[] = [];
+  const seenHeaders = new Set<string>();
 
   for (const [index, rawHeader] of (headerRow ?? []).entries()) {
     const header = rawHeader.trim();
     if (!header) {
       continue;
     }
+
+    if (seenHeaders.has(header)) {
+      throw new BadRequestError(`Duplicate header "${header}" was found in the configured sheet header row.`, {
+        header
+      });
+    }
+
+    seenHeaders.add(header);
 
     entries.push({
       name: header,

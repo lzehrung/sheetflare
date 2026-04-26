@@ -84,6 +84,7 @@ The response includes the full API key exactly once.
 ## Row Identity
 
 - Managed tables require a stable ID column.
+- Header rows must not contain duplicate non-empty column names.
 - The gateway treats row numbers as a cache only.
 - Row creation rejects duplicate managed IDs.
 - Updates and deletes re-resolve rows by ID before mutating the sheet, which keeps the system correct when rows are re-ordered manually in Google Sheets.
@@ -94,6 +95,7 @@ The response includes the full API key exactly once.
 - Each table durable object maintains a materialized row cache in Durable Object SQLite.
 - Normal reads (`list`, `get`, `schema`) use cached rows instead of rescanning Google Sheets.
 - Cache freshness is controlled by `cacheTtlSeconds` on the table config.
+- Table layout must be explicit and valid: `dataStartRow` must be greater than `headerRow`.
 - When the cache is cold or stale, the table durable object performs a sync from Google Sheets and refreshes:
   - cached rows
   - row ID to row number index
