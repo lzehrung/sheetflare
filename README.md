@@ -87,6 +87,7 @@ The response includes the full API key exactly once.
 - The gateway treats row numbers as a cache only.
 - Row creation rejects duplicate managed IDs.
 - Updates and deletes re-resolve rows by ID before mutating the sheet, which keeps the system correct when rows are re-ordered manually in Google Sheets.
+- Mutation lookup uses a narrow scan of the managed ID column plus targeted row reads instead of rescanning full row payloads, which reduces write-path cost on larger sheets while preserving correctness.
 
 ## Cache And Sync
 
@@ -141,6 +142,7 @@ Performance notes:
 - Equality, range, `in`, and indexed sort retrieval use SQLite-backed cached cell indexes.
 - `contains` is supported, but it is scan-heavy. For safety, scan-heavy queries are rejected once a cached table grows beyond the built-in full-scan threshold.
 - If a filter or sort targets a non-indexed field, the API rejects it instead of silently doing an expensive query on large caches.
+- Mutation note: the write path is optimized separately from list/query execution. Update/delete/create-duplicate checks resolve IDs through the managed ID column, not through the cached query indexes.
 
 ## Notes
 
