@@ -27,10 +27,12 @@ class FakeDurableObjectNamespace {
 
 function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
   const rateLimitRequests: Array<{ key: string }> = [];
+  let verifyApiKeyCallCount = 0;
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
     const body = (await request.json()) as { type: string; apiKeyId?: string; hash?: string; projectSlug?: string | null };
 
     if (body.type === 'control.api-key.verify') {
+      verifyApiKeyCallCount += 1;
       return Response.json({
         type: 'control.api-key.verify.result',
         result: {
@@ -279,6 +281,10 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
     value: rateLimitRequests,
     enumerable: false
   });
+  Object.defineProperty(env, '__verifyApiKeyCallCount', {
+    get: () => verifyApiKeyCallCount,
+    enumerable: false
+  });
 
   return env;
 }
@@ -370,6 +376,9 @@ describe('api routes', () => {
       },
       ignoredKeys: []
     });
+    expect(response.headers.get('x-request-id')).toBeTruthy();
+    expect(response.headers.get('x-ratelimit-limit')).toBe('300');
+    expect(response.headers.get('x-ratelimit-remaining')).toBe('299');
   });
 
   it('rejects protected row creation without credentials', async () => {
@@ -620,6 +629,24 @@ describe('api routes', () => {
     expect(env.__rateLimitRequests.map((entry) => entry.key)).toEqual([
       'admin:GET:client:anonymous'
     ]);
+  });
+
+  it('verifies API-key credentials only once per request', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __verifyApiKeyCallCount: number };
+
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(env.__verifyApiKeyCallCount).toBe(1);
   });
 
   it('serves an OpenAPI document with the expected API surface', async () => {

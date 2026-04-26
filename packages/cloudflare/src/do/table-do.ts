@@ -62,11 +62,31 @@ type SyncMeta = {
   lastSyncError: string | null;
 };
 
+type CacheStaleReason = 'fresh' | 'never-synced' | 'ttl-expired' | 'config-changed' | 'error';
+
+type CacheState = TableCacheStatus & {
+  staleReason: CacheStaleReason;
+};
+
 type ResolvedTableConfig = GoogleSheetTableConfig & {
   googleCredentialRef: string;
 };
 
 const maxFullScanRows = 10_000;
+
+function getCacheTableNames(kind: 'live' | 'staging') {
+  return kind === 'live'
+    ? {
+        rowIndex: 'row_index',
+        cachedRows: 'cached_rows',
+        cachedCells: 'cached_cells'
+      }
+    : {
+        rowIndex: 'row_index_staging',
+        cachedRows: 'cached_rows_staging',
+        cachedCells: 'cached_cells_staging'
+      };
+}
 
 function assertUniqueManagedRowIds(rows: readonly RowEnvelope[], idColumn: string) {
   const seen = new Map<string, number>();
@@ -140,12 +160,33 @@ export class TableDO {
     `);
 
     this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS row_index_staging (
+        row_id TEXT PRIMARY KEY,
+        row_number INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+
+    this.ctx.storage.sql.exec(`
       CREATE INDEX IF NOT EXISTS idx_row_index_row_number
       ON row_index(row_number)
     `);
 
     this.ctx.storage.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_row_index_staging_row_number
+      ON row_index_staging(row_number)
+    `);
+
+    this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS cached_rows (
+        row_id TEXT PRIMARY KEY,
+        row_number INTEGER NOT NULL,
+        values_json TEXT NOT NULL
+      )
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS cached_rows_staging (
         row_id TEXT PRIMARY KEY,
         row_number INTEGER NOT NULL,
         values_json TEXT NOT NULL
@@ -158,7 +199,24 @@ export class TableDO {
     `);
 
     this.ctx.storage.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_cached_rows_staging_row_number
+      ON cached_rows_staging(row_number)
+    `);
+
+    this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS cached_cells (
+        row_id TEXT NOT NULL,
+        field_name TEXT NOT NULL,
+        value_kind TEXT NOT NULL,
+        value_text TEXT,
+        value_number REAL,
+        value_boolean INTEGER,
+        PRIMARY KEY (row_id, field_name)
+      )
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS cached_cells_staging (
         row_id TEXT NOT NULL,
         field_name TEXT NOT NULL,
         value_kind TEXT NOT NULL,
@@ -182,6 +240,21 @@ export class TableDO {
     this.ctx.storage.sql.exec(`
       CREATE INDEX IF NOT EXISTS idx_cached_cells_field_boolean
       ON cached_cells(field_name, value_boolean, row_id)
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_cached_cells_staging_field_text
+      ON cached_cells_staging(field_name, value_text, row_id)
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_cached_cells_staging_field_number
+      ON cached_cells_staging(field_name, value_number, row_id)
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_cached_cells_staging_field_boolean
+      ON cached_cells_staging(field_name, value_boolean, row_id)
     `);
   }
 
@@ -278,7 +351,7 @@ export class TableDO {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensureCacheReady(config);
+    await this.ensureQueryCacheReady(config);
     const result = this.queryCachedRows(config, rawQuery);
 
     return {
@@ -293,8 +366,8 @@ export class TableDO {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensureCacheReady(config);
-    let resolved = this.getCachedRow(rowId);
+    const cacheState = await this.ensurePointOperationReady(config);
+    let resolved = cacheState.staleReason === 'fresh' ? this.getCachedRow(rowId) : null;
     if (!resolved) {
       resolved = await this.resolveRowById(config, rowId);
     }
@@ -314,8 +387,10 @@ export class TableDO {
       throw new ForbiddenError(`Creates are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensureCacheReady(config);
-    const headers = await this.getHeaders(config);
+    const cacheState = await this.ensurePointOperationReady(config);
+    const headers = await this.getHeaders(config, {
+      bypassCache: cacheState.staleReason === 'ttl-expired'
+    });
     const providedId = input[config.idColumn];
     const rowId = typeof providedId === 'string' && providedId.length > 0 ? providedId : generateRowId();
     const existingRow = await this.resolveRowById(config, rowId);
@@ -362,8 +437,10 @@ export class TableDO {
       throw new ForbiddenError(`Updates are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensureCacheReady(config);
-    const headers = await this.getHeaders(config);
+    const cacheState = await this.ensurePointOperationReady(config);
+    const headers = await this.getHeaders(config, {
+      bypassCache: cacheState.staleReason === 'ttl-expired'
+    });
     const existingRow = await this.resolveRowById(config, rowId);
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
@@ -408,6 +485,7 @@ export class TableDO {
       throw new ForbiddenError(`Deletes are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
+    await this.ensurePointOperationReady(config);
     const existingRow = await this.resolveRowById(config, rowId);
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
@@ -430,7 +508,7 @@ export class TableDO {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensureCacheReady(config);
+    await this.ensureQueryCacheReady(config);
     const headers = await this.getHeaders(config);
     const rows = this.listCachedRows();
     return {
@@ -445,15 +523,26 @@ export class TableDO {
     };
   }
 
-  private async ensureCacheReady(config: GoogleSheetTableConfig) {
-    const cacheStatus = this.computeCacheStatus(config);
-    if (cacheStatus.status === 'ready' && !cacheStatus.stale) {
-      return cacheStatus;
+  private async ensureQueryCacheReady(config: GoogleSheetTableConfig) {
+    const cacheState = this.getCacheState(config);
+    if (cacheState.staleReason === 'fresh') {
+      return cacheState;
     }
 
-    return this.syncCache(config.projectSlug, config.tableSlug, {
-      force: cacheStatus.rowCount === 0 || cacheStatus.status === 'error'
+    await this.syncCache(config.projectSlug, config.tableSlug, {
+      force: cacheState.staleReason === 'never-synced' || cacheState.staleReason === 'error'
     });
+    return this.getCacheState(config);
+  }
+
+  private async ensurePointOperationReady(config: GoogleSheetTableConfig) {
+    const cacheState = this.getCacheState(config);
+    if (cacheState.staleReason === 'fresh' || cacheState.staleReason === 'ttl-expired') {
+      return cacheState;
+    }
+
+    await this.syncCache(config.projectSlug, config.tableSlug, { force: true });
+    return this.getCacheState(config);
   }
 
   private async syncCache(
@@ -501,6 +590,7 @@ export class TableDO {
 
   private async performSync(config: ResolvedTableConfig): Promise<TableCacheStatus> {
     const startedAt = new Date().toISOString();
+    const syncStartedAtMs = Date.now();
     this.setSyncMeta({
       ...this.getSyncMeta(),
       status: 'syncing',
@@ -513,21 +603,19 @@ export class TableDO {
       const headers = await sheets.readHeaders(config);
       const rows = await sheets.readAllRows(config);
       assertUniqueManagedRowIds(rows, config.idColumn);
-
-      this.ctx.storage.sql.exec(`DELETE FROM row_index`);
-      this.ctx.storage.sql.exec(`DELETE FROM cached_rows`);
-      this.ctx.storage.sql.exec(`DELETE FROM cached_cells`);
+      this.clearCacheTables('staging');
 
       for (const row of rows) {
-        this.upsertRowIndex(row.id, row.rowNumber);
-        this.upsertCachedRow(row);
-        this.upsertCachedCells(config, row);
+        this.upsertRowIndex(row.id, row.rowNumber, 'staging');
+        this.upsertCachedRow(row, 'staging');
+        this.upsertCachedCells(config, row, 'staging');
       }
 
-      this.setMeta('headers', JSON.stringify(headers));
-      this.setMeta('config.signature', buildCacheConfigSignature(config));
+      this.promoteStagingCache();
 
       const completedAt = new Date().toISOString();
+      this.setMeta('headers', JSON.stringify(headers));
+      this.setMeta('config.signature', buildCacheConfigSignature(config));
       this.setSyncMeta({
         status: 'ready',
         rowCount: rows.length,
@@ -535,22 +623,35 @@ export class TableDO {
         lastSyncCompletedAt: completedAt,
         lastSyncError: null
       });
+      console.info(JSON.stringify({
+        event: 'table.sync.complete',
+        projectSlug: config.projectSlug,
+        tableSlug: config.tableSlug,
+        rowCount: rows.length,
+        durationMs: Date.now() - syncStartedAtMs
+      }));
 
       return this.computeCacheStatus(config);
     } catch (error) {
+      this.clearCacheTables('staging');
       this.setSyncMeta({
         ...this.getSyncMeta(),
         status: 'error',
         lastSyncStartedAt: startedAt,
         lastSyncError: error instanceof Error ? error.message : 'Unknown sync error'
       });
+      console.error(JSON.stringify({
+        event: 'table.sync.failed',
+        projectSlug: config.projectSlug,
+        tableSlug: config.tableSlug,
+        durationMs: Date.now() - syncStartedAtMs,
+        errorMessage: error instanceof Error ? error.message : 'Unknown sync error'
+      }));
       throw error;
     }
   }
 
   private async resolveRowById(config: ResolvedTableConfig, rowId: string): Promise<RowEnvelope | null> {
-    await this.ensureCacheReady(config);
-
     const cached = this.getCachedRow(rowId);
     const rowNumberHint = cached?.rowNumber ?? this.lookupRowNumber(rowId);
     const result = await this.getSheetsClient(config).findRowById(config, rowId, rowNumberHint);
@@ -648,10 +749,11 @@ export class TableDO {
     return row?.row_number ?? null;
   }
 
-  private upsertRowIndex(rowId: string, rowNumber: number) {
+  private upsertRowIndex(rowId: string, rowNumber: number, kind: 'live' | 'staging' = 'live') {
+    const tables = getCacheTableNames(kind);
     this.ctx.storage.sql.exec(
       `
-      INSERT INTO row_index (row_id, row_number, updated_at)
+      INSERT INTO ${tables.rowIndex} (row_id, row_number, updated_at)
       VALUES (?, ?, ?)
       ON CONFLICT(row_id) DO UPDATE SET
         row_number = excluded.row_number,
@@ -667,10 +769,11 @@ export class TableDO {
     this.ctx.storage.sql.exec(`DELETE FROM row_index WHERE row_id = ?`, rowId);
   }
 
-  private upsertCachedRow(row: RowEnvelope) {
+  private upsertCachedRow(row: RowEnvelope, kind: 'live' | 'staging' = 'live') {
+    const tables = getCacheTableNames(kind);
     this.ctx.storage.sql.exec(
       `
-      INSERT INTO cached_rows (row_id, row_number, values_json)
+      INSERT INTO ${tables.cachedRows} (row_id, row_number, values_json)
       VALUES (?, ?, ?)
       ON CONFLICT(row_id) DO UPDATE SET
         row_number = excluded.row_number,
@@ -700,15 +803,55 @@ export class TableDO {
     this.upsertRowIndex(rowId, rowNumber);
   }
 
-  private async getHeaders(config: ResolvedTableConfig): Promise<string[]> {
+  private async getHeaders(config: ResolvedTableConfig, options?: { bypassCache?: boolean }): Promise<string[]> {
     const cachedHeaders = this.getMeta('headers');
-    if (cachedHeaders) {
+    if (cachedHeaders && !options?.bypassCache) {
       return JSON.parse(cachedHeaders) as string[];
     }
 
     const headers = await this.getSheetsClient(config).readHeaders(config);
     this.setMeta('headers', JSON.stringify(headers));
     return headers;
+  }
+
+  private getCacheState(config: GoogleSheetTableConfig & { googleCredentialRef?: string }): CacheState {
+    const meta = this.getSyncMeta();
+    const lastSyncMs = meta.lastSyncCompletedAt ? Date.parse(meta.lastSyncCompletedAt) : Number.NaN;
+    const configSignature = 'googleCredentialRef' in config && config.googleCredentialRef
+      ? buildCacheConfigSignature({
+          spreadsheetId: config.spreadsheetId,
+          googleCredentialRef: config.googleCredentialRef,
+          sheetTabName: config.sheetTabName,
+          sheetGid: config.sheetGid,
+          idColumn: config.idColumn,
+          indexedFields: config.indexedFields,
+          headerRow: config.headerRow,
+          dataStartRow: config.dataStartRow
+        })
+      : null;
+    const signatureMatches = !configSignature || this.getMeta('config.signature') === configSignature;
+
+    const staleReason: CacheStaleReason =
+      meta.status === 'error'
+        ? 'error'
+        : !meta.lastSyncCompletedAt || Number.isNaN(lastSyncMs)
+          ? 'never-synced'
+          : !signatureMatches
+            ? 'config-changed'
+            : Date.now() - lastSyncMs > config.cacheTtlSeconds * 1000
+              ? 'ttl-expired'
+              : 'fresh';
+
+    return {
+      status: meta.status,
+      cacheTtlSeconds: config.cacheTtlSeconds,
+      stale: staleReason !== 'fresh',
+      staleReason,
+      rowCount: meta.rowCount,
+      lastSyncStartedAt: meta.lastSyncStartedAt,
+      lastSyncCompletedAt: meta.lastSyncCompletedAt,
+      lastSyncError: meta.lastSyncError
+    };
   }
 
   private getMeta(key: string): string | null {
@@ -757,33 +900,15 @@ export class TableDO {
   }
 
   private computeCacheStatus(config: GoogleSheetTableConfig & { googleCredentialRef?: string }): TableCacheStatus {
-    const meta = this.getSyncMeta();
-    const lastSyncMs = meta.lastSyncCompletedAt ? Date.parse(meta.lastSyncCompletedAt) : Number.NaN;
-    const configSignature = 'googleCredentialRef' in config && config.googleCredentialRef
-      ? buildCacheConfigSignature({
-          spreadsheetId: config.spreadsheetId,
-          googleCredentialRef: config.googleCredentialRef,
-          sheetTabName: config.sheetTabName,
-          sheetGid: config.sheetGid,
-          idColumn: config.idColumn,
-          indexedFields: config.indexedFields,
-          headerRow: config.headerRow,
-          dataStartRow: config.dataStartRow
-        })
-      : null;
-    const signatureMatches = !configSignature || this.getMeta('config.signature') === configSignature;
-    const stale = !meta.lastSyncCompletedAt || Number.isNaN(lastSyncMs)
-      ? true
-      : Date.now() - lastSyncMs > config.cacheTtlSeconds * 1000 || !signatureMatches;
-
+    const cacheState = this.getCacheState(config);
     return {
-      status: meta.status,
-      cacheTtlSeconds: config.cacheTtlSeconds,
-      stale,
-      rowCount: meta.rowCount,
-      lastSyncStartedAt: meta.lastSyncStartedAt,
-      lastSyncCompletedAt: meta.lastSyncCompletedAt,
-      lastSyncError: meta.lastSyncError
+      status: cacheState.status,
+      cacheTtlSeconds: cacheState.cacheTtlSeconds,
+      stale: cacheState.stale,
+      rowCount: cacheState.rowCount,
+      lastSyncStartedAt: cacheState.lastSyncStartedAt,
+      lastSyncCompletedAt: cacheState.lastSyncCompletedAt,
+      lastSyncError: cacheState.lastSyncError
     };
   }
 
@@ -799,23 +924,25 @@ export class TableDO {
     });
   }
 
-  private countCachedRows() {
+  private countCachedRows(kind: 'live' | 'staging' = 'live') {
+    const tables = getCacheTableNames(kind);
     const row = this.ctx.storage.sql
-      .exec(`SELECT COUNT(*) AS count FROM cached_rows`)
+      .exec(`SELECT COUNT(*) AS count FROM ${tables.cachedRows}`)
       .one() as { count: number } | null;
 
     return row?.count ?? 0;
   }
 
-  private upsertCachedCells(config: GoogleSheetTableConfig, row: RowEnvelope) {
-    this.ctx.storage.sql.exec(`DELETE FROM cached_cells WHERE row_id = ?`, row.id);
+  private upsertCachedCells(config: GoogleSheetTableConfig, row: RowEnvelope, kind: 'live' | 'staging' = 'live') {
+    const tables = getCacheTableNames(kind);
+    this.ctx.storage.sql.exec(`DELETE FROM ${tables.cachedCells} WHERE row_id = ?`, row.id);
 
     for (const fieldName of config.indexedFields) {
       const value = row.values[fieldName] ?? null;
       const normalized = this.normalizeIndexedCellValue(value);
       this.ctx.storage.sql.exec(
         `
-        INSERT INTO cached_cells (row_id, field_name, value_kind, value_text, value_number, value_boolean)
+        INSERT INTO ${tables.cachedCells} (row_id, field_name, value_kind, value_text, value_number, value_boolean)
         VALUES (?, ?, ?, ?, ?, ?)
         `,
         row.id,
@@ -825,6 +952,40 @@ export class TableDO {
         normalized.valueNumber,
         normalized.valueBoolean
       );
+    }
+  }
+
+  private clearCacheTables(kind: 'live' | 'staging') {
+    const tables = getCacheTableNames(kind);
+    this.ctx.storage.sql.exec(`DELETE FROM ${tables.rowIndex}`);
+    this.ctx.storage.sql.exec(`DELETE FROM ${tables.cachedRows}`);
+    this.ctx.storage.sql.exec(`DELETE FROM ${tables.cachedCells}`);
+  }
+
+  private promoteStagingCache() {
+    const live = getCacheTableNames('live');
+    const staging = getCacheTableNames('staging');
+    this.ctx.storage.sql.exec('BEGIN');
+    try {
+      this.ctx.storage.sql.exec(`DELETE FROM ${live.rowIndex}`);
+      this.ctx.storage.sql.exec(`DELETE FROM ${live.cachedRows}`);
+      this.ctx.storage.sql.exec(`DELETE FROM ${live.cachedCells}`);
+      this.ctx.storage.sql.exec(
+        `INSERT INTO ${live.rowIndex} (row_id, row_number, updated_at) SELECT row_id, row_number, updated_at FROM ${staging.rowIndex}`
+      );
+      this.ctx.storage.sql.exec(
+        `INSERT INTO ${live.cachedRows} (row_id, row_number, values_json) SELECT row_id, row_number, values_json FROM ${staging.cachedRows}`
+      );
+      this.ctx.storage.sql.exec(
+        `INSERT INTO ${live.cachedCells} (row_id, field_name, value_kind, value_text, value_number, value_boolean)
+         SELECT row_id, field_name, value_kind, value_text, value_number, value_boolean FROM ${staging.cachedCells}`
+      );
+      this.ctx.storage.sql.exec('COMMIT');
+    } catch (error) {
+      this.ctx.storage.sql.exec('ROLLBACK');
+      throw error;
+    } finally {
+      this.clearCacheTables('staging');
     }
   }
 
