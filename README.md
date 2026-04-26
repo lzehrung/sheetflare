@@ -109,6 +109,12 @@ Supported filter operators:
 - `contains`
 - `isNull`
 
+HTTP note:
+
+- `GET /v1/projects/:project/tables/:table/rows` accepts `filter` as a JSON-encoded query parameter.
+- Example:
+  `?filter={"status":{"eq":"active"},"score":{"gte":80}}`
+
 Performance notes:
 
 - Equality, range, `in`, and indexed sort retrieval use SQLite-backed cached cell indexes.

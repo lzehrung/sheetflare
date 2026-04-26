@@ -101,6 +101,13 @@ export class ControlPlaneDO {
           type: 'control.api-keys.list.result',
           result: this.listApiKeys(body.projectSlug ?? null)
         };
+      case 'control.api-key.get':
+        return {
+          type: 'control.api-key.get.result',
+          result: {
+            record: this.getApiKeyPrincipal(body.apiKeyId)
+          }
+        };
       case 'control.api-key.verify':
         return {
           type: 'control.api-key.verify.result',

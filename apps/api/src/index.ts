@@ -22,6 +22,7 @@ import {
   reindexTableResultSchema,
   rowParamsSchema,
   tableConfigSchema,
+  BadRequestError,
   toErrorResponse,
   UnauthorizedError,
   updateRowInputSchema,
@@ -119,6 +120,13 @@ const listRowsQueryOpenApiSchema = z.object({
       in: 'query'
     },
     example: 'name,email,status'
+  }),
+  filter: z.string().optional().openapi({
+    param: {
+      name: 'filter',
+      in: 'query'
+    },
+    example: '{"status":{"eq":"active"},"score":{"gte":80}}'
   })
 });
 
@@ -252,6 +260,14 @@ function assertAdminScope(auth: AuthContext, scope: ApiScope) {
   }
 }
 
+function assertGlobalAdminScope(auth: AuthContext, scope: ApiScope) {
+  assertAdminScope(auth, scope);
+
+  if (auth.kind === 'api-key' && auth.record.projectSlug) {
+    throw new UnauthorizedError('This operation requires a global admin key.');
+  }
+}
+
 function assertProjectScope(auth: AuthContext, scope: ApiScope, projectSlug: string) {
   if (auth.kind === 'bootstrap-admin') {
     return;
@@ -279,6 +295,18 @@ async function loadProject(c: { env: Env }, projectSlug: string) {
   return (response as { type: 'project.get.result'; result: AdminGetProjectResult }).result;
 }
 
+async function getApiKeyRecord(c: { env: Env }, apiKeyId: string) {
+  const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+    type: 'control.api-key.get',
+    apiKeyId
+  });
+
+  return (response as {
+    type: 'control.api-key.get.result';
+    result: { record: ApiKeyPrincipal | null };
+  }).result.record;
+}
+
 function parsePathParams<TSchema extends z.ZodType>(c: { req: { param(): Record<string, string> } }, schema: TSchema): z.infer<TSchema> {
   return schema.parse(c.req.param());
 }
@@ -288,18 +316,25 @@ async function parseJsonBody<TSchema extends z.ZodType>(c: { req: { json(): Prom
 }
 
 function parseListRowsQuery(c: { req: { query(name: string): string | undefined } }): ListRowsQuery {
-  const query = listRowsQuerySchema.omit({
-    filter: true
-  });
+  const rawFilter = c.req.query('filter');
+  let filter: unknown = undefined;
+  if (rawFilter !== undefined) {
+    try {
+      filter = JSON.parse(rawFilter);
+    } catch {
+      throw new BadRequestError('Query parameter "filter" must be valid JSON.');
+    }
+  }
 
-  return query.parse({
+  return listRowsQuerySchema.parse({
     limit: c.req.query('limit'),
     cursor: c.req.query('cursor') ?? undefined,
     sort: c.req.query('sort') ?? undefined,
     fields: c.req.query('fields')
       ?.split(',')
       .map((field) => field.trim())
-      .filter((field) => field.length > 0)
+      .filter((field) => field.length > 0),
+    filter
   });
 }
 
@@ -669,14 +704,16 @@ function createApp() {
 
   app.openapi(adminListProjectsRoute, async (c) => {
     const auth = await authenticateRequest(c);
-    assertAdminScope(auth, 'admin:projects');
     const { project } = adminProjectsQuerySchema.parse({
       project: c.req.query('project')
     });
 
     if (project) {
+      assertProjectScope(auth, 'admin:projects', project);
       return c.json(await loadProject(c, project));
     }
+
+    assertGlobalAdminScope(auth, 'admin:projects');
 
     const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
       type: 'control.projects.list'
@@ -689,7 +726,7 @@ function createApp() {
 
   app.openapi(adminCreateProjectRoute, async (c) => {
     const auth = await authenticateRequest(c);
-    assertAdminScope(auth, 'admin:projects');
+    assertGlobalAdminScope(auth, 'admin:projects');
     const input = await parseJsonBody(c, createProjectInputSchema) satisfies CreateProjectInput;
     const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, input.slug), {
       type: 'project.create',
@@ -860,9 +897,17 @@ function createApp() {
   app.openapi(listApiKeysRoute, async (c) => {
     const auth = await authenticateRequest(c);
     assertAdminScope(auth, 'admin:keys');
-    const projectSlug = listApiKeysQuerySchema.parse({
+    const requestedProjectSlug = listApiKeysQuerySchema.parse({
       project: c.req.query('project')
     }).project ?? null;
+    const projectSlug =
+      auth.kind === 'api-key' && auth.record.projectSlug
+        ? auth.record.projectSlug
+        : requestedProjectSlug;
+
+    if (auth.kind === 'api-key' && auth.record.projectSlug && requestedProjectSlug && requestedProjectSlug !== auth.record.projectSlug) {
+      throw new UnauthorizedError('This key cannot list API keys for another project.');
+    }
 
     const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
       type: 'control.api-keys.list',
@@ -878,6 +923,11 @@ function createApp() {
     const auth = await authenticateRequest(c);
     assertAdminScope(auth, 'admin:keys');
     const input = await parseJsonBody(c, adminCreateApiKeyInputSchema);
+    if (auth.kind === 'api-key' && auth.record.projectSlug) {
+      if (!input.projectSlug || input.projectSlug !== auth.record.projectSlug) {
+        throw new UnauthorizedError('This key can only create API keys for its own project.');
+      }
+    }
     if (input.projectSlug) {
       await loadProject(c, input.projectSlug);
     }
@@ -897,6 +947,13 @@ function createApp() {
     const auth = await authenticateRequest(c);
     assertAdminScope(auth, 'admin:keys');
     const { id } = parsePathParams(c, apiKeyParamsSchema);
+    const record = await getApiKeyRecord(c, id);
+
+    if (auth.kind === 'api-key' && auth.record.projectSlug) {
+      if (!record || record.projectSlug !== auth.record.projectSlug) {
+        throw new UnauthorizedError('This key cannot revoke API keys for another project.');
+      }
+    }
 
     await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
       type: 'control.api-key.revoke',
