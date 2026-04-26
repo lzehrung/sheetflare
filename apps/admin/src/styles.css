@@ -67,6 +67,11 @@ body {
   backdrop-filter: blur(12px);
 }
 
+.authPanel {
+  display: grid;
+  gap: 16px;
+}
+
 .panelHeader,
 .cardTop {
   display: flex;
@@ -78,6 +83,61 @@ body {
 .panelHeader h2,
 .card h3 {
   margin: 0;
+}
+
+.compact {
+  margin-top: 8px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field span {
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.field input {
+  width: 100%;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--ink);
+  font: inherit;
+}
+
+.field input:focus {
+  outline: 2px solid rgba(216, 95, 56, 0.2);
+  border-color: rgba(216, 95, 56, 0.45);
+}
+
+.actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.actions button {
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.85rem 1.15rem;
+  font: inherit;
+  font-weight: 700;
+  color: #fff7f2;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.actions button.secondaryButton {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--border);
 }
 
 .cards {

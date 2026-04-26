@@ -36,8 +36,17 @@ Set these in `apps/api/wrangler.jsonc` for local development or through Cloudfla
 - `GOOGLE_CLIENT_EMAIL`
 - `GOOGLE_PRIVATE_KEY`
 - `ADMIN_BEARER_TOKEN`
+- `RATE_LIMIT_MAX_REQUESTS`
+- `RATE_LIMIT_WINDOW_SECONDS`
 
 `ADMIN_BEARER_TOKEN` is the bootstrap admin credential for self-hosted setups. Use it to create scoped API keys, then prefer those keys for normal operation.
+`RATE_LIMIT_MAX_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS` control the DO-backed edge request budget for `/v1/*` routes.
+
+## Admin UI
+
+- The admin UI expects an operator credential and stores it locally in the browser.
+- Paste either the bootstrap admin token or a scoped admin API key into the auth panel, then the UI will call the protected admin routes with `Authorization: Bearer ...`.
+- This keeps the self-host default secure without requiring a separate proxy layer just to browse the control plane.
 
 ## Auth Model
 
@@ -125,4 +134,5 @@ Performance notes:
 
 - Project listing and API keys are handled by a dedicated `ControlPlaneDO`.
 - The Google Sheets adapter uses service-account JWT exchange and the Sheets REST API directly, so the worker does not depend on Node-only Google SDKs.
+- Google Sheets read paths use bounded retry/backoff for transient upstream failures, while mutation paths avoid automatic replay to reduce duplicate-write risk.
 - `npm run build`, `npm run typecheck`, and `npm test` all pass from the repo root.
