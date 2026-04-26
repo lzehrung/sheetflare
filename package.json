@@ -9,11 +9,15 @@
   "scripts": {
     "build": "npm run -ws build",
     "lint": "eslint .",
-    "typecheck": "npm run -ws typecheck",
+    "typecheck": "npm run -ws typecheck && tsc -p tsconfig.scripts.json --noEmit",
     "test": "npm run -ws test",
     "check": "npm run typecheck && npm run test",
     "dev:api": "npm --workspace @sheetflare/api run dev",
-    "dev:admin": "npm --workspace @sheetflare/admin run dev"
+    "dev:admin": "npm --workspace @sheetflare/admin run dev",
+    "ops:create-admin-key": "tsx scripts/create-admin-key.ts",
+    "ops:cache": "tsx scripts/get-cache-status.ts",
+    "ops:reindex": "tsx scripts/reindex-table.ts",
+    "smoke:staging": "tsx scripts/smoke-staging.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260418.0",

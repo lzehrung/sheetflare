@@ -2,6 +2,9 @@
 
 Sheetflare is a Cloudflare-first starter for exposing Google Sheets tabs through a small Hono API backed by Durable Objects.
 
+Production hardening guidance lives in [production-readiness-checklist.md](./production-readiness-checklist.md).
+Operational docs live in [docs/operator-runbook.md](./docs/operator-runbook.md) and [docs/deploy.md](./docs/deploy.md).
+
 ## Workspaces
 
 - `apps/api`: Cloudflare Worker API and Durable Object entrypoints
@@ -18,7 +21,15 @@ npm install
 npm run check
 npm run dev:api
 npm run dev:admin
+npm run smoke:staging
 ```
+
+## Operator Scripts
+
+- `npm run ops:create-admin-key`
+- `npm run ops:cache`
+- `npm run ops:reindex`
+- `npm run smoke:staging`
 
 ## API Docs
 
