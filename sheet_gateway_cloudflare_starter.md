@@ -489,14 +489,12 @@ export type SpreadsheetId = string;
 
 ```ts
 export type ApiScope =
-  | 'project:read'
-  | 'project:write'
   | 'table:read'
   | 'table:create'
   | 'table:update'
   | 'table:delete'
-  | 'admin:keys'
-  | 'admin:logs';
+  | 'admin:projects'
+  | 'admin:keys';
 
 export interface ApiKeyRecord {
   id: string;
@@ -1753,4 +1751,3 @@ The project listing approach here uses a `project_registry` table stored inside 
 - D1 for global control-plane listing/reporting
 
 Everything else in this starter is still valid if you make that refinement.
-

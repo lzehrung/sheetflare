@@ -307,6 +307,7 @@ describe('TableDO', () => {
         input: {
           tableSlug: 'users',
           sheetTabName: 'Users',
+          sheetGid: 1,
           indexedFields: ['name'],
           cacheTtlSeconds: 3600
         }
@@ -413,6 +414,185 @@ describe('TableDO', () => {
         }
       )
     ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  it('resolves uncached point reads through the narrow row-id lookup path', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'secondary'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          sheetGid: 1,
+          indexedFields: ['name'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    sheet.requestedRanges = [];
+    sheet.rows.push(['row-2', 'Grace']);
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.get',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-2'
+      }
+    );
+
+    expect(response).toMatchObject({
+      type: 'table.row.get.result',
+      result: {
+        data: {
+          id: 'row-2',
+          values: {
+            name: 'Grace'
+          }
+        }
+      }
+    });
+    expect(sheet.requestedRanges).not.toContain("'Users'");
+    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+  });
+
+  it('repairs cached row numbers after delete without forcing a full-sheet sync', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Grace'],
+        ['row-3', 'Linus']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'secondary'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          sheetGid: 1,
+          indexedFields: ['name'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    sheet.requestedRanges = [];
+
+    const deleteResponse = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.delete',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-2'
+      }
+    );
+
+    expect(deleteResponse).toMatchObject({
+      type: 'table.row.delete.result',
+      result: {
+        ok: true,
+        deletedId: 'row-2'
+      }
+    });
+    expect(sheet.requestedRanges).not.toContain("'Users'");
+    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+
+    const listed = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          sort: 'rowNumber:asc'
+        }
+      }
+    );
+
+    expect(listed).toMatchObject({
+      type: 'table.rows.list.result',
+      result: {
+        data: [
+          {
+            id: 'row-1',
+            rowNumber: 2
+          },
+          {
+            id: 'row-3',
+            rowNumber: 3
+          }
+        ]
+      }
+    });
   });
 
   it('rebuilds cached indexes when table config changes', async () => {

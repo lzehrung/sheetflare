@@ -2,15 +2,12 @@ import { z } from 'zod';
 import { apiKeyIdSchema, projectSlugSchema } from './ids';
 
 export const apiScopeSchema = z.enum([
-  'project:read',
-  'project:write',
   'table:read',
   'table:create',
   'table:update',
   'table:delete',
   'admin:projects',
-  'admin:keys',
-  'admin:logs'
+  'admin:keys'
 ]);
 
 export const apiKeyRecordSchema = z.object({

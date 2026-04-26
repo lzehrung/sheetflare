@@ -278,8 +278,7 @@ export class TableDO {
     await this.ensureCacheReady(config);
     let resolved = this.getCachedRow(rowId);
     if (!resolved) {
-      await this.syncCache(config.projectSlug, config.tableSlug, { force: true });
-      resolved = this.getCachedRow(rowId);
+      resolved = await this.resolveRowById(config, rowId);
     }
 
     if (!resolved) {
@@ -398,7 +397,8 @@ export class TableDO {
 
     await this.getSheetsClient(config).deleteRow(config, existingRow.rowNumber);
     this.deleteRowIndex(rowId);
-    await this.syncCache(projectSlug, tableSlug, { force: true });
+    this.deleteCachedRow(rowId);
+    await this.refreshCachedRowNumbersAfterDelete(config);
 
     return {
       ok: true as const,
@@ -553,6 +553,48 @@ export class TableDO {
     return result.row;
   }
 
+  private async refreshCachedRowNumbersAfterDelete(config: ResolvedTableConfig) {
+    const references = await this.getSheetsClient(config).readRowReferences(config);
+    if (!this.canRepairDeleteFromRowReferences(references)) {
+      await this.syncCache(config.projectSlug, config.tableSlug, { force: true });
+      return;
+    }
+
+    for (const reference of references) {
+      this.updateCachedRowNumber(reference.rowId, reference.rowNumber);
+    }
+
+    this.markCacheFreshAfterMutation(config);
+  }
+
+  private canRepairDeleteFromRowReferences(
+    references: Array<{ rowId: string; rowNumber: number }>
+  ) {
+    const cachedRows = this.listCachedRows();
+    if (cachedRows.length !== references.length) {
+      return false;
+    }
+
+    const cachedRowIds = new Set(cachedRows.map((row) => row.id));
+    if (cachedRowIds.size !== cachedRows.length) {
+      return false;
+    }
+
+    const seenRowIds = new Set<string>();
+    for (const reference of references) {
+      if (seenRowIds.has(reference.rowId)) {
+        return false;
+      }
+
+      seenRowIds.add(reference.rowId);
+      if (!cachedRowIds.has(reference.rowId)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   private listCachedRows(): RowEnvelope[] {
     const rows = this.ctx.storage.sql
       .exec(`SELECT row_id, row_number, values_json FROM cached_rows ORDER BY row_number ASC`)
@@ -623,6 +665,19 @@ export class TableDO {
   private deleteCachedRow(rowId: string) {
     this.ctx.storage.sql.exec(`DELETE FROM cached_rows WHERE row_id = ?`, rowId);
     this.ctx.storage.sql.exec(`DELETE FROM cached_cells WHERE row_id = ?`, rowId);
+  }
+
+  private updateCachedRowNumber(rowId: string, rowNumber: number) {
+    this.ctx.storage.sql.exec(
+      `
+      UPDATE cached_rows
+      SET row_number = ?
+      WHERE row_id = ?
+      `,
+      rowNumber,
+      rowId
+    );
+    this.upsertRowIndex(rowId, rowNumber);
   }
 
   private async getHeaders(config: ResolvedTableConfig): Promise<string[]> {
