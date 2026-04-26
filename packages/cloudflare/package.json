@@ -1,0 +1,16 @@
+{
+  "name": "@sheetflare/cloudflare",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@sheetflare/contracts": "*",
+    "@sheetflare/domain": "*",
+    "@sheetflare/google-sheets": "*"
+  }
+}

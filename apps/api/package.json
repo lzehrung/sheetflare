@@ -1,0 +1,21 @@
+{
+  "name": "@sheetflare/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "wrangler deploy --dry-run",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "^0.7.2",
+    "@sheetflare/cloudflare": "*",
+    "@sheetflare/contracts": "*",
+    "hono": "^4.10.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "wrangler": "^4.43.0"
+  }
+}

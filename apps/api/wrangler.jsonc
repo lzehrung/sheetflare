@@ -1,0 +1,24 @@
+{
+  "name": "sheetflare-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-26",
+  "durable_objects": {
+    "bindings": [
+      { "name": "REGISTRY_DO", "class_name": "RegistryDO" },
+      { "name": "PROJECT_DO", "class_name": "ProjectDO" },
+      { "name": "TABLE_DO", "class_name": "TableDO" },
+      { "name": "RATE_LIMIT_DO", "class_name": "RateLimitDO" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RegistryDO", "ProjectDO", "TableDO", "RateLimitDO"]
+    }
+  ],
+  "vars": {
+    "GOOGLE_CLIENT_EMAIL": "",
+    "GOOGLE_PRIVATE_KEY": "",
+    "ADMIN_BEARER_TOKEN": ""
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@sheetflare/google-sheets",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@sheetflare/contracts": "*"
+  }
+}
