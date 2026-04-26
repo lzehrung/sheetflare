@@ -274,6 +274,64 @@ describe('TableDO', () => {
     });
   });
 
+  it('normalizes configured field names before persisting table config', async () => {
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: ' secondary '
+        }
+      }
+    );
+
+    const response = await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          idColumn: ' _id ',
+          indexedFields: [' status ', 'status', '  ']
+        }
+      }
+    );
+
+    expect(response).toMatchObject({
+      type: 'project.table.create.result',
+      result: {
+        data: {
+          idColumn: '_id',
+          indexedFields: ['_id', 'status']
+        }
+      }
+    });
+
+    const project = await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.get',
+        projectSlug: 'demo'
+      }
+    );
+
+    expect(project).toMatchObject({
+      type: 'project.get.result',
+      result: {
+        project: {
+          googleCredentialRef: 'secondary'
+        }
+      }
+    });
+  });
+
   it('re-resolves stale row numbers by ID before updating', async () => {
     const sheet: SheetState = {
       rows: [

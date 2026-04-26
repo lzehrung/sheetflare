@@ -48,6 +48,25 @@ function getControlPlaneStub(env: CloudflareEnv) {
   return env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
 }
 
+function normalizeOptionalFieldName(value: string | undefined) {
+  const normalized = value?.trim();
+  return normalized && normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeFieldNames(values: readonly string[]) {
+  const normalized = new Set<string>();
+  for (const value of values) {
+    const next = value.trim();
+    if (!next) {
+      continue;
+    }
+
+    normalized.add(next);
+  }
+
+  return [...normalized];
+}
+
 export class ProjectDO {
   constructor(
     private readonly ctx: DurableObjectState,
@@ -139,7 +158,7 @@ export class ProjectDO {
 
   private async createProject(input: CreateProjectInput): Promise<AdminGetProjectResult> {
     const now = new Date().toISOString();
-    const googleCredentialRef = input.googleCredentialRef ?? defaultGoogleCredentialRef;
+    const googleCredentialRef = normalizeOptionalFieldName(input.googleCredentialRef) ?? defaultGoogleCredentialRef;
 
     resolveGoogleCredential(this.env, googleCredentialRef);
 
@@ -186,8 +205,8 @@ export class ProjectDO {
   private async createTable(projectSlug: string, input: CreateTableInput): Promise<TableConfig> {
     const project = await this.getProject(projectSlug);
     const now = new Date().toISOString();
-    const idColumn = input.idColumn ?? '_id';
-    const indexedFields = this.buildIndexedFields(idColumn, input.indexedFields ?? []);
+    const idColumn = normalizeOptionalFieldName(input.idColumn) ?? '_id';
+    const indexedFields = this.buildIndexedFields(idColumn, normalizeFieldNames(input.indexedFields ?? []));
     const headerRow = input.headerRow ?? 1;
     const dataStartRow = input.dataStartRow ?? 2;
 

@@ -545,6 +545,33 @@ describe('api routes', () => {
     });
   });
 
+  it('accepts numeric limit query parameters on row listing', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows?limit=10',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: [
+        {
+          id: 'row-1',
+          rowNumber: 2,
+          values: {
+            matched: true
+          }
+        }
+      ],
+      nextCursor: null
+    });
+  });
+
   it('uses separate rate-limit buckets for admin and data routes', async () => {
     const app = createApp();
     const env = createEnv() as Env & { __rateLimitRequests: Array<{ key: string }> };
