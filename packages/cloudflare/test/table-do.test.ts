@@ -474,6 +474,75 @@ describe('TableDO', () => {
     ).rejects.toBeInstanceOf(BadRequestError);
   });
 
+  it('preserves non-string scalar managed ids on create instead of generating a replacement id', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'secondary'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.create',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        input: {
+          values: {
+            _id: 42,
+            name: 'Ada'
+          }
+        }
+      }
+    );
+
+    expect(response).toMatchObject({
+      type: 'table.row.create.result',
+      result: {
+        data: {
+          id: '42',
+          values: {
+            _id: '42',
+            name: 'Ada'
+          }
+        }
+      }
+    });
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['42', 'Ada']
+    ]);
+  });
+
   it('resolves uncached point reads through the narrow row-id lookup path', async () => {
     const sheet: SheetState = {
       rows: [

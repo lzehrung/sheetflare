@@ -8,7 +8,6 @@ import {
   type RowEnvelope,
   type RowRecord,
   type TableCacheStatus,
-  type TableConfig,
   type TableDoRequest,
   type TableDoResponse,
   type ResolvedTableConfigSnapshot
@@ -29,6 +28,7 @@ import {
   validateFilterCapabilities,
   inferTableSchema,
   normalizeRowValues,
+  parseManagedRowId,
   pickKnownColumns
 } from '@sheetflare/domain';
 import { GoogleSheetsService, type GoogleSheetTableConfig } from '@sheetflare/google-sheets';
@@ -326,22 +326,20 @@ export class TableDO {
     }
 
     const result = await doRpc<
-      { type: 'project.get.result'; result: { project: { spreadsheetId: string; googleCredentialRef: string }; tables: TableConfig[] } }
+      {
+        type: 'project.table.resolve.result';
+        result: {
+          data: {
+            resolvedConfig: ResolvedTableConfigSnapshot;
+          };
+        };
+      }
     >(getProjectStub(this.env, projectSlug), {
-      type: 'project.get',
-      projectSlug
+      type: 'project.table.resolve',
+      projectSlug,
+      tableSlug
     });
-
-    const table = result.result.tables.find((entry) => entry.tableSlug === tableSlug);
-    if (!table) {
-      throw new NotFoundError(`Table ${projectSlug}/${tableSlug} was not found.`);
-    }
-
-    return {
-      ...table,
-      spreadsheetId: result.result.project.spreadsheetId,
-      googleCredentialRef: result.result.project.googleCredentialRef
-    };
+    return result.result.data.resolvedConfig;
   }
 
   private getSheetsClient(config: { googleCredentialRef: string }) {
@@ -409,11 +407,22 @@ export class TableDO {
     }
 
     const cacheState = await this.ensurePointOperationReady(config);
+    const normalizedInput = normalizeRowValues(input);
     const headers = await this.getHeaders(config, {
       bypassCache: cacheState.staleReason === 'ttl-expired'
     });
-    const providedId = input[config.idColumn];
-    const rowId = typeof providedId === 'string' && providedId.length > 0 ? providedId : generateRowId();
+    const hasProvidedId = Object.prototype.hasOwnProperty.call(normalizedInput, config.idColumn);
+    const parsedManagedRowId = parseManagedRowId(normalizedInput[config.idColumn]);
+    if (hasProvidedId && !parsedManagedRowId.ok) {
+      throw new BadRequestError(
+        `Managed row id for column ${config.idColumn} must be a non-blank string, number, or boolean.`,
+        {
+          idColumn: config.idColumn
+        }
+      );
+    }
+
+    const rowId = parsedManagedRowId.ok ? parsedManagedRowId.rowId : generateRowId();
     const existingRow = await this.resolveRowById(config, rowId);
     if (existingRow) {
       throw new BadRequestError(`Row ${rowId} already exists.`, {
@@ -423,7 +432,7 @@ export class TableDO {
     }
 
     const normalizedValues = normalizeRowValues({
-      ...input,
+      ...normalizedInput,
       [config.idColumn]: rowId
     });
     const { values, ignoredKeys } = pickKnownColumns(normalizedValues, headers);

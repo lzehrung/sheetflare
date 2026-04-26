@@ -10,6 +10,7 @@ import {
   type ProjectDoRequest,
   type ProjectDoResponse,
   type ProjectSummary,
+  type ResolvedProjectTableResult,
   type TableConfig
 } from '@sheetflare/contracts';
 import type { CloudflareEnv } from '../types';
@@ -153,6 +154,13 @@ export class ProjectDO {
             data: await this.getTable(body.projectSlug, body.tableSlug)
           }
         };
+      case 'project.table.resolve':
+        return {
+          type: 'project.table.resolve.result',
+          result: {
+            data: await this.resolveProjectTable(body.projectSlug, body.tableSlug)
+          }
+        };
     }
   }
 
@@ -188,13 +196,7 @@ export class ProjectDO {
   }
 
   private async getProject(projectSlug: string): Promise<AdminGetProjectResult> {
-    const project = this.ctx.storage.sql
-      .exec(`SELECT * FROM project WHERE slug = ?`, projectSlug)
-      .one() as ProjectRow | null;
-
-    if (!project) {
-      throw new NotFoundError(`Project ${projectSlug} was not found.`);
-    }
+    const project = this.requireProjectRow(projectSlug);
 
     return {
       project: this.mapProject(project),
@@ -271,6 +273,26 @@ export class ProjectDO {
     return this.mapTable(table);
   }
 
+  private async resolveProjectTable(projectSlug: string, tableSlug: string): Promise<ResolvedProjectTableResult> {
+    const project = this.mapProject(this.requireProjectRow(projectSlug));
+    const table = await this.getTable(projectSlug, tableSlug);
+
+    return {
+      project: {
+        slug: project.slug,
+        spreadsheetId: project.spreadsheetId,
+        googleCredentialRef: project.googleCredentialRef,
+        defaultAuthMode: project.defaultAuthMode
+      },
+      table,
+      resolvedConfig: {
+        ...table,
+        spreadsheetId: project.spreadsheetId,
+        googleCredentialRef: project.googleCredentialRef
+      }
+    };
+  }
+
   private async listTables(projectSlug: string): Promise<TableConfig[]> {
     const rows = this.ctx.storage.sql
       .exec(`SELECT * FROM tables WHERE project_slug = ? ORDER BY table_slug ASC`, projectSlug)
@@ -288,13 +310,7 @@ export class ProjectDO {
   }
 
   private getProjectSummary(projectSlug: string): ProjectSummary {
-    const project = this.ctx.storage.sql
-      .exec(`SELECT * FROM project WHERE slug = ?`, projectSlug)
-      .one() as ProjectRow | null;
-
-    if (!project) {
-      throw new NotFoundError(`Project ${projectSlug} was not found.`);
-    }
+    const project = this.requireProjectRow(projectSlug);
 
     const countRow = this.ctx.storage.sql
       .exec(`SELECT COUNT(*) AS count FROM tables WHERE project_slug = ?`, projectSlug)
@@ -367,5 +383,17 @@ export class ProjectDO {
         }
       );
     }
+  }
+
+  private requireProjectRow(projectSlug: string): ProjectRow {
+    const project = this.ctx.storage.sql
+      .exec(`SELECT * FROM project WHERE slug = ?`, projectSlug)
+      .one() as ProjectRow | null;
+
+    if (!project) {
+      throw new NotFoundError(`Project ${projectSlug} was not found.`);
+    }
+
+    return project;
   }
 }

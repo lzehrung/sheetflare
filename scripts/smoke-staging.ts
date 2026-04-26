@@ -77,13 +77,21 @@ async function main() {
   let createdRowId: string | null = null;
 
   try {
-    logStep('Health check');
-    await requestJson({
+    logStep('Readiness check');
+    const readiness = await requestJson<{
+      checks: {
+        controlPlane: string;
+        rateLimit: string;
+      };
+    }>({
       baseUrl,
-      path: '/health',
+      path: '/ready',
       expectedStatus: 200
     });
-    logSuccess('Health endpoint responded');
+    const readinessData = assertPresent(readiness.data, 'Readiness check returned an empty response body.');
+    assert(readinessData.checks.controlPlane === 'ok', 'Readiness check reported control-plane failure.');
+    assert(readinessData.checks.rateLimit === 'ok', 'Readiness check reported rate-limit failure.');
+    logSuccess('Readiness endpoint reported healthy internal checks');
 
     logStep('Admin project listing');
     await requestJson({

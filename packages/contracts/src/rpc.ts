@@ -17,7 +17,7 @@ import type {
   UpsertTableResult
 } from './api';
 import type { ApiKeyPrincipal } from './auth';
-import type { TableConfig } from './project';
+import type { ProjectConfig, TableConfig } from './project';
 import type { ListRowsQuery, ListRowsResult } from './table';
 
 export type ControlPlaneDoRequest =
@@ -45,18 +45,26 @@ export type ProjectDoRequest =
   | { type: 'project.create'; input: CreateProjectInput }
   | { type: 'project.table.create'; projectSlug: string; input: CreateTableInput }
   | { type: 'project.table.list'; projectSlug: string }
-  | { type: 'project.table.get'; projectSlug: string; tableSlug: string };
+  | { type: 'project.table.get'; projectSlug: string; tableSlug: string }
+  | { type: 'project.table.resolve'; projectSlug: string; tableSlug: string };
 
 export type ProjectDoResponse =
   | { type: 'project.get.result'; result: AdminGetProjectResult }
   | { type: 'project.create.result'; result: AdminGetProjectResult }
   | { type: 'project.table.create.result'; result: UpsertTableResult }
   | { type: 'project.table.list.result'; result: { data: UpsertTableResult['data'][] } }
-  | { type: 'project.table.get.result'; result: UpsertTableResult };
+  | { type: 'project.table.get.result'; result: UpsertTableResult }
+  | { type: 'project.table.resolve.result'; result: { data: ResolvedProjectTableResult } };
 
 export type ResolvedTableConfigSnapshot = TableConfig & {
   spreadsheetId: string;
   googleCredentialRef: string;
+};
+
+export type ResolvedProjectTableResult = {
+  project: Pick<ProjectConfig, 'slug' | 'spreadsheetId' | 'googleCredentialRef' | 'defaultAuthMode'>;
+  table: TableConfig;
+  resolvedConfig: ResolvedTableConfigSnapshot;
 };
 
 export type TableDoRequest =
