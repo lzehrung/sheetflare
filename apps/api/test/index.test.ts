@@ -26,6 +26,7 @@ class FakeDurableObjectNamespace {
 }
 
 function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
+  const rateLimitRequests: Array<{ key: string }> = [];
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
     const body = (await request.json()) as { type: string; apiKeyId?: string; hash?: string; projectSlug?: string | null };
 
@@ -249,18 +250,20 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
     });
   });
 
-  const rateLimit = new FakeDurableObjectNamespace(() => async () =>
-    Response.json({
+  const rateLimit = new FakeDurableObjectNamespace(() => async (request) => {
+    const body = (await request.json()) as { key: string };
+    rateLimitRequests.push({ key: body.key });
+    return Response.json({
       type: 'rate-limit.check.result',
       result: {
         allowed: options?.rateLimitAllowed ?? true,
         remaining: options?.rateLimitAllowed === false ? 0 : 299,
         resetAtMs: Date.parse('2026-04-26T00:01:00.000Z')
       }
-    })
-  );
+    });
+  });
 
-  return {
+  const env: Env = {
     CONTROL_PLANE_DO: controlPlane as never,
     PROJECT_DO: project as never,
     TABLE_DO: table as never,
@@ -271,6 +274,13 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
     RATE_LIMIT_MAX_REQUESTS: '300',
     RATE_LIMIT_WINDOW_SECONDS: '60'
   };
+
+  Object.defineProperty(env, '__rateLimitRequests', {
+    value: rateLimitRequests,
+    enumerable: false
+  });
+
+  return env;
 }
 
 describe('api routes', () => {
@@ -401,7 +411,8 @@ describe('api routes', () => {
         code: 'TOO_MANY_REQUESTS',
         message: 'Rate limit exceeded.',
         details: {
-          key: 'bootstrap-admin',
+          principal: 'bootstrap-admin',
+          routeFamily: 'admin',
           maxRequests: 300,
           windowSeconds: 60,
           resetAt: '2026-04-26T00:01:00.000Z'
@@ -532,6 +543,36 @@ describe('api routes', () => {
       ],
       nextCursor: null
     });
+  });
+
+  it('uses separate rate-limit buckets for admin and data routes', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __rateLimitRequests: Array<{ key: string }> };
+
+    await app.request(
+      '/v1/admin/projects',
+      {
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      env
+    );
+
+    expect(env.__rateLimitRequests.map((entry) => entry.key)).toEqual([
+      'admin:GET:bootstrap-admin',
+      'data:GET:api-key:project-key'
+    ]);
   });
 
   it('serves an OpenAPI document with the expected API surface', async () => {

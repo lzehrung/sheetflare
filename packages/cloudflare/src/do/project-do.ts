@@ -12,6 +12,7 @@ import {
 } from '@sheetflare/contracts';
 import type { CloudflareEnv } from '../types';
 import { doRpc } from '../rpc';
+import { defaultGoogleCredentialRef } from '../google-credentials';
 
 type ProjectRow = {
   slug: string;
@@ -152,7 +153,7 @@ export class ProjectDO {
       input.slug,
       input.name,
       input.spreadsheetId,
-      input.googleCredentialRef,
+      input.googleCredentialRef ?? defaultGoogleCredentialRef,
       input.defaultAuthMode ?? 'private',
       now,
       now

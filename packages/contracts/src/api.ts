@@ -8,7 +8,7 @@ export const createProjectInputSchema = z.object({
   slug: projectSlugSchema,
   name: z.string().min(1),
   spreadsheetId: spreadsheetIdSchema,
-  googleCredentialRef: z.string().min(1),
+  googleCredentialRef: z.string().min(1).optional(),
   defaultAuthMode: defaultAuthModeSchema.optional()
 });
 

@@ -1,4 +1,4 @@
-import { TooManyRequestsError } from '@sheetflare/contracts';
+import { ServiceUnavailableError, TooManyRequestsError } from '@sheetflare/contracts';
 import { describe, expect, it } from 'vitest';
 import { GoogleSheetsService, parseSheetCellValue, serializeSheetCell, type GoogleSheetTableConfig } from '../src';
 
@@ -223,5 +223,42 @@ describe('GoogleSheetsService.readAllRows', () => {
       createdAt: '2026-04-26T00:00:00.000Z',
       updatedAt: '2026-04-26T00:00:00.000Z'
     })).rejects.toBeInstanceOf(TooManyRequestsError);
+  });
+
+  it('classifies non-timeout transport failures distinctly', async () => {
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      delay: async () => {},
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.includes('oauth2.googleapis.com/token')) {
+          throw new Error('socket hang up');
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    await expect(service.readHeaders({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    })).rejects.toMatchObject({
+      name: ServiceUnavailableError.name,
+      message: 'Google Sheets network request failed during fetch Google OAuth access token.'
+    });
   });
 });

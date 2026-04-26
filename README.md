@@ -35,12 +35,21 @@ Set these in `apps/api/wrangler.jsonc` for local development or through Cloudfla
 
 - `GOOGLE_CLIENT_EMAIL`
 - `GOOGLE_PRIVATE_KEY`
+- `GOOGLE_CREDENTIALS_JSON` (optional)
 - `ADMIN_BEARER_TOKEN`
 - `RATE_LIMIT_MAX_REQUESTS`
 - `RATE_LIMIT_WINDOW_SECONDS`
 
 `ADMIN_BEARER_TOKEN` is the bootstrap admin credential for self-hosted setups. Use it to create scoped API keys, then prefer those keys for normal operation.
 `RATE_LIMIT_MAX_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS` control the DO-backed edge request budget for `/v1/*` routes.
+
+Credential model:
+
+- By default, projects use the shared gateway credential ref: `default`.
+- `default` resolves to `GOOGLE_CLIENT_EMAIL` + `GOOGLE_PRIVATE_KEY`.
+- `GOOGLE_CREDENTIALS_JSON` is optional and allows named per-project refs without changing the API shape.
+- Example:
+  `{"analytics":{"clientEmail":"svc@example.com","privateKey":"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"}}`
 
 ## Admin UI
 
@@ -135,4 +144,6 @@ Performance notes:
 - Project listing and API keys are handled by a dedicated `ControlPlaneDO`.
 - The Google Sheets adapter uses service-account JWT exchange and the Sheets REST API directly, so the worker does not depend on Node-only Google SDKs.
 - Google Sheets read paths use bounded retry/backoff for transient upstream failures, while mutation paths avoid automatic replay to reduce duplicate-write risk.
+- Non-timeout transport failures are reported distinctly from actual request timeouts.
+- Rate limits are bucketed by route family (`admin` vs `data`) so normal data traffic does not consume the same budget as control-plane reads from the same principal.
 - `npm run build`, `npm run typecheck`, and `npm test` all pass from the repo root.

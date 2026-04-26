@@ -210,14 +210,9 @@ export class GoogleSheetsService {
     rowId: string,
     rowNumberHint?: number | null
   ): Promise<RowLookupResult | null> {
+    let hintedRow: RowEnvelope | null = null;
     if (rowNumberHint) {
-      const hintedRow = await this.readSingleRow(config, rowNumberHint).catch(() => null);
-      if (hintedRow && String(hintedRow.values[config.idColumn] ?? '') === rowId) {
-        return {
-          row: hintedRow,
-          duplicateCount: 1
-        };
-      }
+      hintedRow = await this.readSingleRow(config, rowNumberHint).catch(() => null);
     }
 
     const rows = await this.readAllRows(config);
@@ -226,8 +221,12 @@ export class GoogleSheetsService {
       return null;
     }
 
+    const resolvedRow = hintedRow && String(hintedRow.values[config.idColumn] ?? '') === rowId
+      ? hintedRow
+      : matches[0]!;
+
     return {
-      row: matches[0]!,
+      row: resolvedRow,
       duplicateCount: matches.length
     };
   }
@@ -482,13 +481,7 @@ export class GoogleSheetsService {
         response = await this.fetchWithTimeout(input, init);
       } catch (error) {
         if (attempt >= options.maxRetries) {
-          if (error instanceof ServiceUnavailableError) {
-            throw error;
-          }
-
-          throw new ServiceUnavailableError(`Google Sheets request timed out during ${options.operation}.`, {
-            operation: options.operation
-          });
+          throw this.toTransportError(error, options.operation);
         }
 
         await this.delay(this.getRetryDelayMs(attempt));
@@ -525,6 +518,18 @@ export class GoogleSheetsService {
 
   private isRetryableStatus(status: number) {
     return status === 429 || status >= 500;
+  }
+
+  private toTransportError(error: unknown, operation: string) {
+    if (error instanceof ServiceUnavailableError) {
+      return error;
+    }
+
+    const message = error instanceof Error ? error.message : 'Unknown transport error';
+    return new ServiceUnavailableError(`Google Sheets network request failed during ${operation}.`, {
+      operation,
+      message
+    });
   }
 
   private getRetryDelayMs(attempt: number) {
