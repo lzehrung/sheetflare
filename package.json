@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "build": "npm run -ws build",
+    "lint": "eslint .",
     "typecheck": "npm run -ws typecheck",
     "test": "npm run -ws test",
     "check": "npm run typecheck && npm run test",
@@ -16,9 +17,13 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260418.0",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^24.9.1",
+    "eslint": "^10.2.1",
+    "globals": "^17.5.0",
     "tsx": "^4.21.0",
     "typescript": "^5.8.3",
+    "typescript-eslint": "^8.59.0",
     "vitest": "^4.1.5"
   }
 }

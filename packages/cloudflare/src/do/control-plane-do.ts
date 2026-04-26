@@ -277,7 +277,8 @@ export class ControlPlaneDO {
       lastUsedAt: row.last_used_at
     };
 
-    const { hash: _, ...principal } = record;
+    const { hash: unusedHash, ...principal } = record;
+    void unusedHash;
     return principal;
   }
 }
