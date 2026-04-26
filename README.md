@@ -3,6 +3,7 @@
 Sheetflare is a Cloudflare-first starter for exposing Google Sheets tabs through a small Hono API backed by Durable Objects.
 
 Production hardening guidance lives in [production-readiness-checklist.md](./production-readiness-checklist.md).
+Start with [docs/quickstart.md](./docs/quickstart.md).
 Operational docs live in [docs/operator-runbook.md](./docs/operator-runbook.md) and [docs/deploy.md](./docs/deploy.md).
 
 ## Workspaces
@@ -31,6 +32,14 @@ npm run smoke:staging
 - `npm run ops:reindex`
 - `npm run smoke:staging`
 
+## Setup Path
+
+For the normal setup flow:
+
+1. Follow [docs/quickstart.md](./docs/quickstart.md).
+2. Use [docs/deploy.md](./docs/deploy.md) for staging or production deployment details.
+3. Use [docs/operator-runbook.md](./docs/operator-runbook.md) for day-2 operations and failure handling.
+
 ## API Docs
 
 When the API worker is running:
@@ -39,35 +48,6 @@ When the API worker is running:
 - `GET /docs` serves the interactive API reference UI.
 
 The docs reflect the actual HTTP surface, including auth requirements, path params, query params, and request/response bodies for the supported endpoints.
-
-## Required API environment
-
-Set these in `apps/api/wrangler.jsonc` for local development or through Cloudflare secrets and variables for deployed environments:
-
-- `GOOGLE_CLIENT_EMAIL`
-- `GOOGLE_PRIVATE_KEY`
-- `GOOGLE_CREDENTIALS_JSON` (optional)
-- `ADMIN_BEARER_TOKEN`
-- `RATE_LIMIT_MAX_REQUESTS`
-- `RATE_LIMIT_WINDOW_SECONDS`
-
-`ADMIN_BEARER_TOKEN` is the bootstrap admin credential for self-hosted setups. Use it to create scoped API keys, then prefer those keys for normal operation.
-`RATE_LIMIT_MAX_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS` control the DO-backed edge request budget for `/v1/*` routes.
-
-Credential model:
-
-- By default, projects use the shared gateway credential ref: `default`.
-- `default` resolves to `GOOGLE_CLIENT_EMAIL` + `GOOGLE_PRIVATE_KEY`.
-- `GOOGLE_CREDENTIALS_JSON` is optional and allows named per-project refs without changing the API shape.
-- Project creation validates the referenced credential immediately, so bad named refs fail in the control plane instead of later on the data plane.
-- Example:
-  `{"analytics":{"clientEmail":"svc@example.com","privateKey":"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"}}`
-
-## Admin UI
-
-- The admin UI expects an operator credential and stores it locally in the browser.
-- Paste either the bootstrap admin token or a scoped admin API key into the auth panel, then the UI will call the protected admin routes with `Authorization: Bearer ...`.
-- This keeps the self-host default secure without requiring a separate proxy layer just to browse the control plane.
 
 ## Auth Model
 
@@ -82,22 +62,7 @@ Credential model:
   - `table:update`
   - `table:delete`
 
-Example bootstrap flow:
-
-```powershell
-$headers = @{
-  Authorization = "Bearer <ADMIN_BEARER_TOKEN>"
-  "Content-Type" = "application/json"
-}
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://127.0.0.1:8787/v1/admin/keys `
-  -Headers $headers `
-  -Body '{"name":"local-admin","scopes":["admin:projects","admin:keys","table:read","table:create","table:update","table:delete"]}'
-```
-
-The response includes the full API key exactly once.
+Bootstrap and deployment steps are documented in [docs/quickstart.md](./docs/quickstart.md).
 
 ## Row Identity
 
@@ -124,12 +89,7 @@ The response includes the full API key exactly once.
 - If the post-delete row reference scan does not match the local cache shape, the table falls back to a full sync for safety.
 - Table config changes that affect cache shape, indexing, or sheet layout automatically mark the cache stale and force a resync on the next read or write.
 
-Operator endpoints:
-
-- `POST /v1/admin/projects/:project/tables/:table/reindex`
-  Forces a full sync and returns cache status metadata.
-- `GET /v1/admin/projects/:project/tables/:table/cache`
-  Returns current cache status, row count, staleness, and last sync timestamps.
+Operational procedures for reindex, cache inspection, and failure handling live in [docs/operator-runbook.md](./docs/operator-runbook.md).
 
 ## Query Semantics
 
@@ -164,6 +124,12 @@ Performance notes:
 - `contains` is supported, but it is scan-heavy. For safety, scan-heavy queries are rejected once a cached table grows beyond the built-in full-scan threshold.
 - If a filter or sort targets a non-indexed field, the API rejects it instead of silently doing an expensive query on large caches.
 - Mutation note: the write path is optimized separately from list/query execution. Update/delete/create-duplicate checks resolve IDs through the managed ID column, not through the cached query indexes.
+
+## Admin UI
+
+- The admin UI expects an operator credential and stores it locally in the browser.
+- Paste either the bootstrap admin token or a scoped admin API key into the auth panel.
+- This keeps the self-host default secure without requiring a separate proxy layer just to browse the control plane.
 
 ## Notes
 
