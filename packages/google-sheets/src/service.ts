@@ -207,12 +207,22 @@ function buildRowEnvelope(config: GoogleSheetTableConfig, layout: HeaderLayout, 
     values[entry.name] = parseSheetCellValue(cells[entry.columnNumber - 1]);
   }
 
-  const rawId = values[config.idColumn];
   return {
-    id: rawId === null || rawId === undefined ? String(rowNumber) : String(rawId),
+    id: getManagedRowId(values[config.idColumn], config.idColumn, rowNumber),
     rowNumber,
     values
   };
+}
+
+function getManagedRowId(value: RowRecord[string] | undefined, idColumn: string, rowNumber: number) {
+  if (value === null || value === undefined || (typeof value === 'string' && value.trim().length === 0)) {
+    throw new BadRequestError(`Blank managed row id detected in column ${idColumn} at row ${rowNumber}.`, {
+      idColumn,
+      rowNumber
+    });
+  }
+
+  return String(value);
 }
 
 export class GoogleSheetsService {
