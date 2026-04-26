@@ -205,18 +205,13 @@ export class TableDO {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    let rowNumber = this.lookupRowNumber(rowId);
-    if (!rowNumber) {
-      await this.reindex(projectSlug, tableSlug);
-      rowNumber = this.lookupRowNumber(rowId);
-    }
-
-    if (!rowNumber) {
+    const resolved = await this.resolveRowById(config, rowId);
+    if (!resolved) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
 
     return {
-      data: await this.sheets.readSingleRow(config, rowNumber)
+      data: resolved
     };
   }
 
@@ -255,17 +250,11 @@ export class TableDO {
     }
 
     const headers = await this.getHeaders(config);
-    let rowNumber = this.lookupRowNumber(rowId);
-    if (!rowNumber) {
-      await this.reindex(projectSlug, tableSlug);
-      rowNumber = this.lookupRowNumber(rowId);
+    const existingRow = await this.resolveRowById(config, rowId);
+    if (!existingRow) {
+      throw new NotFoundError(`Row ${rowId} was not found.`);
     }
 
-    if (!rowNumber) {
-      throw new BadRequestError(`Row ${rowId} was not found.`);
-    }
-
-    const existingRow = await this.sheets.readSingleRow(config, rowNumber);
     const patchValues = Object.fromEntries(
       Object.entries(patch).filter((entry): entry is [string, RowRecord[string]] => entry[1] !== undefined)
     );
@@ -275,12 +264,13 @@ export class TableDO {
       [config.idColumn]: rowId
     });
     const { values, ignoredKeys } = pickKnownColumns(mergedValues, headers);
-    await this.sheets.writeRow(config, rowNumber, headers, values);
+    await this.sheets.writeRow(config, existingRow.rowNumber, headers, values);
+    this.upsertRowIndex(rowId, existingRow.rowNumber);
 
     return {
       data: {
         id: rowId,
-        rowNumber,
+        rowNumber: existingRow.rowNumber,
         values
       },
       ignoredKeys
@@ -293,17 +283,12 @@ export class TableDO {
       throw new ForbiddenError(`Deletes are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    let rowNumber = this.lookupRowNumber(rowId);
-    if (!rowNumber) {
-      await this.reindex(projectSlug, tableSlug);
-      rowNumber = this.lookupRowNumber(rowId);
-    }
-
-    if (!rowNumber) {
+    const existingRow = await this.resolveRowById(config, rowId);
+    if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
 
-    await this.sheets.deleteRow(config, rowNumber);
+    await this.sheets.deleteRow(config, existingRow.rowNumber);
     this.deleteRowIndex(rowId);
     await this.reindex(projectSlug, tableSlug);
 
@@ -338,6 +323,25 @@ export class TableDO {
       ok: true as const,
       rowCount: rows.length
     };
+  }
+
+  private async resolveRowById(config: GoogleSheetTableConfig, rowId: string): Promise<RowEnvelope | null> {
+    const rowNumberHint = this.lookupRowNumber(rowId);
+    const result = await this.sheets.findRowById(config, rowId, rowNumberHint);
+    if (!result) {
+      this.deleteRowIndex(rowId);
+      return null;
+    }
+
+    if (result.duplicateCount > 1) {
+      throw new BadRequestError(
+        `Duplicate managed row id detected for ${rowId}.`,
+        { rowId, duplicateCount: result.duplicateCount, idColumn: config.idColumn }
+      );
+    }
+
+    this.upsertRowIndex(rowId, result.row.rowNumber);
+    return result.row;
   }
 
   private lookupRowNumber(rowId: string): number | null {
