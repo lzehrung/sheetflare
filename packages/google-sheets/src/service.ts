@@ -51,6 +51,11 @@ export interface RowLookupResult {
   duplicateCount: number;
 }
 
+export interface TableSnapshot {
+  headers: string[];
+  rows: RowEnvelope[];
+}
+
 export type RowReference = {
   rowId: string;
   rowNumber: number;
@@ -267,29 +272,44 @@ export class GoogleSheetsService {
     return layout.headers;
   }
 
-  async readAllRows(config: GoogleSheetTableConfig): Promise<RowEnvelope[]> {
+  async readTableSnapshot(config: GoogleSheetTableConfig): Promise<TableSnapshot> {
     const range = `${escapeSheetName(config.sheetTabName)}`;
     const values = await this.readValues(config.spreadsheetId, range);
     const headerIndex = Math.max(config.headerRow - 1, 0);
     const dataIndex = Math.max(config.dataStartRow - 1, headerIndex + 1);
     const layout = buildHeaderLayout(values[headerIndex], config.idColumn);
 
-    const rows = values.slice(dataIndex);
+    return {
+      headers: layout.headers,
+      rows: values
+        .slice(dataIndex)
+        .map((cells, index) => buildRowEnvelope(config, layout, config.dataStartRow + index, cells))
+        .filter((row) => Object.values(row.values).some((value) => value !== null))
+    };
+  }
 
-    return rows
-      .map((cells, index) => buildRowEnvelope(config, layout, config.dataStartRow + index, cells))
-      .filter((row) => Object.values(row.values).some((value) => value !== null));
+  async readAllRows(config: GoogleSheetTableConfig): Promise<RowEnvelope[]> {
+    return (await this.readTableSnapshot(config)).rows;
   }
 
   async findRowById(
     config: GoogleSheetTableConfig,
     rowId: string,
-    rowNumberHint?: number | null
+    rowNumberHint?: number | null,
+    options?: { verifyUnique?: boolean }
   ): Promise<RowLookupResult | null> {
+    const verifyUnique = options?.verifyUnique ?? true;
     const layout = await this.readHeaderLayout(config);
     let hintedRow: RowEnvelope | null = null;
     if (rowNumberHint) {
       hintedRow = await this.readSingleRow(config, rowNumberHint, layout).catch(() => null);
+    }
+
+    if (hintedRow?.id === rowId && !verifyUnique) {
+      return {
+        row: hintedRow,
+        duplicateCount: 1
+      };
     }
 
     const matchRowNumbers = (await this.readRowReferences(config, layout))
