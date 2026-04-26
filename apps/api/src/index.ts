@@ -24,6 +24,7 @@ import {
   rowParamsSchema,
   tableConfigSchema,
   BadRequestError,
+  NotFoundError,
   toErrorResponse,
   UnauthorizedError,
   updateRowInputSchema,
@@ -192,8 +193,8 @@ function getTableStub(env: Env, projectSlug: string, tableSlug: string) {
   return env.TABLE_DO.get(env.TABLE_DO.idFromName(`table:${projectSlug}:${tableSlug}`));
 }
 
-function getRateLimitStub(env: Env) {
-  return env.RATE_LIMIT_DO.get(env.RATE_LIMIT_DO.idFromName('global-rate-limit'));
+function getRateLimitStub(env: Env, shardKey: string) {
+  return env.RATE_LIMIT_DO.get(env.RATE_LIMIT_DO.idFromName(`rate-limit:${shardKey}`));
 }
 
 function parseApiKey(value: string) {
@@ -300,9 +301,9 @@ async function enforceRateLimit(c: AppContext) {
 
   const principal = await resolveRateLimitPrincipal(c);
   const routeFamily = getRateLimitRouteFamily(c.req.path);
-  const response = await doRpc<RateLimitDoResponse>(getRateLimitStub(c.env), {
+  const response = await doRpc<RateLimitDoResponse>(getRateLimitStub(c.env, `${routeFamily}:${principal}`), {
     type: 'rate-limit.check',
-    key: `${routeFamily}:${c.req.method}:${principal}`,
+    key: c.req.method,
     limit: config.maxRequests,
     windowSeconds: config.windowSeconds
   });
@@ -417,6 +418,23 @@ async function loadProject(c: { env: Env }, projectSlug: string) {
   });
 
   return (response as { type: 'project.get.result'; result: AdminGetProjectResult }).result;
+}
+
+async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug: string) {
+  const projectState = await loadProject(c, projectSlug);
+  const table = projectState.tables.find((entry) => entry.tableSlug === tableSlug);
+  if (!table) {
+    throw new NotFoundError(`Table ${projectSlug}/${tableSlug} was not found.`);
+  }
+
+  return {
+    projectState,
+    resolvedConfig: {
+      ...table,
+      spreadsheetId: projectState.project.spreadsheetId,
+      googleCredentialRef: projectState.project.googleCredentialRef
+    }
+  };
 }
 
 async function getApiKeyRecord(c: { env: Env }, apiKeyId: string) {
@@ -925,7 +943,7 @@ function createApp() {
   app.openapi(listRowsRoute, async (c) => {
     const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
-    const projectState = await loadProject(c, project);
+    const { projectState, resolvedConfig } = await loadProjectTable(c, project, table);
     if (projectState.project.defaultAuthMode !== 'public-read') {
       assertProjectScope(auth, 'table:read', project);
     }
@@ -934,7 +952,8 @@ function createApp() {
       type: 'table.rows.list',
       projectSlug: project,
       tableSlug: table,
-      query
+      query,
+      resolvedConfig
     });
 
     return c.json((response as { type: 'table.rows.list.result'; result: ListRowsResult }).result);
@@ -943,14 +962,15 @@ function createApp() {
   app.openapi(getSchemaRoute, async (c) => {
     const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
-    const projectState = await loadProject(c, project);
+    const { projectState, resolvedConfig } = await loadProjectTable(c, project, table);
     if (projectState.project.defaultAuthMode !== 'public-read') {
       assertProjectScope(auth, 'table:read', project);
     }
     const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
       type: 'table.schema.get',
       projectSlug: project,
-      tableSlug: table
+      tableSlug: table,
+      resolvedConfig
     });
 
     return c.json((response as { type: 'table.schema.get.result'; result: GetSchemaResult }).result);
@@ -985,7 +1005,7 @@ function createApp() {
   app.openapi(getRowRoute, async (c) => {
     const { project, table, id } = parsePathParams(c, rowParamsSchema);
     const auth = await authenticateRequest(c);
-    const projectState = await loadProject(c, project);
+    const { projectState, resolvedConfig } = await loadProjectTable(c, project, table);
     if (projectState.project.defaultAuthMode !== 'public-read') {
       assertProjectScope(auth, 'table:read', project);
     }
@@ -993,7 +1013,8 @@ function createApp() {
       type: 'table.row.get',
       projectSlug: project,
       tableSlug: table,
-      rowId: id
+      rowId: id,
+      resolvedConfig
     });
 
     return c.json((response as { type: 'table.row.get.result'; result: GetRowResult }).result);

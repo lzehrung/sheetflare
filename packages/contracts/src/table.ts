@@ -100,6 +100,7 @@ export const tableCacheStatusSchema = z.object({
   status: z.enum(['idle', 'syncing', 'ready', 'error']),
   cacheTtlSeconds: z.number().int().nonnegative(),
   stale: z.boolean(),
+  staleReason: z.enum(['fresh', 'never-synced', 'ttl-expired', 'config-changed', 'error']),
   rowCount: z.number().int().nonnegative(),
   lastSyncStartedAt: z.string().datetime().nullable(),
   lastSyncCompletedAt: z.string().datetime().nullable(),

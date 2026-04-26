@@ -17,6 +17,7 @@ import type {
   UpsertTableResult
 } from './api';
 import type { ApiKeyPrincipal } from './auth';
+import type { TableConfig } from './project';
 import type { ListRowsQuery, ListRowsResult } from './table';
 
 export type ControlPlaneDoRequest =
@@ -53,15 +54,20 @@ export type ProjectDoResponse =
   | { type: 'project.table.list.result'; result: { data: UpsertTableResult['data'][] } }
   | { type: 'project.table.get.result'; result: UpsertTableResult };
 
+export type ResolvedTableConfigSnapshot = TableConfig & {
+  spreadsheetId: string;
+  googleCredentialRef: string;
+};
+
 export type TableDoRequest =
-  | { type: 'table.rows.list'; projectSlug: string; tableSlug: string; query: ListRowsQuery }
-  | { type: 'table.row.get'; projectSlug: string; tableSlug: string; rowId: string }
+  | { type: 'table.rows.list'; projectSlug: string; tableSlug: string; query: ListRowsQuery; resolvedConfig?: ResolvedTableConfigSnapshot }
+  | { type: 'table.row.get'; projectSlug: string; tableSlug: string; rowId: string; resolvedConfig?: ResolvedTableConfigSnapshot }
   | { type: 'table.row.create'; projectSlug: string; tableSlug: string; input: CreateRowInput }
   | { type: 'table.row.update'; projectSlug: string; tableSlug: string; rowId: string; input: UpdateRowInput }
   | { type: 'table.row.delete'; projectSlug: string; tableSlug: string; rowId: string }
-  | { type: 'table.schema.get'; projectSlug: string; tableSlug: string }
-  | { type: 'table.cache.get'; projectSlug: string; tableSlug: string }
-  | { type: 'table.reindex'; projectSlug: string; tableSlug: string };
+  | { type: 'table.schema.get'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot }
+  | { type: 'table.cache.get'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot }
+  | { type: 'table.reindex'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot };
 
 export type TableDoResponse =
   | { type: 'table.rows.list.result'; result: ListRowsResult }
