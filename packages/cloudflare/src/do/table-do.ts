@@ -10,7 +10,8 @@ import {
   type TableCacheStatus,
   type TableConfig,
   type TableDoRequest,
-  type TableDoResponse
+  type TableDoResponse,
+  type ResolvedTableConfigSnapshot
 } from '@sheetflare/contracts';
 import {
   assertQueryableField,
@@ -265,12 +266,12 @@ export class TableDO {
       case 'table.rows.list':
         return {
           type: 'table.rows.list.result',
-          result: await this.listRows(body.projectSlug, body.tableSlug, body.query)
+          result: await this.listRows(body.projectSlug, body.tableSlug, body.query, body.resolvedConfig)
         };
       case 'table.row.get':
         return {
           type: 'table.row.get.result',
-          result: await this.getRow(body.projectSlug, body.tableSlug, body.rowId)
+          result: await this.getRow(body.projectSlug, body.tableSlug, body.rowId, body.resolvedConfig)
         };
       case 'table.row.create':
         return {
@@ -290,22 +291,40 @@ export class TableDO {
       case 'table.schema.get':
         return {
           type: 'table.schema.get.result',
-          result: await this.getSchema(body.projectSlug, body.tableSlug)
+          result: await this.getSchema(body.projectSlug, body.tableSlug, body.resolvedConfig)
         };
       case 'table.cache.get':
         return {
           type: 'table.cache.get.result',
-          result: await this.getCacheStatus(body.projectSlug, body.tableSlug)
+          result: await this.getCacheStatus(body.projectSlug, body.tableSlug, body.resolvedConfig)
         };
       case 'table.reindex':
         return {
           type: 'table.reindex.result',
-          result: await this.syncCache(body.projectSlug, body.tableSlug, { force: true })
+          result: await this.syncCache(
+            body.projectSlug,
+            body.tableSlug,
+            body.resolvedConfig
+              ? { force: true, resolvedConfig: body.resolvedConfig }
+              : { force: true }
+          )
         };
     }
   }
 
-  private async getTableConfig(projectSlug: string, tableSlug: string): Promise<ResolvedTableConfig> {
+  private async getTableConfig(
+    projectSlug: string,
+    tableSlug: string,
+    resolvedConfig?: ResolvedTableConfigSnapshot
+  ): Promise<ResolvedTableConfig> {
+    if (resolvedConfig) {
+      if (resolvedConfig.projectSlug !== projectSlug || resolvedConfig.tableSlug !== tableSlug) {
+        throw new BadRequestError(`Resolved config does not match ${projectSlug}/${tableSlug}.`);
+      }
+
+      return resolvedConfig;
+    }
+
     const result = await doRpc<
       { type: 'project.get.result'; result: { project: { spreadsheetId: string; googleCredentialRef: string }; tables: TableConfig[] } }
     >(getProjectStub(this.env, projectSlug), {
@@ -337,8 +356,13 @@ export class TableDO {
     return service;
   }
 
-  private async listRows(projectSlug: string, tableSlug: string, rawQuery: ListRowsQuery) {
-    const config = await this.getTableConfig(projectSlug, tableSlug);
+  private async listRows(
+    projectSlug: string,
+    tableSlug: string,
+    rawQuery: ListRowsQuery,
+    resolvedConfig?: ResolvedTableConfigSnapshot
+  ) {
+    const config = await this.getTableConfig(projectSlug, tableSlug, resolvedConfig);
     if (!config.readEnabled) {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
@@ -352,8 +376,13 @@ export class TableDO {
     };
   }
 
-  private async getRow(projectSlug: string, tableSlug: string, rowId: string) {
-    const config = await this.getTableConfig(projectSlug, tableSlug);
+  private async getRow(
+    projectSlug: string,
+    tableSlug: string,
+    rowId: string,
+    resolvedConfig?: ResolvedTableConfigSnapshot
+  ) {
+    const config = await this.getTableConfig(projectSlug, tableSlug, resolvedConfig);
     if (!config.readEnabled) {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
@@ -497,8 +526,12 @@ export class TableDO {
     };
   }
 
-  private async getSchema(projectSlug: string, tableSlug: string): Promise<GetSchemaResult> {
-    const config = await this.getTableConfig(projectSlug, tableSlug);
+  private async getSchema(
+    projectSlug: string,
+    tableSlug: string,
+    resolvedConfig?: ResolvedTableConfigSnapshot
+  ): Promise<GetSchemaResult> {
+    const config = await this.getTableConfig(projectSlug, tableSlug, resolvedConfig);
     if (!config.readEnabled) {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
@@ -509,8 +542,12 @@ export class TableDO {
     };
   }
 
-  private async getCacheStatus(projectSlug: string, tableSlug: string): Promise<GetTableCacheStatusResult> {
-    const config = await this.getTableConfig(projectSlug, tableSlug);
+  private async getCacheStatus(
+    projectSlug: string,
+    tableSlug: string,
+    resolvedConfig?: ResolvedTableConfigSnapshot
+  ): Promise<GetTableCacheStatusResult> {
+    const config = await this.getTableConfig(projectSlug, tableSlug, resolvedConfig);
     return {
       data: this.computeCacheStatus(config)
     };
@@ -541,7 +578,7 @@ export class TableDO {
   private async syncCache(
     projectSlug: string,
     tableSlug: string,
-    options: { force: boolean }
+    options: { force: boolean; resolvedConfig?: ResolvedTableConfigSnapshot }
   ) {
     if (this.activeSync) {
       const cache = await this.activeSync;
@@ -554,7 +591,7 @@ export class TableDO {
       }
     }
 
-    const config = await this.getTableConfig(projectSlug, tableSlug);
+    const config = await this.getTableConfig(projectSlug, tableSlug, options.resolvedConfig);
     const currentStatus = this.computeCacheStatus(config);
     if (!options.force && currentStatus.status === 'ready' && !currentStatus.stale) {
       return {
@@ -911,6 +948,7 @@ export class TableDO {
       status: cacheState.status,
       cacheTtlSeconds: cacheState.cacheTtlSeconds,
       stale: cacheState.stale,
+      staleReason: cacheState.staleReason,
       rowCount: cacheState.rowCount,
       lastSyncStartedAt: cacheState.lastSyncStartedAt,
       lastSyncCompletedAt: cacheState.lastSyncCompletedAt,

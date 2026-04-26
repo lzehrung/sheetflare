@@ -26,7 +26,8 @@ class FakeDurableObjectNamespace {
 }
 
 function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
-  const rateLimitRequests: Array<{ key: string }> = [];
+  const rateLimitRequests: Array<{ name: string; key: string }> = [];
+  const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown> }> = [];
   let verifyApiKeyCallCount = 0;
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
     const body = (await request.json()) as { type: string; apiKeyId?: string; hash?: string; projectSlug?: string | null };
@@ -165,7 +166,24 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
             updatedAt: '2026-04-26T00:00:00.000Z',
             defaultAuthMode: 'private'
           },
-          tables: []
+          tables: [
+            {
+              projectSlug: 'demo',
+              tableSlug: 'users',
+              sheetTabName: 'Users',
+              idColumn: '_id',
+              indexedFields: ['_id'],
+              headerRow: 1,
+              dataStartRow: 2,
+              readEnabled: true,
+              createEnabled: true,
+              updateEnabled: true,
+              deleteEnabled: true,
+              cacheTtlSeconds: 15,
+              createdAt: '2026-04-26T00:00:00.000Z',
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
         }
       });
     }
@@ -197,7 +215,12 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
       type: string;
       input?: { values?: Record<string, unknown> };
       query?: unknown;
+      resolvedConfig?: Record<string, unknown>;
     };
+    tableRequests.push({
+      type: body.type,
+      resolvedConfig: body.resolvedConfig
+    });
 
     if (body.type === 'table.row.create') {
       return Response.json({
@@ -221,6 +244,7 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
             status: 'ready',
             cacheTtlSeconds: 15,
             stale: false,
+            staleReason: 'fresh',
             rowCount: 2,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
@@ -252,9 +276,9 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
     });
   });
 
-  const rateLimit = new FakeDurableObjectNamespace(() => async (request) => {
+  const rateLimit = new FakeDurableObjectNamespace((name) => async (request) => {
     const body = (await request.json()) as { key: string };
-    rateLimitRequests.push({ key: body.key });
+    rateLimitRequests.push({ name, key: body.key });
     return Response.json({
       type: 'rate-limit.check.result',
       result: {
@@ -279,6 +303,10 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
 
   Object.defineProperty(env, '__rateLimitRequests', {
     value: rateLimitRequests,
+    enumerable: false
+  });
+  Object.defineProperty(env, '__tableRequests', {
+    value: tableRequests,
     enumerable: false
   });
   Object.defineProperty(env, '__verifyApiKeyCallCount', {
@@ -519,6 +547,7 @@ describe('api routes', () => {
         status: 'ready',
         cacheTtlSeconds: 15,
         stale: false,
+        staleReason: 'fresh',
         rowCount: 2,
         lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
         lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
@@ -583,7 +612,7 @@ describe('api routes', () => {
 
   it('uses separate rate-limit buckets for admin and data routes', async () => {
     const app = createApp();
-    const env = createEnv() as Env & { __rateLimitRequests: Array<{ key: string }> };
+    const env = createEnv() as Env & { __rateLimitRequests: Array<{ name: string; key: string }> };
 
     await app.request(
       '/v1/admin/projects',
@@ -605,15 +634,15 @@ describe('api routes', () => {
       env
     );
 
-    expect(env.__rateLimitRequests.map((entry) => entry.key)).toEqual([
-      'admin:GET:bootstrap-admin',
-      'data:GET:api-key:project-key'
+    expect(env.__rateLimitRequests).toEqual([
+      { name: 'rate-limit:admin:bootstrap-admin', key: 'GET' },
+      { name: 'rate-limit:data:api-key:project-key', key: 'GET' }
     ]);
   });
 
   it('falls back to the anonymous client bucket for unverified api-key shaped credentials', async () => {
     const app = createApp();
-    const env = createEnv() as Env & { __rateLimitRequests: Array<{ key: string }> };
+    const env = createEnv() as Env & { __rateLimitRequests: Array<{ name: string; key: string }> };
 
     const response = await app.request(
       '/v1/admin/projects',
@@ -626,8 +655,8 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(401);
-    expect(env.__rateLimitRequests.map((entry) => entry.key)).toEqual([
-      'admin:GET:client:anonymous'
+    expect(env.__rateLimitRequests).toEqual([
+      { name: 'rate-limit:admin:client:anonymous', key: 'GET' }
     ]);
   });
 
@@ -647,6 +676,32 @@ describe('api routes', () => {
 
     expect(response.status).toBe(200);
     expect(env.__verifyApiKeyCallCount).toBe(1);
+  });
+
+  it('passes resolved table config to public-read route durable-object calls', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown> }> };
+
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(env.__tableRequests).toContainEqual({
+      type: 'table.rows.list',
+      resolvedConfig: expect.objectContaining({
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        spreadsheetId: 'sheet-1',
+        googleCredentialRef: 'default'
+      })
+    });
   });
 
   it('serves an OpenAPI document with the expected API surface', async () => {
