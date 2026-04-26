@@ -45,15 +45,6 @@ type CachedRowRow = {
   values_json: string;
 };
 
-type CachedCellRow = {
-  row_id: string;
-  field_name: string;
-  value_kind: string;
-  value_text: string | null;
-  value_number: number | null;
-  value_boolean: number | null;
-};
-
 type SyncMeta = {
   status: TableCacheStatus['status'];
   rowCount: number;

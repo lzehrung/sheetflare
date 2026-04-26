@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { createApiKeyInputSchema, createApiKeyResultSchema, apiKeyPrincipalSchema } from './auth';
 import { defaultAuthModeSchema, maxIndexedFieldCount, projectConfigSchema, tableConfigSchema } from './project';
 import { apiKeyIdSchema, projectSlugSchema, rowIdSchema, spreadsheetIdSchema, tableSlugSchema } from './ids';
-import { listRowsResultSchema, rowEnvelopeSchema, rowRecordSchema, tableCacheStatusSchema, tableSchemaSchema } from './table';
+import { rowEnvelopeSchema, rowRecordSchema, tableCacheStatusSchema, tableSchemaSchema } from './table';
 
 export const createProjectInputSchema = z.object({
   slug: projectSlugSchema,

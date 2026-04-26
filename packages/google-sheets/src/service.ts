@@ -215,12 +215,6 @@ function buildRowEnvelope(config: GoogleSheetTableConfig, layout: HeaderLayout, 
   };
 }
 
-function trimHeaders(row: readonly string[] | undefined): string[] {
-  return (row ?? [])
-    .map((header) => header.trim())
-    .filter((header) => header.length > 0);
-}
-
 export class GoogleSheetsService {
   private readonly fetchImpl: FetchLike;
   private readonly oauthTokenUrl: string;
