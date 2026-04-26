@@ -1,8 +1,10 @@
 import {
   type AdminGetProjectResult,
+  BadRequestError,
   type ControlPlaneDoResponse,
   type CreateProjectInput,
   type CreateTableInput,
+  maxIndexedFieldCount,
   NotFoundError,
   type ProjectConfig,
   type ProjectDoRequest,
@@ -184,6 +186,16 @@ export class ProjectDO {
   private async createTable(projectSlug: string, input: CreateTableInput): Promise<TableConfig> {
     const project = await this.getProject(projectSlug);
     const now = new Date().toISOString();
+    const idColumn = input.idColumn ?? '_id';
+    const indexedFields = this.buildIndexedFields(idColumn, input.indexedFields ?? []);
+    const headerRow = input.headerRow ?? 1;
+    const dataStartRow = input.dataStartRow ?? 2;
+
+    this.validateTableConfig({
+      headerRow,
+      dataStartRow,
+      indexedFields
+    });
 
     this.ctx.storage.sql.exec(
       `
@@ -209,10 +221,10 @@ export class ProjectDO {
       input.tableSlug,
       input.sheetTabName,
       input.sheetGid ?? null,
-      input.idColumn ?? '_id',
-      JSON.stringify(this.buildIndexedFields(input.idColumn ?? '_id', input.indexedFields ?? [])),
-      input.headerRow ?? 1,
-      input.dataStartRow ?? 2,
+      idColumn,
+      JSON.stringify(indexedFields),
+      headerRow,
+      dataStartRow,
       (input.readEnabled ?? true) ? 1 : 0,
       (input.createEnabled ?? true) ? 1 : 0,
       (input.updateEnabled ?? true) ? 1 : 0,
@@ -313,5 +325,28 @@ export class ProjectDO {
   private buildIndexedFields(idColumn: string, indexedFields: string[]) {
     const unique = new Set<string>([idColumn, ...indexedFields]);
     return [...unique].sort((left, right) => left.localeCompare(right));
+  }
+
+  private validateTableConfig(config: {
+    headerRow: number;
+    dataStartRow: number;
+    indexedFields: string[];
+  }) {
+    if (config.dataStartRow <= config.headerRow) {
+      throw new BadRequestError('dataStartRow must be greater than headerRow.', {
+        headerRow: config.headerRow,
+        dataStartRow: config.dataStartRow
+      });
+    }
+
+    if (config.indexedFields.length > maxIndexedFieldCount) {
+      throw new BadRequestError(
+        `A table may index at most ${maxIndexedFieldCount} fields including the managed ID column.`,
+        {
+          indexedFieldCount: config.indexedFields.length,
+          maxIndexedFieldCount
+        }
+      );
+    }
   }
 }

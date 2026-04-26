@@ -50,6 +50,54 @@ describe('parseSheetCellValue', () => {
 });
 
 describe('GoogleSheetsService.readAllRows', () => {
+  it('rejects duplicate non-empty header names', async () => {
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes('/values/')) {
+          return Response.json({
+            values: [
+              ['_id', 'name', 'name'],
+              ['row-1', 'Ada', 'Duplicate']
+            ]
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    await expect(service.readAllRows({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Duplicate header "name" was found in the configured sheet header row.'
+    });
+  });
+
   it('respects configured header and data rows', async () => {
     const service = new GoogleSheetsService({
       clientEmail: 'service@example.com',

@@ -204,6 +204,76 @@ describe('TableDO', () => {
     });
   });
 
+  it('rejects table configs where data rows do not start after the header row', async () => {
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await expect(
+      doRpc<ProjectDoResponse>(
+        env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+        {
+          type: 'project.table.create',
+          projectSlug: 'demo',
+          input: {
+            tableSlug: 'users',
+            sheetTabName: 'Users',
+            headerRow: 2,
+            dataStartRow: 2
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'dataStartRow must be greater than headerRow.'
+    });
+  });
+
+  it('rejects table configs whose effective indexed field set exceeds the supported limit', async () => {
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await expect(
+      doRpc<ProjectDoResponse>(
+        env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+        {
+          type: 'project.table.create',
+          projectSlug: 'demo',
+          input: {
+            tableSlug: 'users',
+            sheetTabName: 'Users',
+            idColumn: '_managed_id',
+            indexedFields: Array.from({ length: 32 }, (_, index) => `field_${index + 1}`)
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'A table may index at most 32 fields including the managed ID column.'
+    });
+  });
+
   it('re-resolves stale row numbers by ID before updating', async () => {
     const sheet: SheetState = {
       rows: [
@@ -446,6 +516,119 @@ describe('TableDO', () => {
     expect(listed.result.data.map((row) => row.id)).toEqual(['row-1']);
   });
 
+  it('keeps cache metadata stale after a config-driven resync fails', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name', 'status'],
+        ['row-1', 'Ada', 'active'],
+        ['row-2', 'Grace', 'inactive']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'secondary'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['name'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['name', 'status'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    sheet.rows = [
+      ['_id', 'name', 'name'],
+      ['row-1', 'Ada', 'Duplicate'],
+      ['row-2', 'Grace', 'Again']
+    ];
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.rows.list',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          query: {
+            filter: {
+              status: {
+                eq: 'active'
+              }
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Duplicate header "name" was found in the configured sheet header row.'
+    });
+
+    const cacheStatus = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect((cacheStatus as {
+      type: 'table.cache.get.result';
+      result: {
+        data: {
+          status: string;
+          stale: boolean;
+        };
+      };
+    }).result.data).toMatchObject({
+      status: 'error',
+      stale: true
+    });
+  });
+
   it('fails hard when duplicate managed IDs are detected upstream', async () => {
     const sheet: SheetState = {
       rows: [
@@ -500,5 +683,120 @@ describe('TableDO', () => {
         }
       )
     ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  it('keeps scan-based pagination stable when the cursor row disappears between pages', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'secondary'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['name'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const firstPage = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          limit: 2,
+          sort: 'name:asc',
+          filter: {
+            name: {
+              contains: 'a'
+            }
+          }
+        }
+      }
+    );
+
+    const firstResult = firstPage as {
+      type: 'table.rows.list.result';
+      result: {
+        data: Array<{ id: string }>;
+        nextCursor: string | null;
+      };
+    };
+
+    expect(firstResult.result.data.map((row) => row.id)).toEqual(['row-1', 'row-2']);
+    expect(firstResult.result.nextCursor).toBeTruthy();
+
+    sheet.rows = [
+      ['_id', 'name'],
+      ['row-1', 'Ada'],
+      ['row-3', 'Cora']
+    ];
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.reindex',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    const secondPage = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          limit: 2,
+          sort: 'name:asc',
+          filter: {
+            name: {
+              contains: 'a'
+            }
+          },
+          cursor: firstResult.result.nextCursor
+        }
+      }
+    );
+
+    const secondResult = secondPage as {
+      type: 'table.rows.list.result';
+      result: {
+        data: Array<{ id: string }>;
+        nextCursor: string | null;
+      };
+    };
+
+    expect(secondResult.result.data.map((row) => row.id)).toEqual(['row-3']);
+    expect(secondResult.result.nextCursor).toBeNull();
   });
 });

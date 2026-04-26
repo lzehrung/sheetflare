@@ -13,20 +13,69 @@ export function getIndexedFieldSet(indexedFields: readonly string[]) {
   return new Set(indexedFields);
 }
 
-function compareValues(
-  left: RowRecord[string] | undefined,
-  right: RowRecord[string] | undefined
+function getQueryValueKindRank(value: RowRecord[string] | QueryScalarValue | undefined) {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === 'boolean') return 1;
+  if (typeof value === 'number') return 2;
+  if (typeof value === 'string') return 3;
+  return 4;
+}
+
+function toComparableQueryValue(value: RowRecord[string] | QueryScalarValue | undefined) {
+  return Array.isArray(value) ? JSON.stringify(value) : value;
+}
+
+export function compareQueryValues(
+  left: RowRecord[string] | QueryScalarValue | undefined,
+  right: RowRecord[string] | QueryScalarValue | undefined
 ) {
-  const leftComparable = Array.isArray(left) ? JSON.stringify(left) : left;
-  const rightComparable = Array.isArray(right) ? JSON.stringify(right) : right;
+  const leftRank = getQueryValueKindRank(left);
+  const rightRank = getQueryValueKindRank(right);
+  if (leftRank !== rightRank) {
+    return leftRank - rightRank;
+  }
+
+  const leftComparable = toComparableQueryValue(left);
+  const rightComparable = toComparableQueryValue(right);
 
   if (leftComparable === rightComparable) return 0;
   if (leftComparable === null || leftComparable === undefined) return -1;
   if (rightComparable === null || rightComparable === undefined) return 1;
+
+  if (typeof leftComparable === 'boolean' && typeof rightComparable === 'boolean') {
+    return Number(leftComparable) - Number(rightComparable);
+  }
+
+  if (typeof leftComparable === 'number' && typeof rightComparable === 'number') {
+    return leftComparable - rightComparable;
+  }
+
   return String(leftComparable).localeCompare(String(rightComparable), undefined, {
     numeric: true,
     sensitivity: 'base'
   });
+}
+
+export function compareRangeQueryValues(
+  value: RowRecord[string] | string | number,
+  expected: string | number
+) {
+  if (value === null || Array.isArray(value) || typeof value === 'boolean') {
+    return null;
+  }
+
+  if (typeof value === 'number' && typeof expected === 'number') {
+    return value - expected;
+  }
+
+  if (typeof value === 'string' && typeof expected === 'string') {
+    return value.localeCompare(expected, undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    });
+  }
+
+  return null;
 }
 
 export function sortRows(
@@ -44,7 +93,7 @@ export function sortRows(
     }
 
     return (
-      compareValues(left.values[sort.field], right.values[sort.field]) * direction ||
+      compareQueryValues(left.values[sort.field], right.values[sort.field]) * direction ||
       left.id.localeCompare(right.id) * direction
     );
   });
