@@ -1,17 +1,31 @@
-import { zValidator } from '@hono/zod-validator';
+import { Scalar } from '@scalar/hono-api-reference';
+import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import {
+  adminCreateApiKeyInputSchema,
+  adminCreateApiKeyResultSchema,
+  adminGetProjectResultSchema,
+  adminListApiKeysResultSchema,
+  adminListProjectsResultSchema,
   adminProjectParamsSchema,
   adminProjectTableParamsSchema,
-  adminCreateApiKeyInputSchema,
   apiKeyParamsSchema,
   createProjectInputSchema,
   createRowInputSchema,
+  createRowResultSchema,
   createTableInputSchema,
+  deleteRowResultSchema,
+  getRowResultSchema,
+  getSchemaResultSchema,
+  getTableCacheStatusResultSchema,
   listRowsQuerySchema,
+  listRowsResultSchema,
+  reindexTableResultSchema,
   rowParamsSchema,
+  tableConfigSchema,
   toErrorResponse,
   UnauthorizedError,
   updateRowInputSchema,
+  updateRowResultSchema,
   type AdminCreateApiKeyResult,
   type AdminGetProjectResult,
   type AdminListApiKeysResult,
@@ -19,20 +33,23 @@ import {
   type ApiKeyPrincipal,
   type ApiScope,
   type ControlPlaneDoResponse,
+  type CreateProjectInput,
+  type CreateRowInput,
+  type CreateTableInput,
   type CreateRowResult,
   type GetRowResult,
-  type GetTableCacheStatusResult,
   type GetSchemaResult,
+  type GetTableCacheStatusResult,
+  type ListRowsQuery,
   type ListRowsResult,
   type ProjectDoResponse,
   type ReindexTableResult,
   type TableDoResponse,
+  type UpdateRowInput,
   type UpdateRowResult,
   type UpsertTableResult
 } from '@sheetflare/contracts';
-import { ControlPlaneDO, RateLimitDO, ProjectDO, TableDO, doRpc } from '@sheetflare/cloudflare';
-import { Hono } from 'hono';
-import type { Context } from 'hono';
+import { ControlPlaneDO, ProjectDO, RateLimitDO, TableDO, doRpc } from '@sheetflare/cloudflare';
 import type { Env } from './env';
 
 type AppVariables = {
@@ -43,6 +60,103 @@ type AuthContext =
   | { kind: 'anonymous' }
   | { kind: 'bootstrap-admin' }
   | { kind: 'api-key'; record: ApiKeyPrincipal };
+
+const healthResponseSchema = z.object({
+  ok: z.literal(true),
+  service: z.string()
+});
+
+const errorResponseSchema = z.object({
+  error: z.object({
+    code: z.string(),
+    message: z.string(),
+    details: z.unknown().nullable()
+  })
+});
+
+const listTablesResultSchema = z.object({
+  data: z.array(tableConfigSchema)
+});
+
+const okResultSchema = z.object({
+  ok: z.literal(true)
+});
+
+const adminProjectsQuerySchema = z.object({
+  project: z.string().optional().openapi({
+    param: {
+      name: 'project',
+      in: 'query'
+    },
+    example: 'demo'
+  })
+});
+
+const listRowsQueryOpenApiSchema = z.object({
+  limit: z.coerce.number().int().positive().max(500).optional().openapi({
+    param: {
+      name: 'limit',
+      in: 'query'
+    },
+    example: 50
+  }),
+  cursor: z.string().optional().openapi({
+    param: {
+      name: 'cursor',
+      in: 'query'
+    }
+  }),
+  sort: z.string().optional().openapi({
+    param: {
+      name: 'sort',
+      in: 'query'
+    },
+    example: 'rowNumber:asc'
+  }),
+  fields: z.string().optional().openapi({
+    param: {
+      name: 'fields',
+      in: 'query'
+    },
+    example: 'name,email,status'
+  })
+});
+
+const listApiKeysQuerySchema = z.object({
+  project: z.string().optional().openapi({
+    param: {
+      name: 'project',
+      in: 'query'
+    },
+    example: 'demo'
+  })
+});
+
+function jsonContent(schema: z.ZodTypeAny) {
+  return {
+    'application/json': {
+      schema
+    }
+  };
+}
+
+const unauthorizedResponse = {
+  description: 'Unauthorized',
+  content: jsonContent(errorResponseSchema)
+} as const;
+
+const badRequestResponse = {
+  description: 'Bad request',
+  content: jsonContent(errorResponseSchema)
+} as const;
+
+const notFoundResponse = {
+  description: 'Not found',
+  content: jsonContent(errorResponseSchema)
+} as const;
+
+const adminSecurity = [{ bearerAuth: [] }];
+const optionalBearerSecurity = [{ bearerAuth: [] }, {}];
 
 function getControlPlaneStub(env: Env) {
   return env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
@@ -77,7 +191,7 @@ async function hashApiKeySecret(secret: string) {
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
 }
 
-async function authenticateRequest(c: Context<{ Bindings: Env; Variables: AppVariables }>): Promise<AuthContext> {
+async function authenticateRequest(c: { req: { header(name: string): string | undefined }; env: Env }): Promise<AuthContext> {
   const authorization = c.req.header('authorization');
   if (!authorization) {
     return { kind: 'anonymous' };
@@ -156,7 +270,7 @@ function assertProjectScope(auth: AuthContext, scope: ApiScope, projectSlug: str
   }
 }
 
-async function loadProject(c: Context<{ Bindings: Env; Variables: AppVariables }>, projectSlug: string) {
+async function loadProject(c: { env: Env }, projectSlug: string) {
   const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, projectSlug), {
     type: 'project.get',
     projectSlug
@@ -165,20 +279,334 @@ async function loadProject(c: Context<{ Bindings: Env; Variables: AppVariables }
   return (response as { type: 'project.get.result'; result: AdminGetProjectResult }).result;
 }
 
-function parseListRowsQuery(c: Context<{ Bindings: Env; Variables: AppVariables }>) {
-  const query = {
-    limit: c.req.query('limit') ? Number(c.req.query('limit')) : undefined,
-    cursor: c.req.query('cursor') ?? undefined,
-    sort: c.req.query('sort') ?? undefined,
-    fields: c.req.query('fields')?.split(',').map((field) => field.trim()).filter(Boolean),
-    filter: undefined
-  };
-
-  return listRowsQuerySchema.parse(query);
+function parsePathParams<TSchema extends z.ZodType>(c: { req: { param(): Record<string, string> } }, schema: TSchema): z.infer<TSchema> {
+  return schema.parse(c.req.param());
 }
 
+async function parseJsonBody<TSchema extends z.ZodType>(c: { req: { json(): Promise<unknown> } }, schema: TSchema): Promise<z.infer<TSchema>> {
+  return schema.parse(await c.req.json());
+}
+
+function parseListRowsQuery(c: { req: { query(name: string): string | undefined } }): ListRowsQuery {
+  const query = listRowsQuerySchema.omit({
+    filter: true
+  });
+
+  return query.parse({
+    limit: c.req.query('limit'),
+    cursor: c.req.query('cursor') ?? undefined,
+    sort: c.req.query('sort') ?? undefined,
+    fields: c.req.query('fields')
+      ?.split(',')
+      .map((field) => field.trim())
+      .filter((field) => field.length > 0)
+  });
+}
+
+const healthRoute = createRoute({
+  method: 'get',
+  path: '/health',
+  tags: ['System'],
+  responses: {
+    200: {
+      description: 'Health check',
+      content: jsonContent(healthResponseSchema)
+    }
+  }
+});
+
+const adminListProjectsRoute = createRoute({
+  method: 'get',
+  path: '/v1/admin/projects',
+  tags: ['Projects'],
+  security: adminSecurity,
+  request: {
+    query: adminProjectsQuerySchema
+  },
+  responses: {
+    200: {
+      description: 'List all projects or get one project by slug',
+      content: jsonContent(z.union([adminListProjectsResultSchema, adminGetProjectResultSchema]))
+    },
+    401: unauthorizedResponse
+  }
+});
+
+const adminCreateProjectRoute = createRoute({
+  method: 'post',
+  path: '/v1/admin/projects',
+  tags: ['Projects'],
+  security: adminSecurity,
+  request: {
+    body: {
+      content: jsonContent(createProjectInputSchema),
+      description: 'Project definition'
+    }
+  },
+  responses: {
+    201: {
+      description: 'Created or updated project',
+      content: jsonContent(adminGetProjectResultSchema)
+    },
+    400: badRequestResponse,
+    401: unauthorizedResponse
+  }
+});
+
+const adminListTablesRoute = createRoute({
+  method: 'get',
+  path: '/v1/admin/projects/{project}/tables',
+  tags: ['Tables'],
+  security: adminSecurity,
+  request: {
+    params: adminProjectParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'List configured tables for a project',
+      content: jsonContent(listTablesResultSchema)
+    },
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
+const adminCreateTableRoute = createRoute({
+  method: 'post',
+  path: '/v1/admin/projects/{project}/tables',
+  tags: ['Tables'],
+  security: adminSecurity,
+  request: {
+    params: adminProjectParamsSchema,
+    body: {
+      content: jsonContent(createTableInputSchema),
+      description: 'Table definition'
+    }
+  },
+  responses: {
+    201: {
+      description: 'Created or updated table',
+      content: jsonContent(z.object({ data: tableConfigSchema }))
+    },
+    400: badRequestResponse,
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
+const listRowsRoute = createRoute({
+  method: 'get',
+  path: '/v1/projects/{project}/tables/{table}/rows',
+  tags: ['Rows'],
+  security: optionalBearerSecurity,
+  request: {
+    params: adminProjectTableParamsSchema,
+    query: listRowsQueryOpenApiSchema
+  },
+  responses: {
+    200: {
+      description: 'List cached rows',
+      content: jsonContent(listRowsResultSchema)
+    },
+    400: badRequestResponse,
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
+const getSchemaRoute = createRoute({
+  method: 'get',
+  path: '/v1/projects/{project}/tables/{table}/schema',
+  tags: ['Rows'],
+  security: optionalBearerSecurity,
+  request: {
+    params: adminProjectTableParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'Get inferred table schema',
+      content: jsonContent(getSchemaResultSchema)
+    },
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
+const getCacheStatusRoute = createRoute({
+  method: 'get',
+  path: '/v1/admin/projects/{project}/tables/{table}/cache',
+  tags: ['Tables'],
+  security: adminSecurity,
+  request: {
+    params: adminProjectTableParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'Get table cache status',
+      content: jsonContent(getTableCacheStatusResultSchema)
+    },
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
+const reindexTableRoute = createRoute({
+  method: 'post',
+  path: '/v1/admin/projects/{project}/tables/{table}/reindex',
+  tags: ['Tables'],
+  security: adminSecurity,
+  request: {
+    params: adminProjectTableParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'Force a full cache sync from Google Sheets',
+      content: jsonContent(reindexTableResultSchema)
+    },
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
+const getRowRoute = createRoute({
+  method: 'get',
+  path: '/v1/projects/{project}/tables/{table}/rows/{id}',
+  tags: ['Rows'],
+  security: optionalBearerSecurity,
+  request: {
+    params: rowParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'Get one row by managed ID',
+      content: jsonContent(getRowResultSchema)
+    },
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
+const createRowRoute = createRoute({
+  method: 'post',
+  path: '/v1/projects/{project}/tables/{table}/rows',
+  tags: ['Rows'],
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: adminProjectTableParamsSchema,
+    body: {
+      content: jsonContent(createRowInputSchema),
+      description: 'Row values'
+    }
+  },
+  responses: {
+    201: {
+      description: 'Create a row',
+      content: jsonContent(createRowResultSchema)
+    },
+    400: badRequestResponse,
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
+const updateRowRoute = createRoute({
+  method: 'patch',
+  path: '/v1/projects/{project}/tables/{table}/rows/{id}',
+  tags: ['Rows'],
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: rowParamsSchema,
+    body: {
+      content: jsonContent(updateRowInputSchema),
+      description: 'Partial row values'
+    }
+  },
+  responses: {
+    200: {
+      description: 'Update a row',
+      content: jsonContent(updateRowResultSchema)
+    },
+    400: badRequestResponse,
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
+const deleteRowRoute = createRoute({
+  method: 'delete',
+  path: '/v1/projects/{project}/tables/{table}/rows/{id}',
+  tags: ['Rows'],
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: rowParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'Delete a row',
+      content: jsonContent(deleteRowResultSchema)
+    },
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
+const listApiKeysRoute = createRoute({
+  method: 'get',
+  path: '/v1/admin/keys',
+  tags: ['API Keys'],
+  security: adminSecurity,
+  request: {
+    query: listApiKeysQuerySchema
+  },
+  responses: {
+    200: {
+      description: 'List API keys',
+      content: jsonContent(adminListApiKeysResultSchema)
+    },
+    401: unauthorizedResponse
+  }
+});
+
+const createApiKeyRoute = createRoute({
+  method: 'post',
+  path: '/v1/admin/keys',
+  tags: ['API Keys'],
+  security: adminSecurity,
+  request: {
+    body: {
+      content: jsonContent(adminCreateApiKeyInputSchema),
+      description: 'API key definition'
+    }
+  },
+  responses: {
+    201: {
+      description: 'Create an API key',
+      content: jsonContent(adminCreateApiKeyResultSchema)
+    },
+    400: badRequestResponse,
+    401: unauthorizedResponse
+  }
+});
+
+const revokeApiKeyRoute = createRoute({
+  method: 'delete',
+  path: '/v1/admin/keys/{id}',
+  tags: ['API Keys'],
+  security: adminSecurity,
+  request: {
+    params: apiKeyParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'Revoke an API key',
+      content: jsonContent(okResultSchema)
+    },
+    401: unauthorizedResponse
+  }
+});
+
 function createApp() {
-  const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
+  const app = new OpenAPIHono<{ Bindings: Env; Variables: AppVariables }>();
 
   app.use('*', async (c, next) => {
     const startedAt = Date.now();
@@ -208,17 +636,43 @@ function createApp() {
     });
   });
 
-  app.get('/health', (c) =>
+  app.openapi(healthRoute, (c) =>
     c.json({
       ok: true,
       service: 'sheetflare-api'
     })
   );
 
-  app.get('/v1/admin/projects', async (c) => {
+  app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', {
+    type: 'http',
+    scheme: 'bearer',
+    bearerFormat: 'API key or bootstrap admin token'
+  });
+
+  app.doc('/doc', {
+    openapi: '3.0.0',
+    info: {
+      title: 'Sheetflare API',
+      version: '1.0.0',
+      description: 'Self-hosted Google Sheets gateway with cached query execution on Cloudflare Durable Objects.'
+    }
+  });
+
+  app.get(
+    '/docs',
+    Scalar({
+      url: '/doc',
+      pageTitle: 'Sheetflare API Docs',
+      theme: 'default'
+    })
+  );
+
+  app.openapi(adminListProjectsRoute, async (c) => {
     const auth = await authenticateRequest(c);
     assertAdminScope(auth, 'admin:projects');
-    const project = c.req.query('project');
+    const { project } = adminProjectsQuerySchema.parse({
+      project: c.req.query('project')
+    });
 
     if (project) {
       return c.json(await loadProject(c, project));
@@ -233,10 +687,10 @@ function createApp() {
     );
   });
 
-  app.post('/v1/admin/projects', zValidator('json', createProjectInputSchema), async (c) => {
+  app.openapi(adminCreateProjectRoute, async (c) => {
     const auth = await authenticateRequest(c);
     assertAdminScope(auth, 'admin:projects');
-    const input = c.req.valid('json');
+    const input = await parseJsonBody(c, createProjectInputSchema) satisfies CreateProjectInput;
     const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, input.slug), {
       type: 'project.create',
       input
@@ -245,9 +699,9 @@ function createApp() {
     return c.json((response as { type: 'project.create.result'; result: AdminGetProjectResult }).result, 201);
   });
 
-  app.get('/v1/admin/projects/:project/tables', zValidator('param', adminProjectParamsSchema), async (c) => {
+  app.openapi(adminListTablesRoute, async (c) => {
     const auth = await authenticateRequest(c);
-    const { project } = c.req.valid('param');
+    const { project } = parsePathParams(c, adminProjectParamsSchema);
     assertProjectScope(auth, 'admin:projects', project);
     const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
       type: 'project.table.list',
@@ -259,52 +713,43 @@ function createApp() {
     );
   });
 
-  app.post(
-    '/v1/admin/projects/:project/tables',
-    zValidator('param', adminProjectParamsSchema),
-    zValidator('json', createTableInputSchema),
-    async (c) => {
-      const auth = await authenticateRequest(c);
-      const { project } = c.req.valid('param');
-      assertProjectScope(auth, 'admin:projects', project);
-      const input = c.req.valid('json');
-      const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
-        type: 'project.table.create',
-        projectSlug: project,
-        input
-      });
+  app.openapi(adminCreateTableRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    const { project } = parsePathParams(c, adminProjectParamsSchema);
+    assertProjectScope(auth, 'admin:projects', project);
+    const input = await parseJsonBody(c, createTableInputSchema) satisfies CreateTableInput;
+    const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
+      type: 'project.table.create',
+      projectSlug: project,
+      input
+    });
 
-      return c.json(
-        (response as { type: 'project.table.create.result'; result: UpsertTableResult }).result,
-        201
-      );
+    return c.json(
+      (response as { type: 'project.table.create.result'; result: UpsertTableResult }).result,
+      201
+    );
+  });
+
+  app.openapi(listRowsRoute, async (c) => {
+    const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
+    const auth = await authenticateRequest(c);
+    const projectState = await loadProject(c, project);
+    if (projectState.project.defaultAuthMode !== 'public-read') {
+      assertProjectScope(auth, 'table:read', project);
     }
-  );
+    const query = parseListRowsQuery(c);
+    const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
+      type: 'table.rows.list',
+      projectSlug: project,
+      tableSlug: table,
+      query
+    });
 
-  app.get(
-    '/v1/projects/:project/tables/:table/rows',
-    zValidator('param', adminProjectTableParamsSchema),
-    async (c) => {
-      const { project, table } = c.req.valid('param');
-      const auth = await authenticateRequest(c);
-      const projectState = await loadProject(c, project);
-      if (projectState.project.defaultAuthMode !== 'public-read') {
-        assertProjectScope(auth, 'table:read', project);
-      }
-      const query = parseListRowsQuery(c);
-      const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
-        type: 'table.rows.list',
-        projectSlug: project,
-        tableSlug: table,
-        query
-      });
+    return c.json((response as { type: 'table.rows.list.result'; result: ListRowsResult }).result);
+  });
 
-      return c.json((response as { type: 'table.rows.list.result'; result: ListRowsResult }).result);
-    }
-  );
-
-  app.get('/v1/projects/:project/tables/:table/schema', zValidator('param', adminProjectTableParamsSchema), async (c) => {
-    const { project, table } = c.req.valid('param');
+  app.openapi(getSchemaRoute, async (c) => {
+    const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
     const projectState = await loadProject(c, project);
     if (projectState.project.defaultAuthMode !== 'public-read') {
@@ -319,9 +764,9 @@ function createApp() {
     return c.json((response as { type: 'table.schema.get.result'; result: GetSchemaResult }).result);
   });
 
-  app.get('/v1/admin/projects/:project/tables/:table/cache', zValidator('param', adminProjectTableParamsSchema), async (c) => {
+  app.openapi(getCacheStatusRoute, async (c) => {
     const auth = await authenticateRequest(c);
-    const { project, table } = c.req.valid('param');
+    const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
     assertProjectScope(auth, 'admin:projects', project);
     const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
       type: 'table.cache.get',
@@ -332,9 +777,9 @@ function createApp() {
     return c.json((response as { type: 'table.cache.get.result'; result: GetTableCacheStatusResult }).result);
   });
 
-  app.post('/v1/admin/projects/:project/tables/:table/reindex', zValidator('param', adminProjectTableParamsSchema), async (c) => {
+  app.openapi(reindexTableRoute, async (c) => {
     const auth = await authenticateRequest(c);
-    const { project, table } = c.req.valid('param');
+    const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
     assertProjectScope(auth, 'admin:projects', project);
     const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
       type: 'table.reindex',
@@ -345,8 +790,8 @@ function createApp() {
     return c.json((response as { type: 'table.reindex.result'; result: ReindexTableResult }).result);
   });
 
-  app.get('/v1/projects/:project/tables/:table/rows/:id', zValidator('param', rowParamsSchema), async (c) => {
-    const { project, table, id } = c.req.valid('param');
+  app.openapi(getRowRoute, async (c) => {
+    const { project, table, id } = parsePathParams(c, rowParamsSchema);
     const auth = await authenticateRequest(c);
     const projectState = await loadProject(c, project);
     if (projectState.project.defaultAuthMode !== 'public-read') {
@@ -362,49 +807,39 @@ function createApp() {
     return c.json((response as { type: 'table.row.get.result'; result: GetRowResult }).result);
   });
 
-  app.post(
-    '/v1/projects/:project/tables/:table/rows',
-    zValidator('param', adminProjectTableParamsSchema),
-    zValidator('json', createRowInputSchema),
-    async (c) => {
-      const { project, table } = c.req.valid('param');
-      const auth = await authenticateRequest(c);
-      assertProjectScope(auth, 'table:create', project);
-      const input = c.req.valid('json');
-      const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
-        type: 'table.row.create',
-        projectSlug: project,
-        tableSlug: table,
-        input
-      });
+  app.openapi(createRowRoute, async (c) => {
+    const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
+    const auth = await authenticateRequest(c);
+    assertProjectScope(auth, 'table:create', project);
+    const input = await parseJsonBody(c, createRowInputSchema) satisfies CreateRowInput;
+    const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
+      type: 'table.row.create',
+      projectSlug: project,
+      tableSlug: table,
+      input
+    });
 
-      return c.json((response as { type: 'table.row.create.result'; result: CreateRowResult }).result, 201);
-    }
-  );
+    return c.json((response as { type: 'table.row.create.result'; result: CreateRowResult }).result, 201);
+  });
 
-  app.patch(
-    '/v1/projects/:project/tables/:table/rows/:id',
-    zValidator('param', rowParamsSchema),
-    zValidator('json', updateRowInputSchema),
-    async (c) => {
-      const { project, table, id } = c.req.valid('param');
-      const auth = await authenticateRequest(c);
-      assertProjectScope(auth, 'table:update', project);
-      const input = c.req.valid('json');
-      const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
-        type: 'table.row.update',
-        projectSlug: project,
-        tableSlug: table,
-        rowId: id,
-        input
-      });
+  app.openapi(updateRowRoute, async (c) => {
+    const { project, table, id } = parsePathParams(c, rowParamsSchema);
+    const auth = await authenticateRequest(c);
+    assertProjectScope(auth, 'table:update', project);
+    const input = await parseJsonBody(c, updateRowInputSchema) satisfies UpdateRowInput;
+    const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
+      type: 'table.row.update',
+      projectSlug: project,
+      tableSlug: table,
+      rowId: id,
+      input
+    });
 
-      return c.json((response as { type: 'table.row.update.result'; result: UpdateRowResult }).result);
-    }
-  );
+    return c.json((response as { type: 'table.row.update.result'; result: UpdateRowResult }).result);
+  });
 
-  app.delete('/v1/projects/:project/tables/:table/rows/:id', zValidator('param', rowParamsSchema), async (c) => {
-    const { project, table, id } = c.req.valid('param');
+  app.openapi(deleteRowRoute, async (c) => {
+    const { project, table, id } = parsePathParams(c, rowParamsSchema);
     const auth = await authenticateRequest(c);
     assertProjectScope(auth, 'table:delete', project);
     const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
@@ -422,10 +857,12 @@ function createApp() {
     );
   });
 
-  app.get('/v1/admin/keys', async (c) => {
+  app.openapi(listApiKeysRoute, async (c) => {
     const auth = await authenticateRequest(c);
     assertAdminScope(auth, 'admin:keys');
-    const projectSlug = c.req.query('project') ?? null;
+    const projectSlug = listApiKeysQuerySchema.parse({
+      project: c.req.query('project')
+    }).project ?? null;
 
     const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
       type: 'control.api-keys.list',
@@ -437,10 +874,10 @@ function createApp() {
     );
   });
 
-  app.post('/v1/admin/keys', zValidator('json', adminCreateApiKeyInputSchema), async (c) => {
+  app.openapi(createApiKeyRoute, async (c) => {
     const auth = await authenticateRequest(c);
     assertAdminScope(auth, 'admin:keys');
-    const input = c.req.valid('json');
+    const input = await parseJsonBody(c, adminCreateApiKeyInputSchema);
     if (input.projectSlug) {
       await loadProject(c, input.projectSlug);
     }
@@ -456,10 +893,10 @@ function createApp() {
     );
   });
 
-  app.delete('/v1/admin/keys/:id', zValidator('param', apiKeyParamsSchema), async (c) => {
+  app.openapi(revokeApiKeyRoute, async (c) => {
     const auth = await authenticateRequest(c);
     assertAdminScope(auth, 'admin:keys');
-    const { id } = c.req.valid('param');
+    const { id } = parsePathParams(c, apiKeyParamsSchema);
 
     await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
       type: 'control.api-key.revoke',

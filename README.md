@@ -20,6 +20,15 @@ npm run dev:api
 npm run dev:admin
 ```
 
+## API Docs
+
+When the API worker is running:
+
+- `GET /doc` returns the generated OpenAPI document.
+- `GET /docs` serves the interactive API reference UI.
+
+The docs reflect the actual HTTP surface, including auth requirements, path params, query params, and request/response bodies for the supported endpoints.
+
 ## Required API environment
 
 Set these in `apps/api/wrangler.jsonc` for local development or through Cloudflare secrets and variables for deployed environments:
