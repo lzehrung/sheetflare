@@ -29,6 +29,7 @@ type TableRow = {
   sheet_tab_name: string;
   sheet_gid: number | null;
   id_column: string;
+  indexed_fields: string;
   header_row: number;
   data_start_row: number;
   read_enabled: number;
@@ -72,6 +73,7 @@ export class ProjectDO {
         sheet_tab_name TEXT NOT NULL,
         sheet_gid INTEGER,
         id_column TEXT NOT NULL,
+        indexed_fields TEXT NOT NULL,
         header_row INTEGER NOT NULL,
         data_start_row INTEGER NOT NULL,
         read_enabled INTEGER NOT NULL,
@@ -182,13 +184,14 @@ export class ProjectDO {
     this.ctx.storage.sql.exec(
       `
       INSERT INTO tables (
-        project_slug, table_slug, sheet_tab_name, sheet_gid, id_column, header_row, data_start_row,
+        project_slug, table_slug, sheet_tab_name, sheet_gid, id_column, indexed_fields, header_row, data_start_row,
         read_enabled, create_enabled, update_enabled, delete_enabled, cache_ttl_seconds, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(project_slug, table_slug) DO UPDATE SET
         sheet_tab_name = excluded.sheet_tab_name,
         sheet_gid = excluded.sheet_gid,
         id_column = excluded.id_column,
+        indexed_fields = excluded.indexed_fields,
         header_row = excluded.header_row,
         data_start_row = excluded.data_start_row,
         read_enabled = excluded.read_enabled,
@@ -203,6 +206,7 @@ export class ProjectDO {
       input.sheetTabName,
       input.sheetGid ?? null,
       input.idColumn ?? '_id',
+      JSON.stringify(this.buildIndexedFields(input.idColumn ?? '_id', input.indexedFields ?? [])),
       input.headerRow ?? 1,
       input.dataStartRow ?? 2,
       (input.readEnabled ?? true) ? 1 : 0,
@@ -289,6 +293,7 @@ export class ProjectDO {
       sheetTabName: row.sheet_tab_name,
       sheetGid: row.sheet_gid ?? undefined,
       idColumn: row.id_column,
+      indexedFields: JSON.parse(row.indexed_fields) as string[],
       headerRow: row.header_row,
       dataStartRow: row.data_start_row,
       readEnabled: Boolean(row.read_enabled),
@@ -299,5 +304,10 @@ export class ProjectDO {
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
+  }
+
+  private buildIndexedFields(idColumn: string, indexedFields: string[]) {
+    const unique = new Set<string>([idColumn, ...indexedFields]);
+    return [...unique].sort((left, right) => left.localeCompare(right));
   }
 }

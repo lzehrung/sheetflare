@@ -79,6 +79,33 @@ Operator endpoints:
 - `GET /v1/admin/projects/:project/tables/:table/cache`
   Returns current cache status, row count, staleness, and last sync timestamps.
 
+## Query Semantics
+
+- Filters are AND-only across fields.
+- Sort supports one field at a time, plus stable keyset pagination cursors.
+- Efficient queries are expected to use indexed fields.
+- Every table automatically indexes its ID column.
+- Additional indexed fields are declared in table config with `indexedFields`.
+
+Supported filter operators:
+
+- `eq`
+- `neq`
+- `gt`
+- `gte`
+- `lt`
+- `lte`
+- `in`
+- `startsWith`
+- `contains`
+- `isNull`
+
+Performance notes:
+
+- Equality, range, `in`, and indexed sort retrieval use SQLite-backed cached cell indexes.
+- `contains` is supported, but it is scan-heavy. For safety, scan-heavy queries are rejected once a cached table grows beyond the built-in full-scan threshold.
+- If a filter or sort targets a non-indexed field, the API rejects it instead of silently doing an expensive query on large caches.
+
 ## Notes
 
 - Project listing and API keys are handled by a dedicated `ControlPlaneDO`.

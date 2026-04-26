@@ -13,8 +13,16 @@ import {
   type TableDoResponse
 } from '@sheetflare/contracts';
 import {
-  applyListRowsQuery,
+  assertQueryableField,
+  buildFilterSql,
+  decodeQueryCursor,
+  encodeQueryCursor,
   generateRowId,
+  getListQueryFingerprint,
+  normalizeListQuery,
+  normalizeScalarCursorValue,
+  sortRows,
+  validateFilterCapabilities,
   inferTableSchema,
   normalizeRowValues,
   pickKnownColumns
@@ -34,6 +42,15 @@ type CachedRowRow = {
   values_json: string;
 };
 
+type CachedCellRow = {
+  row_id: string;
+  field_name: string;
+  value_kind: string;
+  value_text: string | null;
+  value_number: number | null;
+  value_boolean: number | null;
+};
+
 type SyncMeta = {
   status: TableCacheStatus['status'];
   rowCount: number;
@@ -41,6 +58,8 @@ type SyncMeta = {
   lastSyncCompletedAt: string | null;
   lastSyncError: string | null;
 };
+
+const maxFullScanRows = 10_000;
 
 function getProjectStub(env: CloudflareEnv, projectSlug: string) {
   return env.PROJECT_DO.get(env.PROJECT_DO.idFromName(`project:${projectSlug}`));
@@ -93,6 +112,33 @@ export class TableDO {
     this.ctx.storage.sql.exec(`
       CREATE INDEX IF NOT EXISTS idx_cached_rows_row_number
       ON cached_rows(row_number)
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS cached_cells (
+        row_id TEXT NOT NULL,
+        field_name TEXT NOT NULL,
+        value_kind TEXT NOT NULL,
+        value_text TEXT,
+        value_number REAL,
+        value_boolean INTEGER,
+        PRIMARY KEY (row_id, field_name)
+      )
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_cached_cells_field_text
+      ON cached_cells(field_name, value_text, row_id)
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_cached_cells_field_number
+      ON cached_cells(field_name, value_number, row_id)
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_cached_cells_field_boolean
+      ON cached_cells(field_name, value_boolean, row_id)
     `);
   }
 
@@ -177,8 +223,7 @@ export class TableDO {
     }
 
     await this.ensureCacheReady(config);
-    const rows = this.listCachedRows();
-    const result = applyListRowsQuery(rows, rawQuery);
+    const result = this.queryCachedRows(config, rawQuery);
 
     return {
       data: result.data,
@@ -231,6 +276,11 @@ export class TableDO {
       rowNumber,
       values
     });
+    this.upsertCachedCells(config, {
+      id: rowId,
+      rowNumber,
+      values
+    });
     this.markCacheFreshAfterMutation();
 
     return {
@@ -268,6 +318,11 @@ export class TableDO {
     await this.sheets.writeRow(config, existingRow.rowNumber, headers, values);
     this.upsertRowIndex(rowId, existingRow.rowNumber);
     this.upsertCachedRow({
+      id: rowId,
+      rowNumber: existingRow.rowNumber,
+      values
+    });
+    this.upsertCachedCells(config, {
       id: rowId,
       rowNumber: existingRow.rowNumber,
       values
@@ -395,10 +450,12 @@ export class TableDO {
 
       this.ctx.storage.sql.exec(`DELETE FROM row_index`);
       this.ctx.storage.sql.exec(`DELETE FROM cached_rows`);
+      this.ctx.storage.sql.exec(`DELETE FROM cached_cells`);
 
       for (const row of rows) {
         this.upsertRowIndex(row.id, row.rowNumber);
         this.upsertCachedRow(row);
+        this.upsertCachedCells(config, row);
       }
 
       const completedAt = new Date().toISOString();
@@ -443,6 +500,7 @@ export class TableDO {
 
     this.upsertRowIndex(rowId, result.row.rowNumber);
     this.upsertCachedRow(result.row);
+    this.upsertCachedCells(config, result.row);
     return result.row;
   }
 
@@ -515,6 +573,7 @@ export class TableDO {
 
   private deleteCachedRow(rowId: string) {
     this.ctx.storage.sql.exec(`DELETE FROM cached_rows WHERE row_id = ?`, rowId);
+    this.ctx.storage.sql.exec(`DELETE FROM cached_cells WHERE row_id = ?`, rowId);
   }
 
   private async getHeaders(config: GoogleSheetTableConfig): Promise<string[]> {
@@ -608,5 +667,418 @@ export class TableDO {
       .one() as { count: number } | null;
 
     return row?.count ?? 0;
+  }
+
+  private upsertCachedCells(config: GoogleSheetTableConfig, row: RowEnvelope) {
+    this.ctx.storage.sql.exec(`DELETE FROM cached_cells WHERE row_id = ?`, row.id);
+
+    for (const fieldName of config.indexedFields) {
+      const value = row.values[fieldName] ?? null;
+      const normalized = this.normalizeIndexedCellValue(value);
+      this.ctx.storage.sql.exec(
+        `
+        INSERT INTO cached_cells (row_id, field_name, value_kind, value_text, value_number, value_boolean)
+        VALUES (?, ?, ?, ?, ?, ?)
+        `,
+        row.id,
+        fieldName,
+        normalized.valueKind,
+        normalized.valueText,
+        normalized.valueNumber,
+        normalized.valueBoolean
+      );
+    }
+  }
+
+  private normalizeIndexedCellValue(value: RowRecord[string]) {
+    if (value === null) {
+      return {
+        valueKind: 'null',
+        valueText: null,
+        valueNumber: null,
+        valueBoolean: null
+      };
+    }
+
+    if (typeof value === 'boolean') {
+      return {
+        valueKind: 'boolean',
+        valueText: null,
+        valueNumber: null,
+        valueBoolean: value ? 1 : 0
+      };
+    }
+
+    if (typeof value === 'number') {
+      return {
+        valueKind: 'number',
+        valueText: null,
+        valueNumber: value,
+        valueBoolean: null
+      };
+    }
+
+    if (typeof value === 'string') {
+      return {
+        valueKind: 'string',
+        valueText: value,
+        valueNumber: null,
+        valueBoolean: null
+      };
+    }
+
+    return {
+      valueKind: 'json',
+      valueText: JSON.stringify(value),
+      valueNumber: null,
+      valueBoolean: null
+    };
+  }
+
+  private queryCachedRows(config: GoogleSheetTableConfig, rawQuery: ListRowsQuery) {
+    const query = normalizeListQuery(rawQuery);
+    const fingerprint = getListQueryFingerprint(query);
+    const cursor = decodeQueryCursor(query.cursor, fingerprint, query.sort);
+    const filterPlan = buildFilterSql(query.filter, config.indexedFields);
+    const capability = validateFilterCapabilities(query.filter, config.indexedFields);
+    const requiresScan = capability.requiresFullScan || filterPlan.requiresFullScan;
+
+    if (requiresScan) {
+      if (this.countCachedRows() > maxFullScanRows) {
+        throw new BadRequestError(
+          `This query requires a full scan and exceeds the configured scan threshold of ${maxFullScanRows} cached rows.`,
+          {
+            maxFullScanRows,
+            sort: query.sort,
+            filter: query.filter
+          }
+        );
+      }
+      return this.queryCachedRowsByScan(config, query, fingerprint, cursor);
+    }
+
+    const sortPlan = this.buildSortPlan(config, query.sort.field, query.sort.direction);
+    const cursorPlan = this.buildCursorPlan(sortPlan, cursor);
+    const sql = [
+      `SELECT cr.row_id, cr.row_number, cr.values_json${sortPlan.selectColumns}`,
+      `FROM cached_rows cr`,
+      ...filterPlan.joins,
+      sortPlan.join,
+      filterPlan.conditions.length > 0 || cursorPlan.conditions.length > 0
+        ? `WHERE ${[...filterPlan.conditions, ...cursorPlan.conditions].join(' AND ')}`
+        : '',
+      `ORDER BY ${sortPlan.orderBy}`,
+      `LIMIT ?`
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const rows = this.ctx.storage.sql.exec(
+      sql,
+      ...filterPlan.parameters,
+      ...sortPlan.parameters,
+      ...cursorPlan.parameters,
+      query.limit + 1
+    ).toArray() as Array<
+      CachedRowRow & {
+        sort_kind?: string | null;
+        sort_text?: string | null;
+        sort_number?: number | null;
+        sort_boolean?: number | null;
+      }
+    >;
+
+    const page = rows.slice(0, query.limit).map((row) => this.mapCachedRow(row));
+    const lastRow = rows.length > query.limit ? rows[query.limit - 1] : null;
+
+    return {
+      data: this.projectFields(page, query.fields),
+      nextCursor:
+        rows.length > query.limit && lastRow
+          ? encodeQueryCursor({
+              fingerprint,
+              sortField: query.sort.field,
+              sortDirection: query.sort.direction,
+              rowId: lastRow.row_id,
+              rowNumber: lastRow.row_number,
+              value: this.getCursorValue(query.sort.field, lastRow)
+            })
+          : null
+    };
+  }
+
+  private queryCachedRowsByScan(
+    config: GoogleSheetTableConfig,
+    query: ReturnType<typeof normalizeListQuery>,
+    fingerprint: string,
+    cursor: ReturnType<typeof decodeQueryCursor>
+  ) {
+    const sortField = query.sort.field;
+    if (sortField !== 'rowNumber' && sortField !== 'id') {
+      assertQueryableField(sortField, config.indexedFields, { allowId: true, allowRowNumber: true });
+    }
+
+    let rows = this.listCachedRows();
+    if (query.filter) {
+      rows = rows.filter((row: RowEnvelope) => this.matchesFilter(row, query.filter!));
+    }
+
+    const sorted = sortRows(rows, query.sort);
+
+    const startIndex = cursor
+      ? sorted.findIndex((row) => row.id === cursor.rowId) + 1
+      : 0;
+    const page = sorted.slice(startIndex, startIndex + query.limit);
+    const hasMore = startIndex + query.limit < sorted.length;
+    const lastRow = page.at(-1);
+
+    return {
+      data: this.projectFields(page, query.fields),
+      nextCursor:
+        hasMore && lastRow
+          ? encodeQueryCursor({
+              fingerprint,
+              sortField: query.sort.field,
+              sortDirection: query.sort.direction,
+              rowId: lastRow.id,
+              rowNumber: lastRow.rowNumber,
+              value: normalizeScalarCursorValue(
+                query.sort.field === 'rowNumber'
+                  ? lastRow.rowNumber
+                  : query.sort.field === 'id'
+                    ? lastRow.id
+                    : this.normalizeCursorSourceValue(lastRow.values[query.sort.field])
+              )
+            })
+          : null
+    };
+  }
+
+  private buildSortPlan(
+    config: GoogleSheetTableConfig,
+    sortField: string,
+    direction: 'asc' | 'desc'
+  ) {
+    if (sortField === 'rowNumber') {
+      return {
+        join: '',
+        parameters: [] as Array<string | number | null>,
+        selectColumns: '',
+        orderBy: `cr.row_number ${direction.toUpperCase()}, cr.row_id ${direction.toUpperCase()}`,
+        direction
+      };
+    }
+
+    if (sortField === 'id') {
+      return {
+        join: '',
+        parameters: [] as Array<string | number | null>,
+        selectColumns: '',
+        orderBy: `cr.row_id ${direction.toUpperCase()}`,
+        direction
+      };
+    }
+
+    assertQueryableField(sortField, config.indexedFields, { allowId: true, allowRowNumber: true });
+    return {
+      join: 'INNER JOIN cached_cells sort_cell ON sort_cell.row_id = cr.row_id AND sort_cell.field_name = ?',
+      parameters: [sortField] as Array<string | number | null>,
+      selectColumns:
+        ', sort_cell.value_kind AS sort_kind, sort_cell.value_text AS sort_text, sort_cell.value_number AS sort_number, sort_cell.value_boolean AS sort_boolean',
+      orderBy:
+        queryDirectionAwareOrderBy('sort_cell', 'value_kind', 'value_text', 'value_number', 'value_boolean', direction),
+      direction
+    };
+  }
+
+  private buildCursorPlan(
+    sortPlan: ReturnType<TableDO['buildSortPlan']>,
+    cursor: ReturnType<typeof decodeQueryCursor>
+  ) {
+    if (!cursor) {
+      return {
+        conditions: [] as string[],
+        parameters: [] as Array<string | number | null>
+      };
+    }
+
+    if (!sortPlan.join) {
+      if (cursor.sortField === 'rowNumber') {
+        const comparator = sortPlan.direction === 'desc' ? '<' : '>';
+        return {
+          conditions: [`(cr.row_number ${comparator} ? OR (cr.row_number = ? AND cr.row_id ${comparator} ?))`],
+          parameters: [cursor.rowNumber, cursor.rowNumber, cursor.rowId] as Array<string | number | null>
+        };
+      }
+
+      const comparator = sortPlan.direction === 'desc' ? '<' : '>';
+      return {
+        conditions: [`cr.row_id ${comparator} ?`],
+        parameters: [cursor.rowId] as Array<string | number | null>
+      };
+    }
+
+    const valueRank = this.getValueKindRank(cursor.value.kind);
+    const rankComparator = sortPlan.direction === 'desc' ? '<' : '>';
+    const valueComparator = sortPlan.direction === 'desc' ? '<' : '>';
+    const params: Array<string | number | null> = [valueRank];
+    let sameValueClause = `cr.row_id ${valueComparator} ?`;
+
+    switch (cursor.value.kind) {
+      case 'null':
+        params.push(cursor.rowId);
+        break;
+      case 'boolean':
+        params.push(cursor.value.value ? 1 : 0, cursor.value.value ? 1 : 0, cursor.rowId);
+        sameValueClause = `(sort_cell.value_boolean ${valueComparator} ? OR (sort_cell.value_boolean = ? AND cr.row_id ${valueComparator} ?))`;
+        break;
+      case 'number':
+        params.push(cursor.value.value, cursor.value.value, cursor.rowId);
+        sameValueClause = `(sort_cell.value_number ${valueComparator} ? OR (sort_cell.value_number = ? AND cr.row_id ${valueComparator} ?))`;
+        break;
+      case 'string':
+        params.push(cursor.value.value, cursor.value.value, cursor.rowId);
+        sameValueClause = `(sort_cell.value_text ${valueComparator} ? OR (sort_cell.value_text = ? AND cr.row_id ${valueComparator} ?))`;
+        break;
+    }
+
+    return {
+      conditions: [
+        `(${this.getValueRankSql('sort_cell.value_kind')} ${rankComparator} ? OR (${this.getValueRankSql('sort_cell.value_kind')} = ? AND ${sameValueClause}))`
+      ],
+      parameters: [valueRank, ...params]
+    };
+  }
+
+  private getValueRankSql(kindSql: string) {
+    return `CASE ${kindSql} WHEN 'null' THEN 0 WHEN 'boolean' THEN 1 WHEN 'number' THEN 2 WHEN 'string' THEN 3 ELSE 4 END`;
+  }
+
+  private getValueKindRank(kind: string) {
+    return {
+      null: 0,
+      boolean: 1,
+      number: 2,
+      string: 3
+    }[kind] ?? 4;
+  }
+
+  private mapCachedRow(row: CachedRowRow): RowEnvelope {
+    return {
+      id: row.row_id,
+      rowNumber: row.row_number,
+      values: JSON.parse(row.values_json) as RowRecord
+    };
+  }
+
+  private projectFields(rows: RowEnvelope[], fields: string[] | null) {
+    if (!fields || fields.length === 0) return rows;
+    const allowed = new Set(fields);
+    return rows.map((row) => ({
+      ...row,
+      values: Object.fromEntries(
+        Object.entries(row.values).filter(([key]) => allowed.has(key))
+      )
+    }));
+  }
+
+  private getCursorValue(sortField: string, row: CachedRowRow & { sort_kind?: string | null; sort_text?: string | null; sort_number?: number | null; sort_boolean?: number | null }) {
+    if (sortField === 'rowNumber') {
+      return normalizeScalarCursorValue(row.row_number);
+    }
+
+    if (sortField === 'id') {
+      return normalizeScalarCursorValue(row.row_id);
+    }
+
+    switch (row.sort_kind) {
+      case 'null':
+        return normalizeScalarCursorValue(null);
+      case 'boolean':
+        return normalizeScalarCursorValue(Boolean(row.sort_boolean));
+      case 'number':
+        return normalizeScalarCursorValue(row.sort_number ?? 0);
+      case 'string':
+        return normalizeScalarCursorValue(row.sort_text ?? '');
+      default:
+        return normalizeScalarCursorValue(row.sort_text ?? null);
+    }
+  }
+
+  private normalizeCursorSourceValue(value: RowRecord[string] | undefined) {
+    if (value === undefined) return null;
+    if (Array.isArray(value)) return JSON.stringify(value);
+    return value;
+  }
+
+  private matchesFilter(row: RowEnvelope, filter: NonNullable<ListRowsQuery['filter']>) {
+    return Object.entries(filter).every(([field, definition]) =>
+      this.matchesFieldFilter(field === 'rowNumber' ? row.rowNumber : field === 'id' ? row.id : (row.values[field] ?? null), definition)
+    );
+  }
+
+  private matchesFieldFilter(value: RowRecord[string] | string | number, definition: NonNullable<NonNullable<ListRowsQuery['filter']>[string]>) {
+    if (definition.eq !== undefined && value !== definition.eq) return false;
+    if (definition.neq !== undefined && value === definition.neq) return false;
+    if (definition.isNull !== undefined && definition.isNull !== (value === null)) return false;
+    if (definition.in !== undefined && !definition.in.some((entry) => entry === value)) return false;
+    if (definition.gt !== undefined && !this.compareFilterValues(value, definition.gt, '>')) return false;
+    if (definition.gte !== undefined && !this.compareFilterValues(value, definition.gte, '>=')) return false;
+    if (definition.lt !== undefined && !this.compareFilterValues(value, definition.lt, '<')) return false;
+    if (definition.lte !== undefined && !this.compareFilterValues(value, definition.lte, '<=')) return false;
+    if (definition.startsWith !== undefined && (typeof value !== 'string' || !value.startsWith(definition.startsWith))) return false;
+    if (definition.contains !== undefined && (typeof value !== 'string' || !value.includes(definition.contains))) return false;
+    return true;
+  }
+
+  private compareFilterValues(
+    value: RowRecord[string] | string | number,
+    expected: string | number,
+    operator: '>' | '>=' | '<' | '<='
+  ) {
+    if (value === null || Array.isArray(value) || typeof value === 'boolean') {
+      return false;
+    }
+
+    if (typeof value === 'number' && typeof expected === 'number') {
+      return evaluateComparison(value, expected, operator);
+    }
+
+    return evaluateComparison(String(value), String(expected), operator);
+  }
+}
+
+function queryDirectionAwareOrderBy(
+  alias: string,
+  kindColumn: string,
+  textColumn: string,
+  numberColumn: string,
+  booleanColumn: string,
+  direction: 'asc' | 'desc'
+) {
+  const sqlDirection = direction.toUpperCase();
+  return [
+    `CASE ${alias}.${kindColumn} WHEN 'null' THEN 0 WHEN 'boolean' THEN 1 WHEN 'number' THEN 2 WHEN 'string' THEN 3 ELSE 4 END ${sqlDirection}`,
+    `${alias}.${numberColumn} ${sqlDirection}`,
+    `${alias}.${textColumn} ${sqlDirection}`,
+    `${alias}.${booleanColumn} ${sqlDirection}`,
+    `cr.row_id ${sqlDirection}`
+  ].join(', ');
+}
+
+function evaluateComparison<T extends string | number>(
+  left: T,
+  right: T,
+  operator: '>' | '>=' | '<' | '<='
+) {
+  switch (operator) {
+    case '>':
+      return left > right;
+    case '>=':
+      return left >= right;
+    case '<':
+      return left < right;
+    case '<=':
+      return left <= right;
   }
 }

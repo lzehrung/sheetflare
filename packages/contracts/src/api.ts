@@ -17,6 +17,7 @@ export const createTableInputSchema = z.object({
   sheetTabName: z.string().min(1),
   sheetGid: z.number().int().nonnegative().optional(),
   idColumn: z.string().min(1).optional(),
+  indexedFields: z.array(z.string().min(1)).max(32).optional(),
   headerRow: z.number().int().positive().optional(),
   dataStartRow: z.number().int().positive().optional(),
   readEnabled: z.boolean().optional(),
