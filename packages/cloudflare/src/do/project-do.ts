@@ -6,6 +6,7 @@ import {
   type CreateTableInput,
   maxIndexedFieldCount,
   NotFoundError,
+  type ProjectAccessResult,
   type ProjectConfig,
   type ProjectDoRequest,
   type ProjectDoResponse,
@@ -133,6 +134,13 @@ export class ProjectDO {
           type: 'project.get.result',
           result: await this.getProject(body.projectSlug)
         };
+      case 'project.access.get':
+        return {
+          type: 'project.access.get.result',
+          result: {
+            data: this.getProjectAccess(body.projectSlug)
+          }
+        };
       case 'project.table.create':
         return {
           type: 'project.table.create.result',
@@ -201,6 +209,14 @@ export class ProjectDO {
     return {
       project: this.mapProject(project),
       tables: await this.listTables(projectSlug)
+    };
+  }
+
+  private getProjectAccess(projectSlug: string): ProjectAccessResult {
+    const project = this.requireProjectRow(projectSlug);
+    return {
+      slug: project.slug,
+      defaultAuthMode: project.default_auth_mode
     };
   }
 

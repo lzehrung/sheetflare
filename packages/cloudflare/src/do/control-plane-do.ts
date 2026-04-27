@@ -232,10 +232,15 @@ export class ControlPlaneDO {
   }
 
   private touchApiKey(apiKeyId: string, usedAt: string) {
+    const minUpdatedAt = new Date(Date.parse(usedAt) - 5 * 60 * 1000).toISOString();
     this.ctx.storage.sql.exec(
-      `UPDATE api_keys SET last_used_at = ? WHERE id = ?`,
+      `UPDATE api_keys
+       SET last_used_at = ?
+       WHERE id = ?
+         AND (last_used_at IS NULL OR last_used_at < ?)`,
       usedAt,
-      apiKeyId
+      apiKeyId,
+      minUpdatedAt
     );
   }
 

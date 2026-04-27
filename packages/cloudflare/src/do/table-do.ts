@@ -9,6 +9,7 @@ import {
   type RowRecord,
   type TableCacheStatus,
   type TableDoRequest,
+  type TableRequestContext,
   type TableDoResponse,
   type ResolvedTableConfigSnapshot
 } from '@sheetflare/contracts';
@@ -142,6 +143,7 @@ function getProjectStub(env: CloudflareEnv, projectSlug: string) {
 export class TableDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
   private activeSync: Promise<TableCacheStatus> | null = null;
+  private currentRequestContext: TableRequestContext | null = null;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -276,53 +278,58 @@ export class TableDO {
   }
 
   private async handle(body: TableDoRequest): Promise<TableDoResponse> {
-    switch (body.type) {
-      case 'table.rows.list':
-        return {
-          type: 'table.rows.list.result',
-          result: await this.listRows(body.projectSlug, body.tableSlug, body.query, body.resolvedConfig)
-        };
-      case 'table.row.get':
-        return {
-          type: 'table.row.get.result',
-          result: await this.getRow(body.projectSlug, body.tableSlug, body.rowId, body.resolvedConfig)
-        };
-      case 'table.row.create':
-        return {
-          type: 'table.row.create.result',
-          result: await this.createRow(body.projectSlug, body.tableSlug, body.input.values)
-        };
-      case 'table.row.update':
-        return {
-          type: 'table.row.update.result',
-          result: await this.updateRow(body.projectSlug, body.tableSlug, body.rowId, body.input.values)
-        };
-      case 'table.row.delete':
-        return {
-          type: 'table.row.delete.result',
-          result: await this.deleteRow(body.projectSlug, body.tableSlug, body.rowId)
-        };
-      case 'table.schema.get':
-        return {
-          type: 'table.schema.get.result',
-          result: await this.getSchema(body.projectSlug, body.tableSlug, body.resolvedConfig)
-        };
-      case 'table.cache.get':
-        return {
-          type: 'table.cache.get.result',
-          result: await this.getCacheStatus(body.projectSlug, body.tableSlug, body.resolvedConfig)
-        };
-      case 'table.reindex':
-        return {
-          type: 'table.reindex.result',
-          result: await this.syncCache(
-            body.projectSlug,
-            body.tableSlug,
-            body.resolvedConfig
-              ? { force: true, resolvedConfig: body.resolvedConfig }
-              : { force: true }
-          )
-        };
+    this.currentRequestContext = body.requestContext ?? null;
+    try {
+      switch (body.type) {
+        case 'table.rows.list':
+          return {
+            type: 'table.rows.list.result',
+            result: await this.listRows(body.projectSlug, body.tableSlug, body.query, body.resolvedConfig)
+          };
+        case 'table.row.get':
+          return {
+            type: 'table.row.get.result',
+            result: await this.getRow(body.projectSlug, body.tableSlug, body.rowId, body.resolvedConfig)
+          };
+        case 'table.row.create':
+          return {
+            type: 'table.row.create.result',
+            result: await this.createRow(body.projectSlug, body.tableSlug, body.input.values)
+          };
+        case 'table.row.update':
+          return {
+            type: 'table.row.update.result',
+            result: await this.updateRow(body.projectSlug, body.tableSlug, body.rowId, body.input.values)
+          };
+        case 'table.row.delete':
+          return {
+            type: 'table.row.delete.result',
+            result: await this.deleteRow(body.projectSlug, body.tableSlug, body.rowId)
+          };
+        case 'table.schema.get':
+          return {
+            type: 'table.schema.get.result',
+            result: await this.getSchema(body.projectSlug, body.tableSlug, body.resolvedConfig)
+          };
+        case 'table.cache.get':
+          return {
+            type: 'table.cache.get.result',
+            result: await this.getCacheStatus(body.projectSlug, body.tableSlug, body.resolvedConfig)
+          };
+        case 'table.reindex':
+          return {
+            type: 'table.reindex.result',
+            result: await this.syncCache(
+              body.projectSlug,
+              body.tableSlug,
+              body.resolvedConfig
+                ? { force: true, resolvedConfig: body.resolvedConfig }
+                : { force: true }
+            )
+          };
+      }
+    } finally {
+      this.currentRequestContext = null;
     }
   }
 
@@ -420,10 +427,10 @@ export class TableDO {
       throw new ForbiddenError(`Creates are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    const cacheState = await this.ensurePointOperationReady(config);
+    await this.ensurePointOperationReady(config);
     const normalizedInput = normalizeRowValues(input);
     const headers = await this.getHeaders(config, {
-      bypassCache: cacheState.staleReason === 'ttl-expired'
+      bypassCache: true
     });
     const hasProvidedId = Object.prototype.hasOwnProperty.call(normalizedInput, config.idColumn);
     const parsedManagedRowId = parseManagedRowId(normalizedInput[config.idColumn]);
@@ -483,9 +490,9 @@ export class TableDO {
       throw new ForbiddenError(`Updates are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    const cacheState = await this.ensurePointOperationReady(config);
+    await this.ensurePointOperationReady(config);
     const headers = await this.getHeaders(config, {
-      bypassCache: cacheState.staleReason === 'ttl-expired'
+      bypassCache: true
     });
     const existingRow = await this.resolveRowById(config, rowId, {
       verifyUnique: false
@@ -690,7 +697,10 @@ export class TableDO {
         projectSlug: config.projectSlug,
         tableSlug: config.tableSlug,
         rowCount: rows.length,
-        durationMs: Date.now() - syncStartedAtMs
+        durationMs: Date.now() - syncStartedAtMs,
+        requestId: this.currentRequestContext?.requestId ?? null,
+        route: this.currentRequestContext?.route ?? null,
+        principal: this.currentRequestContext?.principal ?? null
       }));
 
       return this.computeCacheStatus(config);
@@ -707,7 +717,10 @@ export class TableDO {
         projectSlug: config.projectSlug,
         tableSlug: config.tableSlug,
         durationMs: Date.now() - syncStartedAtMs,
-        errorMessage: error instanceof Error ? error.message : 'Unknown sync error'
+        errorMessage: error instanceof Error ? error.message : 'Unknown sync error',
+        requestId: this.currentRequestContext?.requestId ?? null,
+        route: this.currentRequestContext?.route ?? null,
+        principal: this.currentRequestContext?.principal ?? null
       }));
       throw error;
     }

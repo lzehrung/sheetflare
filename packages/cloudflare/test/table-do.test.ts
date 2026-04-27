@@ -664,6 +664,81 @@ describe('TableDO', () => {
     });
   });
 
+  it('re-reads live headers for updates even while the cache is still fresh', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    sheet.requestedRanges = [];
+    sheet.rows = [
+      ['_id', 'full_name'],
+      ['row-1', 'Ada']
+    ];
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.row.update',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          rowId: 'row-1',
+          input: {
+            values: {
+              name: 'Ada Lovelace'
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Write payload contains unknown columns.'
+    });
+
+    expect(sheet.requestedRanges).toContain("'Users'!1:1");
+  });
+
   it('updates a cached row through the hinted row number without rescanning the managed id column', async () => {
     const sheet: SheetState = {
       rows: [
