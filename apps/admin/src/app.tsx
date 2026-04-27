@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { ApiKeyPrincipal, ApiScope, ProjectSummary, TableConfig } from '@sheetflare/contracts';
+import type { ApiKeyPrincipal, ApiScope, ProjectSummary, TableCacheStatus, TableConfig } from '@sheetflare/contracts';
 import {
   normalizeAdminCredential,
   readStoredAdminCredential,
@@ -50,7 +50,7 @@ type NoticeState =
   | { tone: 'success'; message: string }
   | { tone: 'error'; message: string };
 
-type CacheStateByTable = Record<string, { status: string; staleReason: string; rowCount: number } | null>;
+type CacheStateByTable = Record<string, TableCacheStatus | null>;
 
 const allScopes: ApiScope[] = [
   'admin:projects',
@@ -67,6 +67,18 @@ function getInitialCredential() {
   }
 
   return readStoredAdminCredential(window.localStorage);
+}
+
+function getSelectedProjectSlug(projects: ProjectSummary[], currentProjectSlug: string | null) {
+  if (currentProjectSlug && projects.some((project) => project.slug === currentProjectSlug)) {
+    return currentProjectSlug;
+  }
+
+  return projects[0]?.slug ?? null;
+}
+
+function getTableCacheKey(projectSlug: string, tableSlug: string) {
+  return `${projectSlug}:${tableSlug}`;
 }
 
 export function App() {
@@ -146,9 +158,7 @@ export function App() {
         const body = await listProjects(credential);
         if (!cancelled) {
           setState({ status: 'ready', data: body.data });
-          if (body.data.length > 0) {
-            setSelectedProjectSlug((current) => current ?? body.data[0]!.slug);
-          }
+          setSelectedProjectSlug((current) => getSelectedProjectSlug(body.data, current));
         }
       } catch (error) {
         if (!cancelled) {
@@ -166,6 +176,10 @@ export function App() {
       cancelled = true;
     };
   }, [credential]);
+
+  useEffect(() => {
+    setCreatedKey(null);
+  }, [selectedProjectSlug]);
 
   useEffect(() => {
     if (!credential || !selectedProjectSlug) {
@@ -335,6 +349,8 @@ export function App() {
     }
 
     setCredential(normalized);
+    setCacheStateByTable({});
+    setCreatedKey(null);
     setDraftCredential(normalized ?? '');
     setNotice({
       tone: 'idle',
@@ -348,8 +364,10 @@ export function App() {
     }
 
     setCredential(null);
+    setCacheStateByTable({});
     setDraftCredential('');
     setRememberCredential(false);
+    setCreatedKey(null);
     setSelectedProjectSlug(null);
     setProjectDetailState({
       status: 'idle',
@@ -375,9 +393,7 @@ export function App() {
     try {
       const body = await listProjects(credential);
       setState({ status: 'ready', data: body.data });
-      if (body.data.length > 0) {
-        setSelectedProjectSlug((current) => current ?? body.data[0]!.slug);
-      }
+      setSelectedProjectSlug((current) => getSelectedProjectSlug(body.data, current));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       setState({
@@ -478,13 +494,10 @@ export function App() {
     if (!credential || !selectedProjectSlug) return;
     await runAction(`Loading cache state for ${selectedProjectSlug}/${tableSlug}`, async () => {
       const response = await getCacheStatus(credential, selectedProjectSlug, tableSlug);
+      const cacheKey = getTableCacheKey(selectedProjectSlug, tableSlug);
       setCacheStateByTable((current) => ({
         ...current,
-        [tableSlug]: {
-          status: response.data.status,
-          staleReason: response.data.staleReason,
-          rowCount: response.data.rowCount
-        }
+        [cacheKey]: response.data
       }));
     });
   }
@@ -493,13 +506,10 @@ export function App() {
     if (!credential || !selectedProjectSlug) return;
     await runAction(`Reindexing ${selectedProjectSlug}/${tableSlug}`, async () => {
       const response = await reindexTable(credential, selectedProjectSlug, tableSlug);
+      const cacheKey = getTableCacheKey(selectedProjectSlug, tableSlug);
       setCacheStateByTable((current) => ({
         ...current,
-        [tableSlug]: {
-          status: response.cache.status,
-          staleReason: response.cache.staleReason,
-          rowCount: response.rowCount
-        }
+        [cacheKey]: response.cache
       }));
     });
   }
@@ -802,7 +812,7 @@ export function App() {
             {projectDetailState.tables.length > 0 ? (
               <div className="cards">
                 {projectDetailState.tables.map((table) => {
-                  const cache = cacheStateByTable[table.tableSlug] ?? null;
+                  const cache = cacheStateByTable[getTableCacheKey(table.projectSlug, table.tableSlug)] ?? null;
                   return (
                     <article key={table.tableSlug} className="card" data-testid={`table-card-${table.tableSlug}`}>
                       <div className="cardTop">

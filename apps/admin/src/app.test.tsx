@@ -219,4 +219,222 @@ describe('App', () => {
       expect(screen.getAllByText('Revoked').length).toBeGreaterThan(0);
     });
   });
+
+  it('keeps cache state scoped to the selected project when table slugs overlap', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: 1,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            },
+            {
+              slug: 'prod',
+              name: 'Prod',
+              spreadsheetId: 'sheet-2',
+              tableCount: 1,
+              updatedAt: '2026-04-27T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: [
+            {
+              projectSlug: 'demo',
+              tableSlug: 'users',
+              sheetTabName: 'Users',
+              idColumn: '_id',
+              indexedFields: ['_id', 'status'],
+              headerRow: 1,
+              dataStartRow: 2,
+              readEnabled: true,
+              createEnabled: true,
+              updateEnabled: true,
+              deleteEnabled: true,
+              cacheTtlSeconds: 15,
+              createdAt: '2026-04-26T00:00:00.000Z',
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=prod') {
+        return createJsonResponse({
+          project: {
+            slug: 'prod',
+            name: 'Prod',
+            spreadsheetId: 'sheet-2',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-27T00:00:00.000Z',
+            updatedAt: '2026-04-27T00:00:00.000Z'
+          },
+          tables: [
+            {
+              projectSlug: 'prod',
+              tableSlug: 'users',
+              sheetTabName: 'Users',
+              idColumn: '_id',
+              indexedFields: ['_id', 'status'],
+              headerRow: 1,
+              dataStartRow: 2,
+              readEnabled: true,
+              createEnabled: true,
+              updateEnabled: true,
+              deleteEnabled: true,
+              cacheTtlSeconds: 15,
+              createdAt: '2026-04-27T00:00:00.000Z',
+              updatedAt: '2026-04-27T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys?project=prod' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      if (url === '/v1/admin/projects/demo/tables/users/cache') {
+        return createJsonResponse({
+          data: {
+            status: 'ready',
+            cacheTtlSeconds: 15,
+            stale: false,
+            staleReason: 'fresh',
+            rowCount: 3,
+            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
+            lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
+            lastSyncError: null
+          }
+        });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByTestId('table-card-users');
+    fireEvent.click(screen.getByRole('button', { name: 'Load cache' }));
+    await screen.findByText('ready / fresh / 3 rows');
+
+    fireEvent.click(screen.getByTestId('project-card-prod'));
+    await waitFor(() => {
+      expect(screen.getByTestId('project-card-prod').getAttribute('aria-pressed')).toBe('true');
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('ready / fresh / 3 rows')).toBeNull();
+    });
+  });
+
+  it('clears the revealed key when the selected project changes', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: 0,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            },
+            {
+              slug: 'prod',
+              name: 'Prod',
+              spreadsheetId: 'sheet-2',
+              tableCount: 0,
+              updatedAt: '2026-04-27T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo' || url === '/v1/admin/projects?project=prod') {
+        const projectSlug = url.endsWith('prod') ? 'prod' : 'demo';
+        return createJsonResponse({
+          project: {
+            slug: projectSlug,
+            name: projectSlug === 'demo' ? 'Demo' : 'Prod',
+            spreadsheetId: projectSlug === 'demo' ? 'sheet-1' : 'sheet-2',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: []
+        });
+      }
+
+      if (url === '/v1/admin/keys' && method === 'POST') {
+        return createJsonResponse({
+          apiKey: 'sfk_created.secret',
+          record: {
+            id: 'created',
+            projectSlug: 'demo',
+            name: 'Ops key',
+            scopes: ['table:read'],
+            createdAt: '2026-04-26T00:00:00.000Z',
+            revokedAt: null,
+            lastUsedAt: null
+          }
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys?project=prod' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByText('Demo');
+    fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
+    await screen.findByText('New key:');
+
+    fireEvent.click(screen.getByTestId('project-card-prod'));
+    await waitFor(() => {
+      expect(screen.getByTestId('project-card-prod').getAttribute('aria-pressed')).toBe('true');
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('New key:')).toBeNull();
+    });
+  });
 });
