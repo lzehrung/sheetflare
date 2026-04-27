@@ -25,10 +25,11 @@ export function parseManagedRowId(value: RowRecord[string] | undefined): Managed
   }
 
   if (typeof value === 'string') {
-    return value.trim().length > 0
+    const normalized = value.trim();
+    return normalized.length > 0
       ? {
           ok: true,
-          rowId: value
+          rowId: normalized
         }
       : {
           ok: false,

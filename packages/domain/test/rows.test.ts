@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeRowValues, pickKnownColumns } from '../src';
+import { normalizeRowValues, parseManagedRowId, pickKnownColumns } from '../src';
 
 describe('normalizeRowValues', () => {
   it('trims keys and drops blank names', () => {
@@ -13,6 +13,15 @@ describe('normalizeRowValues', () => {
     ).toEqual({
       name: 'Ada',
       email: 'ada@example.com'
+    });
+  });
+});
+
+describe('parseManagedRowId', () => {
+  it('trims string row ids before returning them', () => {
+    expect(parseManagedRowId('  row-1  ')).toEqual({
+      ok: true,
+      rowId: 'row-1'
     });
   });
 });
