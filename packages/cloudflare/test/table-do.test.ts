@@ -139,7 +139,7 @@ function createSheetsFetch(sheet: SheetState) {
   };
 }
 
-function createTestEnv() {
+function createTestEnv(overrides?: Partial<CloudflareEnv>) {
   const partialEnv: Partial<CloudflareEnv> = {
     GOOGLE_CLIENT_EMAIL: 'default@example.com',
     GOOGLE_PRIVATE_KEY: testPrivateKey,
@@ -148,7 +148,8 @@ function createTestEnv() {
         clientEmail: 'secondary@example.com',
         privateKey: testPrivateKey
       }
-    })
+    }),
+    ...overrides
   };
 
   const env = partialEnv as CloudflareEnv;
@@ -1984,6 +1985,70 @@ describe('TableDO', () => {
     );
 
     expect((response as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-2', 'row-3', 'row-4']);
+  });
+
+  it('uses the configured full-scan threshold override when rejecting scan-heavy queries', async () => {
+    const env = createTestEnv({
+      TABLE_MAX_FULL_SCAN_ROWS: '2'
+    });
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Grace'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['name'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.rows.list',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          query: {
+            filter: {
+              name: {
+                contains: 'a'
+              }
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'This query requires a full scan and exceeds the configured scan threshold of 2 cached rows.'
+    });
   });
 
   it('refreshes cached headers after delete when the sheet layout changes manually', async () => {

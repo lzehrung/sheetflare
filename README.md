@@ -125,9 +125,10 @@ HTTP note:
 Performance notes:
 
 - Equality, range, `in`, and indexed sort retrieval use SQLite-backed cached cell indexes.
-- `contains` is supported, but it is scan-heavy. For safety, scan-heavy queries are rejected once a cached table grows beyond the built-in full-scan threshold.
+- `contains` is supported, but it is scan-heavy. For safety, scan-heavy queries are rejected once a cached table grows beyond the configured full-scan threshold.
 - If a filter or sort targets a non-indexed field, the API rejects it instead of silently doing an expensive query on large caches.
 - Mutation note: the write path is optimized separately from list/query execution. Update/delete/create-duplicate checks resolve IDs through the managed ID column, not through the cached query indexes.
+- The Worker env var `TABLE_MAX_FULL_SCAN_ROWS` controls that threshold and defaults to `10000`.
 
 ## Admin UI
 
