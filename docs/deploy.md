@@ -12,12 +12,14 @@ Set these on the Worker:
 - `ADMIN_BEARER_TOKEN`
 - `RATE_LIMIT_MAX_REQUESTS`
 - `RATE_LIMIT_WINDOW_SECONDS`
+- `TABLE_MAX_FULL_SCAN_ROWS`
 
 Recommendations:
 
 - keep `ADMIN_BEARER_TOKEN` long and random
 - use `GOOGLE_CREDENTIALS_JSON` only when you need named per-project refs
 - start with conservative rate limits and raise only after observing real traffic
+- keep `TABLE_MAX_FULL_SCAN_ROWS` at the safe default until you have benchmark evidence for a higher value
 
 ## Pre-Deploy Checklist
 

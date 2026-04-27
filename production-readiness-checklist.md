@@ -218,8 +218,8 @@ These are not all blockers, but they materially improve trust.
 
 ### 1. Make scan threshold configurable
 
-Why:
-- `maxFullScanRows` is currently hard-coded in [packages/cloudflare/src/do/table-do.ts](./packages/cloudflare/src/do/table-do.ts)
+Status:
+- completed on 2026-04-27 via `TABLE_MAX_FULL_SCAN_ROWS` with a default of `10000`
 
 Change:
 - move it to configuration with a safe default

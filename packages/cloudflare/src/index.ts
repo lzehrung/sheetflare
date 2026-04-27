@@ -1,4 +1,5 @@
 export * from './types';
+export * from './config';
 export * from './rpc';
 export * from './google-credentials';
 export * from './do/control-plane-do';

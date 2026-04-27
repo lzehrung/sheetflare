@@ -34,6 +34,7 @@ import {
 } from '@sheetflare/domain';
 import { GoogleSheetsService, type GoogleSheetTableConfig } from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from '../types';
+import { getMaxFullScanRows } from '../config';
 import { doRpc } from '../rpc';
 import { resolveGoogleCredential } from '../google-credentials';
 
@@ -65,8 +66,6 @@ type CacheState = TableCacheStatus & {
 type ResolvedTableConfig = GoogleSheetTableConfig & {
   googleCredentialRef: string;
 };
-
-const maxFullScanRows = 10_000;
 
 function getCacheTableNames(kind: 'live' | 'staging') {
   return kind === 'live'
@@ -1147,6 +1146,7 @@ export class TableDO {
     const filterPlan = buildFilterSql(query.filter, config.indexedFields);
     const capability = validateFilterCapabilities(query.filter, config.indexedFields);
     const requiresScan = capability.requiresFullScan || filterPlan.requiresFullScan;
+    const maxFullScanRows = getMaxFullScanRows(this.env);
 
     if (requiresScan) {
       if (this.countCachedRows() > maxFullScanRows) {

@@ -11,4 +11,5 @@ export interface CloudflareEnv {
   ADMIN_BEARER_TOKEN?: string;
   RATE_LIMIT_MAX_REQUESTS?: string;
   RATE_LIMIT_WINDOW_SECONDS?: string;
+  TABLE_MAX_FULL_SCAN_ROWS?: string;
 }
