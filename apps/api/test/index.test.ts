@@ -25,7 +25,11 @@ class FakeDurableObjectNamespace {
   }
 }
 
-function createEnv(options?: { rateLimitAllowed?: boolean; defaultAuthMode?: 'private' | 'public-read' }): Env {
+function createEnv(options?: {
+  rateLimitAllowed?: boolean;
+  defaultAuthMode?: 'private' | 'public-read';
+  projectAccessStatus?: 200 | 404 | 500;
+}): Env {
   const rateLimitRequests: Array<{ name: string; key: string }> = [];
   const projectRequests: string[] = [];
   const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }> = [];
@@ -214,6 +218,23 @@ function createEnv(options?: { rateLimitAllowed?: boolean; defaultAuthMode?: 'pr
     }
 
     if (body.type === 'project.access.get') {
+      if (options?.projectAccessStatus === 404) {
+        return Response.json(
+          {
+            error: {
+              code: 'NOT_FOUND',
+              message: 'Project demo was not found.',
+              details: null
+            }
+          },
+          { status: 404 }
+        );
+      }
+
+      if (options?.projectAccessStatus === 500) {
+        return new Response('project access failed', { status: 500 });
+      }
+
       return Response.json({
         type: 'project.access.get.result',
         result: {
@@ -518,6 +539,22 @@ describe('api routes', () => {
     expect(response.status).toBe(401);
     expect(env.__projectRequests).toContain('project.access.get');
     expect(env.__projectRequests).not.toContain('project.table.resolve');
+  });
+
+  it('preserves internal project access failures instead of rewriting them as unauthorized', async () => {
+    const app = createApp();
+    const response = await app.request('/v1/projects/demo/tables/users/rows', {}, createEnv({
+      projectAccessStatus: 500
+    }));
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: 'Durable Object RPC failed with 500.',
+        details: null
+      }
+    });
   });
 
   it('allows anonymous reads for public-read projects and still resolves the table', async () => {

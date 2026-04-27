@@ -55,7 +55,7 @@ import {
   type UpdateRowResult,
   type UpsertTableResult
 } from '@sheetflare/contracts';
-import { ControlPlaneDO, ProjectDO, RateLimitDO, TableDO, doRpc } from '@sheetflare/cloudflare';
+import { ControlPlaneDO, DurableRpcError, ProjectDO, RateLimitDO, TableDO, doRpc } from '@sheetflare/cloudflare';
 import type { Env } from './env';
 
 type AppVariables = {
@@ -200,6 +200,7 @@ const notFoundResponse = {
 const adminSecurity = [{ bearerAuth: [] }];
 const optionalBearerSecurity = [{ bearerAuth: [] }, {}];
 const apiKeyTouchIntervalMs = 5 * 60 * 1000;
+const maxRecentApiKeyTouches = 10_000;
 const recentApiKeyTouches = new Map<string, number>();
 
 function getControlPlaneStub(env: Env) {
@@ -433,6 +434,15 @@ async function touchApiKeyIfNeeded(env: Env, apiKeyId: string) {
     return;
   }
 
+  if (recentApiKeyTouches.size >= maxRecentApiKeyTouches) {
+    const cutoffMs = nowMs - apiKeyTouchIntervalMs;
+    for (const [cachedApiKeyId, cachedTouchedAtMs] of recentApiKeyTouches) {
+      if (cachedTouchedAtMs < cutoffMs) {
+        recentApiKeyTouches.delete(cachedApiKeyId);
+      }
+    }
+  }
+
   recentApiKeyTouches.set(apiKeyId, nowMs);
   await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
     type: 'control.api-key.touch',
@@ -547,6 +557,21 @@ async function loadProjectAccess(c: { env: Env }, projectSlug: string) {
     type: 'project.access.get.result';
     result: { data: ProjectAccessResult };
   }).result.data;
+}
+
+async function requirePublicReadProject(c: { env: Env }, projectSlug: string) {
+  try {
+    const projectAccess = await loadProjectAccess(c, projectSlug);
+    if (projectAccess.defaultAuthMode !== 'public-read') {
+      throw new UnauthorizedError();
+    }
+  } catch (error) {
+    if (error instanceof DurableRpcError && error.status === 404) {
+      throw new UnauthorizedError();
+    }
+
+    throw error;
+  }
 }
 
 async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug: string) {
@@ -1129,10 +1154,7 @@ function createApp() {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
     if (auth.kind === 'anonymous') {
-      const projectAccess = await loadProjectAccess(c, params.project).catch(() => null);
-      if (!projectAccess || projectAccess.defaultAuthMode !== 'public-read') {
-        throw new UnauthorizedError();
-      }
+      await requirePublicReadProject(c, params.project);
     }
     const tableAccess = await loadProjectTable(c, params.project, params.table);
     if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
@@ -1155,10 +1177,7 @@ function createApp() {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
     if (auth.kind === 'anonymous') {
-      const projectAccess = await loadProjectAccess(c, params.project).catch(() => null);
-      if (!projectAccess || projectAccess.defaultAuthMode !== 'public-read') {
-        throw new UnauthorizedError();
-      }
+      await requirePublicReadProject(c, params.project);
     }
     const tableAccess = await loadProjectTable(c, params.project, params.table);
     if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
@@ -1206,10 +1225,7 @@ function createApp() {
     const params = parsePathParams(c, rowParamsSchema);
     const auth = await authenticateRequest(c);
     if (auth.kind === 'anonymous') {
-      const projectAccess = await loadProjectAccess(c, params.project).catch(() => null);
-      if (!projectAccess || projectAccess.defaultAuthMode !== 'public-read') {
-        throw new UnauthorizedError();
-      }
+      await requirePublicReadProject(c, params.project);
     }
     const tableAccess = await loadProjectTable(c, params.project, params.table);
     if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
