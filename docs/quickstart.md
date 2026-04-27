@@ -170,11 +170,12 @@ npm run smoke:staging
 
 The smoke suite checks:
 
-- readiness endpoint
+- readiness endpoint internal checks
 - admin access
 - private-table anonymous rejection
 - private-table keyed reads
 - public-read anonymous access
+- public-read anonymous write rejection
 - cache status with `staleReason`
 - create/get/update/delete on a smoke row
 - admin reindex

@@ -4,10 +4,9 @@ import {
   logStep,
   logSuccess,
   requestJson,
-  requireEnv,
-  ScriptError,
-  readJsonEnv
+  ScriptError
 } from './lib/runtime';
+import { readSmokeConfig } from './lib/smoke-config';
 
 type RowEnvelope = {
   id: string;
@@ -52,32 +51,47 @@ type ReindexResponse = {
   };
 };
 
-async function expectStatus(baseUrl: string, path: string, expectedStatus: number) {
-  const { response } = await requestJson<unknown>({
+async function expectStatus(
+  baseUrl: string,
+  path: string,
+  expectedStatus: number,
+  init?: {
+    method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+    body?: unknown;
+  }
+) {
+  const request = {
     baseUrl,
     path,
     expectedStatus
+  };
+  const { response } = await requestJson<unknown>({
+    ...request,
+    ...(init?.method ? { method: init.method } : {}),
+    ...(init?.body !== undefined ? { body: init.body } : {})
   });
   return response.status;
 }
 
 async function main() {
-  const baseUrl = requireEnv('SHEETFLARE_BASE_URL');
-  const adminBearer = requireEnv('SHEETFLARE_ADMIN_BEARER');
-  const privateProject = requireEnv('SHEETFLARE_PRIVATE_PROJECT');
-  const privateTable = requireEnv('SHEETFLARE_PRIVATE_TABLE');
-  const privateReadKey = requireEnv('SHEETFLARE_PRIVATE_READ_KEY');
-  const mutationKey = requireEnv('SHEETFLARE_MUTATION_KEY');
-  const publicProject = requireEnv('SHEETFLARE_PUBLIC_PROJECT');
-  const publicTable = requireEnv('SHEETFLARE_PUBLIC_TABLE');
-  const idColumn = process.env.SHEETFLARE_SMOKE_ID_COLUMN?.trim() || '_id';
-  const createValues = readJsonEnv<Record<string, unknown>>('SHEETFLARE_SMOKE_CREATE_VALUES_JSON');
-  const updateValues = readJsonEnv<Record<string, unknown>>('SHEETFLARE_SMOKE_UPDATE_VALUES_JSON');
+  const {
+    baseUrl,
+    adminCredential,
+    privateProject,
+    privateTable,
+    privateReadKey,
+    mutationKey,
+    publicProject,
+    publicTable,
+    idColumn,
+    createValues,
+    updateValues
+  } = readSmokeConfig();
   const smokeId = `smoke-${Date.now()}`;
   let createdRowId: string | null = null;
 
   try {
-    logStep('Readiness check');
+    logStep('Internal readiness check');
     const readiness = await requestJson<{
       checks: {
         controlPlane: string;
@@ -97,7 +111,7 @@ async function main() {
     await requestJson({
       baseUrl,
       path: '/v1/admin/projects',
-      bearer: adminBearer,
+      bearer: adminCredential,
       expectedStatus: 200
     });
     logSuccess('Admin routes are reachable');
@@ -127,11 +141,28 @@ async function main() {
     });
     logSuccess('Public-read table works anonymously');
 
+    logStep('Public-read table rejects anonymous writes');
+    await expectStatus(
+      baseUrl,
+      `/v1/projects/${encodeURIComponent(publicProject)}/tables/${encodeURIComponent(publicTable)}/rows`,
+      401,
+      {
+        method: 'POST',
+        body: {
+          values: {
+            ...createValues,
+            [idColumn]: `public-${smokeId}`
+          }
+        }
+      }
+    );
+    logSuccess('Public-read table blocks anonymous writes');
+
     logStep('Cache status includes stale reason');
     const cacheStatus = await requestJson<CacheStatusResponse>({
       baseUrl,
       path: `/v1/admin/projects/${encodeURIComponent(privateProject)}/tables/${encodeURIComponent(privateTable)}/cache`,
-      bearer: adminBearer,
+      bearer: adminCredential,
       expectedStatus: 200
     });
     const cacheStatusData = assertPresent(cacheStatus.data, 'Cache status returned an empty response body.');
@@ -186,7 +217,7 @@ async function main() {
       baseUrl,
       path: `/v1/admin/projects/${encodeURIComponent(privateProject)}/tables/${encodeURIComponent(privateTable)}/reindex`,
       method: 'POST',
-      bearer: adminBearer,
+      bearer: adminCredential,
       expectedStatus: 200
     });
     const reindexData = assertPresent(reindexResponse.data, 'Reindex returned an empty response body.');
