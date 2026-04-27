@@ -1,16 +1,22 @@
 # `@sheetflare/admin`
 
-Minimal React admin UI for browsing the control plane.
+Minimal React admin UI for operating the control plane.
 
 ## What It Does
 
 - Lets an operator paste a bootstrap admin token or scoped admin API key.
 - Calls the protected admin API directly from the browser.
 - Displays the current project registry without adding another backend layer.
+- Validates project, table, and API-key drafts before submit using the shared contracts.
+- Exposes explicit refresh controls plus cache/sync metadata for the selected project.
 
 ## Important Files
 
-- `src/app.tsx`: credential flow and project list UI.
+- `src/app.tsx`: orchestration and async state wiring for the admin surface.
+- `src/admin-drafts.ts`: draft defaults plus contract-aligned client validation.
+- `src/components/credential-panel.tsx`: credential entry and persistence opt-in.
+- `src/components/api-key-panel.tsx`: scoped/global key creation, refresh, and revoke flows.
+- `src/components/selected-project-panel.tsx`: selected-project metadata, table creation, and cache actions.
 - `src/auth.ts`: browser-local credential normalization and storage helpers.
 - `src/styles.css`: lightweight styling.
 
@@ -19,10 +25,13 @@ Minimal React admin UI for browsing the control plane.
 - The UI is intentionally small. It is an operator convenience layer, not the source of system behavior.
 - Credentials are stored in browser local storage, so this app assumes a trusted operator environment.
 - If control-plane behavior changes, update the API and contracts first, then keep this UI aligned.
+- Operator state should stay explicit: project selection, cache status, sync freshness, and key scope should never rely on hidden browser state.
 
 ## Commands
 
 ```powershell
 npm --workspace @sheetflare/admin run dev
+npm --workspace @sheetflare/admin run typecheck
 npm --workspace @sheetflare/admin run test
+npm --workspace @sheetflare/admin run build
 ```
