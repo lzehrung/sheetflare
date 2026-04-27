@@ -1854,4 +1854,92 @@ describe('TableDO', () => {
 
     expect((response as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-2', 'row-3', 'row-4']);
   });
+
+  it('refreshes cached headers after delete when the sheet layout changes manually', async () => {
+    const env = createTestEnv();
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Grace']
+      ],
+      requestedRanges: []
+    };
+
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          sheetGid: 1,
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    sheet.rows = [
+      ['_id', 'name', 'status'],
+      ['row-1', 'Ada', 'active'],
+      ['row-2', 'Grace', 'inactive']
+    ];
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.delete',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-1'
+      }
+    );
+
+    const schema = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.schema.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect(schema).toMatchObject({
+      type: 'table.schema.get.result',
+      result: {
+        data: {
+          fields: [
+            { name: '_id', inferredType: 'string', nullable: false },
+            { name: 'name', inferredType: 'string', nullable: false },
+            { name: 'status', inferredType: 'string', nullable: false }
+          ]
+        }
+      }
+    });
+  });
 });

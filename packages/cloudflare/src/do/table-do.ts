@@ -472,7 +472,7 @@ export class TableDO {
       values
     });
     this.refreshSchemaMeta(headers);
-    this.markCacheFreshAfterMutation(config);
+    this.markCacheFreshAfterMutation(config, headers);
 
     return {
       data: {
@@ -524,7 +524,7 @@ export class TableDO {
       values
     });
     this.refreshSchemaMeta(headers);
-    this.markCacheFreshAfterMutation(config);
+    this.markCacheFreshAfterMutation(config, headers);
 
     return {
       data: {
@@ -543,6 +543,10 @@ export class TableDO {
     }
 
     await this.ensurePointOperationReady(config);
+    const cachedHeaders = this.getMeta('headers');
+    const headers = await this.getHeaders(config, {
+      bypassCache: true
+    });
     const existingRow = await this.resolveRowById(config, rowId, {
       verifyUnique: false
     });
@@ -553,8 +557,9 @@ export class TableDO {
     await this.getSheetsClient(config).deleteRow(config, existingRow.rowNumber);
     this.deleteRowIndex(rowId);
     this.deleteCachedRow(rowId);
-    await this.refreshCachedRowNumbersAfterDelete(config);
-    this.refreshSchemaMeta(await this.getHeaders(config));
+    await this.refreshCachedRowNumbersAfterDelete(config, headers, cachedHeaders);
+    this.refreshSchemaMeta(headers);
+    this.markCacheFreshAfterMutation(config, headers);
 
     return {
       ok: true as const,
@@ -753,7 +758,16 @@ export class TableDO {
     return result.row;
   }
 
-  private async refreshCachedRowNumbersAfterDelete(config: ResolvedTableConfig) {
+  private async refreshCachedRowNumbersAfterDelete(
+    config: ResolvedTableConfig,
+    headers: string[],
+    cachedHeaders: string | null
+  ) {
+    if (cachedHeaders !== JSON.stringify(headers)) {
+      await this.syncCache(config.projectSlug, config.tableSlug, { force: true });
+      return;
+    }
+
     const references = await this.getSheetsClient(config).readRowReferences(config);
     if (!this.canRepairDeleteFromRowReferences(references)) {
       await this.syncCache(config.projectSlug, config.tableSlug, { force: true });
@@ -763,8 +777,6 @@ export class TableDO {
     for (const reference of references) {
       this.updateCachedRowNumber(reference.rowId, reference.rowNumber);
     }
-
-    this.markCacheFreshAfterMutation(config);
   }
 
   private canRepairDeleteFromRowReferences(
@@ -1003,8 +1015,9 @@ export class TableDO {
     };
   }
 
-  private markCacheFreshAfterMutation(config: ResolvedTableConfig) {
+  private markCacheFreshAfterMutation(config: ResolvedTableConfig, headers: string[]) {
     const now = new Date().toISOString();
+    this.setMeta('headers', JSON.stringify(headers));
     this.setMeta('config.signature', buildCacheConfigSignature(config));
     this.setSyncMeta({
       status: 'ready',
