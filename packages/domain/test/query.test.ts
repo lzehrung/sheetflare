@@ -52,6 +52,24 @@ describe('buildFilterSql', () => {
     expect(result.conditions).toContain("(cf0.value_kind != 'number' OR cf0.value_number != ?)");
     expect(result.parameters).toEqual(['score', 10]);
   });
+
+  it('handles null equality and inequality explicitly', () => {
+    const result = buildFilterSql(
+      {
+        rowNumber: { neq: null },
+        id: { eq: null },
+        score: { eq: null }
+      },
+      ['score']
+    );
+
+    expect(result.conditions).toEqual([
+      'cr.row_number IS NOT NULL',
+      'cr.row_id IS NULL',
+      "cf2.value_kind = 'null'"
+    ]);
+    expect(result.parameters).toEqual(['score']);
+  });
 });
 
 describe('validateFilterCapabilities', () => {

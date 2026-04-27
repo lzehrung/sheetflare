@@ -494,9 +494,7 @@ export class TableDO {
     const headers = await this.getHeaders(config, {
       bypassCache: true
     });
-    const existingRow = await this.resolveRowById(config, rowId, {
-      verifyUnique: false
-    });
+    const existingRow = await this.resolveRowById(config, rowId);
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
@@ -547,9 +545,7 @@ export class TableDO {
     const headers = await this.getHeaders(config, {
       bypassCache: true
     });
-    const existingRow = await this.resolveRowById(config, rowId, {
-      verifyUnique: false
-    });
+    const existingRow = await this.resolveRowById(config, rowId);
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
