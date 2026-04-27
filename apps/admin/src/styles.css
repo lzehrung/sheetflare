@@ -121,9 +121,15 @@ body {
   font: inherit;
 }
 
-.field input:focus {
+.field input:focus,
+.field select:focus,
+.selectableCard:focus {
   outline: 2px solid rgba(216, 95, 56, 0.2);
   border-color: rgba(216, 95, 56, 0.45);
+}
+
+.fieldMessage {
+  margin: 0;
 }
 
 .actions {
@@ -148,10 +154,19 @@ body {
   cursor: pointer;
 }
 
+.actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .actions button.secondaryButton {
   color: var(--ink);
   background: rgba(255, 255, 255, 0.72);
   border: 1px solid var(--border);
+}
+
+.compactHeaderActions {
+  align-items: center;
 }
 
 .cards {
@@ -188,6 +203,10 @@ body {
 }
 
 .selectableCard {
+  display: block;
+  width: 100%;
+  text-align: left;
+  appearance: none;
   cursor: pointer;
 }
 
@@ -250,6 +269,10 @@ body {
   display: grid;
   gap: 12px;
   margin: 18px 0 0;
+}
+
+.factsGrid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .facts dt {

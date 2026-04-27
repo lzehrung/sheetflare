@@ -10,19 +10,12 @@ export function ProjectCards({ projects, selectedProjectSlug, onSelect }: Projec
   return (
     <div className="cards">
       {projects.map((project) => (
-        <article
+        <button
           key={project.slug}
+          type="button"
           className={`card selectableCard${selectedProjectSlug === project.slug ? ' selectedCard' : ''}`}
           data-testid={`project-card-${project.slug}`}
           onClick={() => onSelect(project.slug)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              onSelect(project.slug);
-            }
-          }}
-          role="button"
-          tabIndex={0}
           aria-pressed={selectedProjectSlug === project.slug}
         >
           <div className="cardTop">
@@ -42,7 +35,7 @@ export function ProjectCards({ projects, selectedProjectSlug, onSelect }: Projec
               <dd>{new Date(project.updatedAt).toLocaleString()}</dd>
             </div>
           </dl>
-        </article>
+        </button>
       ))}
     </div>
   );

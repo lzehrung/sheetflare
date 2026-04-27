@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ApiKeyPrincipal } from '@sheetflare/contracts';
 import { App } from './app';
 
@@ -436,5 +436,185 @@ describe('App', () => {
     await waitFor(() => {
       expect(screen.queryByText('New key:')).toBeNull();
     });
+  });
+
+  it('refreshes the project registry and reselects the first available project when the current one disappears', async () => {
+    let registryVersion: 'initial' | 'after-refresh' = 'initial';
+
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: registryVersion === 'initial'
+            ? [
+                {
+                  slug: 'demo',
+                  name: 'Demo',
+                  spreadsheetId: 'sheet-1',
+                  tableCount: 0,
+                  updatedAt: '2026-04-26T00:00:00.000Z'
+                },
+                {
+                  slug: 'prod',
+                  name: 'Prod',
+                  spreadsheetId: 'sheet-2',
+                  tableCount: 0,
+                  updatedAt: '2026-04-27T00:00:00.000Z'
+                }
+              ]
+            : [
+                {
+                  slug: 'demo',
+                  name: 'Demo',
+                  spreadsheetId: 'sheet-1',
+                  tableCount: 0,
+                  updatedAt: '2026-04-26T00:00:00.000Z'
+                }
+              ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: []
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=prod') {
+        return createJsonResponse({
+          project: {
+            slug: 'prod',
+            name: 'Prod',
+            spreadsheetId: 'sheet-2',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-27T00:00:00.000Z',
+            updatedAt: '2026-04-27T00:00:00.000Z'
+          },
+          tables: []
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys?project=prod' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByText('Demo');
+    fireEvent.click(screen.getByTestId('project-card-prod'));
+    await waitFor(() => {
+      expect(screen.getByTestId('project-card-prod').getAttribute('aria-pressed')).toBe('true');
+    });
+
+    registryVersion = 'after-refresh';
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh projects' }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('project-card-prod')).toBeNull();
+      expect(screen.getByTestId('project-card-demo').getAttribute('aria-pressed')).toBe('true');
+    });
+  });
+
+  it('shows inline validation for invalid table drafts before submit', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: 0,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: []
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByText('Create Table');
+    const selectedProjectSection = screen.getByText('Selected Project');
+    const panel = selectedProjectSection.closest('section');
+    expect(panel).not.toBeNull();
+
+    const scope = within(panel as HTMLElement);
+    const tableSlugInput = scope.getByText('Table Slug').closest('label')?.querySelector('input');
+    const headerRowInput = scope.getByText('Header Row').closest('label')?.querySelector('input');
+    const dataStartRowInput = scope.getByText('Data Start Row').closest('label')?.querySelector('input');
+    const cacheTtlInput = scope.getByText('Cache TTL Seconds').closest('label')?.querySelector('input');
+
+    expect(tableSlugInput).not.toBeNull();
+    expect(headerRowInput).not.toBeNull();
+    expect(dataStartRowInput).not.toBeNull();
+    expect(cacheTtlInput).not.toBeNull();
+
+    fireEvent.change(tableSlugInput as HTMLInputElement, {
+      target: { value: 'Users Table' }
+    });
+    fireEvent.change(headerRowInput as HTMLInputElement, {
+      target: { value: '2' }
+    });
+    fireEvent.change(dataStartRowInput as HTMLInputElement, {
+      target: { value: '1' }
+    });
+    fireEvent.change(cacheTtlInput as HTMLInputElement, {
+      target: { value: '-1' }
+    });
+
+    expect(scope.getByText('Use lowercase letters, numbers, and single hyphens.')).toBeTruthy();
+    expect(scope.getByText('dataStartRow must be greater than headerRow.')).toBeTruthy();
+    expect(scope.getByText('Cache TTL must be a non-negative integer.')).toBeTruthy();
+    expect(scope.getByRole('button', { name: 'Save table' })).toHaveProperty('disabled', true);
   });
 });
