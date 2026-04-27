@@ -132,6 +132,8 @@ Performance notes:
   - create projects
   - create tables
   - create scoped API keys
+  - list global and project-scoped keys
+  - revoke keys with visible active/revoked state
   - inspect cache status
   - force reindex
 - Credential persistence is opt-in. You can use the UI in session-only mode or explicitly remember the credential in the browser.
@@ -143,6 +145,6 @@ Performance notes:
 - The Google Sheets adapter uses service-account JWT exchange and the Sheets REST API directly, so the worker does not depend on Node-only Google SDKs.
 - Google Sheets read paths use bounded retry/backoff for transient upstream failures, while mutation paths avoid automatic replay to reduce duplicate-write risk.
 - Non-timeout transport failures are reported distinctly from actual request timeouts.
-- Rate limits are bucketed by route family (`admin` vs `data`) so normal data traffic does not consume the same budget as control-plane reads from the same principal.
+- Rate limits are bucketed by route family and operation key, for example `admin.projects.list`, `rows.list`, and `admin.cache.reindex`, so hot endpoints do not starve unrelated calls from the same principal.
 - Rate-limit principals are derived only from verified credentials; unverified API-key-shaped strings fall back to the anonymous/IP bucket.
 - `npm run build`, `npm run typecheck`, and `npm test` all pass from the repo root.

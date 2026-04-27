@@ -193,11 +193,12 @@ npm run smoke:staging
 
 The smoke script verifies:
 
-- readiness endpoint
+- readiness endpoint internal checks
 - admin route access
 - private-table anonymous rejection
 - private-table keyed reads
 - public-read anonymous access
+- public-read anonymous write rejection
 - cache status `staleReason`
 - create/get/update/delete on a smoke row
 - admin reindex

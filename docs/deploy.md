@@ -107,6 +107,8 @@ $env:SHEETFLARE_SMOKE_UPDATE_VALUES_JSON = '{"name":"Smoke Row Updated"}'
 
 The smoke row will be created with a generated ID and deleted automatically.
 
+The smoke suite proves route-level behavior on top of `/ready`. It checks private-table auth rejection, public-read anonymous access, public-read anonymous write rejection, smoke-row CRUD, cache status visibility, and admin reindex.
+
 ## Rollback
 
 At minimum, rollback means restoring the previous Worker deployment and then verifying the critical tables again.
