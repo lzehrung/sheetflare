@@ -233,3 +233,26 @@ Check these first:
 - auth keys have the expected scopes
 
 For deeper troubleshooting, use [operator-runbook.md](./operator-runbook.md).
+
+## Local End-To-End Check
+
+After you have the local Worker, the admin UI, Google credentials, and the smoke-test projects/tables configured, you can run the local end-to-end path:
+
+Required smoke env vars:
+
+- `SHEETFLARE_ADMIN_CREDENTIAL`
+- `SHEETFLARE_PRIVATE_PROJECT`
+- `SHEETFLARE_PRIVATE_TABLE`
+- `SHEETFLARE_PRIVATE_READ_KEY`
+- `SHEETFLARE_MUTATION_KEY`
+- `SHEETFLARE_PUBLIC_PROJECT`
+- `SHEETFLARE_PUBLIC_TABLE`
+- `SHEETFLARE_SMOKE_CREATE_VALUES_JSON`
+- `SHEETFLARE_SMOKE_UPDATE_VALUES_JSON`
+
+```powershell
+npx playwright install chromium
+npm run e2e:local
+```
+
+This starts the local API and admin UI, runs the API smoke suite against the local Worker, and then runs browser automation against the admin UI.

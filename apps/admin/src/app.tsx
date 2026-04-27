@@ -804,7 +804,7 @@ export function App() {
                 {projectDetailState.tables.map((table) => {
                   const cache = cacheStateByTable[table.tableSlug] ?? null;
                   return (
-                    <article key={table.tableSlug} className="card">
+                    <article key={table.tableSlug} className="card" data-testid={`table-card-${table.tableSlug}`}>
                       <div className="cardTop">
                         <div>
                           <p className="slug">{table.tableSlug}</p>
