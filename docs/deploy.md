@@ -2,6 +2,8 @@
 
 This guide defines the expected deployment and verification flow for Sheetflare.
 
+Use [google-service-accounts.md](./google-service-accounts.md) for the exact recommended Google credential model, secret layout, and rotation workflow.
+
 ## Required Environment
 
 Set these on the Worker:
@@ -18,6 +20,7 @@ Recommendations:
 
 - keep `ADMIN_BEARER_TOKEN` long and random
 - use `GOOGLE_CREDENTIALS_JSON` only when you need named per-project refs
+- use one dedicated Google service account per environment unless you have a real reason to isolate further
 - start with conservative rate limits and raise only after observing real traffic
 - keep `TABLE_MAX_FULL_SCAN_ROWS` at the safe default until you have benchmark evidence for a higher value
 
@@ -51,6 +54,13 @@ npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
 ```
 
 Set non-secret vars in `apps/api/wrangler.jsonc` or via your deployment system.
+
+Google credential notes:
+
+- `GOOGLE_PRIVATE_KEY` is secret material and should be stored as a Worker secret
+- `GOOGLE_CREDENTIALS_JSON` is also secret material because it contains private keys
+- `GOOGLE_CLIENT_EMAIL` can be stored as a normal variable
+- if you use named credentials, project config must point at the intended `googleCredentialRef`
 
 ## Post-Deploy Verification
 

@@ -7,7 +7,7 @@ Use this document if you are:
 - a human operator deploying the system
 - an agent automating setup and verification
 
-If you need deeper operational detail, use [deploy.md](./deploy.md) and [operator-runbook.md](./operator-runbook.md).
+If you need deeper operational detail, use [deploy.md](./deploy.md), [operator-runbook.md](./operator-runbook.md), and [google-service-accounts.md](./google-service-accounts.md).
 
 ## 1. Prepare a staging sheet
 
@@ -31,9 +31,17 @@ Rules:
 
 ## 2. Prepare Google access
 
-Create or choose a Google service account.
+Create a dedicated Google service account for staging.
+
+Recommended shape:
+
+- one user-managed service account per environment
+- Google Sheets API enabled in that GCP project
+- spreadsheet-level `Editor` sharing only on the exact spreadsheets Sheetflare will manage
 
 Share both staging spreadsheets with the service-account email as an editor.
+
+Use [google-service-accounts.md](./google-service-accounts.md) for the exact setup, secret-handling model, `GOOGLE_CREDENTIALS_JSON` format, and key-rotation guidance.
 
 You will need:
 
@@ -54,6 +62,10 @@ Set these for staging:
 Optional:
 
 - `GOOGLE_CREDENTIALS_JSON`
+
+If you use one shared credential for the whole gateway, set `GOOGLE_CLIENT_EMAIL` and `GOOGLE_PRIVATE_KEY`.
+
+If you need multiple named credentials in one deployment, set `GOOGLE_CREDENTIALS_JSON` as a secret and then set each project's `googleCredentialRef` to the matching key.
 
 Set secrets:
 
@@ -130,6 +142,11 @@ Set `defaultAuthMode`:
 
 - private project: `"private"`
 - public project: `"public-read"`
+
+Set `googleCredentialRef`:
+
+- leave it blank or use `default` if the Worker uses one shared Google credential
+- set it explicitly if the project should use a named credential from `GOOGLE_CREDENTIALS_JSON`
 
 The admin UI can now:
 

@@ -45,6 +45,8 @@ npm run ops:bootstrap
 Treat `ADMIN_BEARER_TOKEN` as break-glass only.
 For routine scripts, set `SHEETFLARE_ADMIN_CREDENTIAL` to the scoped admin API key instead.
 
+For Google credential setup details, use [google-service-accounts.md](./google-service-accounts.md).
+
 ## Check Cache Status
 
 Set the target table:
@@ -184,6 +186,8 @@ Fix:
 2. Confirm project config still references the correct credential ref.
 3. Reindex one table on each affected project.
 4. Verify cache status returns to `fresh`.
+
+Use [google-service-accounts.md](./google-service-accounts.md) if you need the exact secret layout, named credential JSON shape, or key-rotation sequence.
 
 ### Rotate bootstrap admin token
 
