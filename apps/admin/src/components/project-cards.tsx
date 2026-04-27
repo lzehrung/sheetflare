@@ -14,6 +14,15 @@ export function ProjectCards({ projects, selectedProjectSlug, onSelect }: Projec
           key={project.slug}
           className={`card selectableCard${selectedProjectSlug === project.slug ? ' selectedCard' : ''}`}
           onClick={() => onSelect(project.slug)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              onSelect(project.slug);
+            }
+          }}
+          role="button"
+          tabIndex={0}
+          aria-pressed={selectedProjectSlug === project.slug}
         >
           <div className="cardTop">
             <div>
