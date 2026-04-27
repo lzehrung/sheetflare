@@ -387,6 +387,8 @@ export class TableDO {
     }
 
     await this.ensureQueryCacheReady(config);
+    const headers = await this.getHeaders(config);
+    this.assertRequestedFields(rawQuery.fields ?? null, headers);
     const result = this.queryCachedRows(config, rawQuery);
 
     return {
@@ -1384,6 +1386,21 @@ export class TableDO {
         Object.entries(row.values).filter(([key]) => allowed.has(key))
       )
     }));
+  }
+
+  private assertRequestedFields(fields: string[] | null, headers: readonly string[]) {
+    if (!fields || fields.length === 0) {
+      return;
+    }
+
+    const allowedFields = new Set(headers);
+    const invalidFields = fields.filter((field) => !allowedFields.has(field));
+    if (invalidFields.length > 0) {
+      throw new BadRequestError('fields contains unknown columns.', {
+        invalidFields,
+        headers
+      });
+    }
   }
 
   private getCursorValue(sortField: string, row: CachedRowRow & { sort_kind?: string | null; sort_text?: string | null; sort_number?: number | null; sort_boolean?: number | null }) {
