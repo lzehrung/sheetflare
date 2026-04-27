@@ -78,6 +78,15 @@ Interpretation:
 - `config-changed`: table config changed in a way that requires resync
 - `error`: last sync failed and needs investigation
 
+For critical tables, automate this check:
+
+```powershell
+$env:SHEETFLARE_CACHE_HEALTH_TABLES_JSON = '[{"project":"demo","table":"users"}]'
+npm run ops:cache:health
+```
+
+This exits non-zero when a critical table is not healthy.
+
 ## Force Reindex
 
 Use when:
@@ -202,6 +211,14 @@ The smoke script verifies:
 - cache status `staleReason`
 - create/get/update/delete on a smoke row
 - admin reindex
+
+If you are validating for broader external use, also run:
+
+```powershell
+npm run load:staging
+```
+
+Use [benchmarking.md](./benchmarking.md) and [observability.md](./observability.md) for the reporting and alerting workflow around those runs.
 
 ## When To Escalate
 

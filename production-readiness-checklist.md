@@ -41,6 +41,9 @@ Each item below has:
 
 ### 1. Real staging deployment validation
 
+Status:
+- in progress on 2026-04-27: `scripts/smoke-staging.ts` can now emit markdown and JSON report artifacts, but a real staged passing report is still required
+
 Goal:
 - prove the deployed Cloudflare Worker + Durable Objects + Google Sheets integration behaves the same as the local harnessed tests
 
@@ -99,6 +102,9 @@ Proof required:
 
 ### 3. Add load and churn testing
 
+Status:
+- in progress on 2026-04-27: `scripts/load-staging.ts` exists, but a real benchmark report against staging is still required
+
 Goal:
 - prove the design holds under realistic sustained use
 
@@ -153,6 +159,9 @@ Proof required:
 - each operator endpoint used in the runbook has a real example command
 
 ### 5. Add alertable observability
+
+Status:
+- in progress on 2026-04-27: structured log events are documented in `docs/observability.md` and critical-table cache health can be checked with `npm run ops:cache:health`, but real alert wiring still needs to be configured in the chosen platform
 
 Goal:
 - move from logs-only debugging to actionable production signals

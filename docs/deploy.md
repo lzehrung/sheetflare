@@ -67,12 +67,33 @@ $env:SHEETFLARE_ADMIN_CREDENTIAL = "<ADMIN_BEARER_TOKEN>"
 npm run smoke:staging
 ```
 
-3. For each critical table, verify cache status:
+Optional: persist a smoke report artifact:
+
+```powershell
+$env:SHEETFLARE_SMOKE_REPORT_PATH = "reports/staging/smoke-$(Get-Date -Format yyyyMMdd-HHmmss).md"
+npm run smoke:staging
+```
+
+3. Run the staging load harness and persist its report:
+
+```powershell
+$env:SHEETFLARE_LOAD_REPORT_PATH = "reports/staging/load-$(Get-Date -Format yyyyMMdd-HHmmss).md"
+npm run load:staging
+```
+
+4. For each critical table, verify cache status:
 
 ```powershell
 $env:SHEETFLARE_PROJECT = "demo"
 $env:SHEETFLARE_TABLE = "users"
 npm run ops:cache
+```
+
+5. For critical tables, run the synthetic cache health check:
+
+```powershell
+$env:SHEETFLARE_CACHE_HEALTH_TABLES_JSON = '[{"project":"demo","table":"users"}]'
+npm run ops:cache:health
 ```
 
 ## Required Staging Smoke Variables
@@ -135,5 +156,6 @@ A release is acceptable only when:
 - repo checks are green
 - deploy succeeds
 - smoke suite passes
+- load harness report is captured
 - cache status on critical tables is healthy
 - no repeated sync failures appear in logs after deploy
