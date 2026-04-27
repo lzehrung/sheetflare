@@ -241,6 +241,11 @@ body {
   font-weight: 700;
 }
 
+.badgeMuted {
+  color: var(--muted);
+  background: rgba(93, 109, 115, 0.12);
+}
+
 .facts {
   display: grid;
   gap: 12px;
@@ -263,6 +268,10 @@ body {
 .muted,
 .error {
   margin: 18px 0 0;
+}
+
+.sectionLabel {
+  margin: 0;
 }
 
 .muted {

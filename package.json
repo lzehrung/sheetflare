@@ -10,7 +10,7 @@
     "build": "npm run -ws build",
     "lint": "eslint .",
     "typecheck": "npm run -ws typecheck && tsc -p tsconfig.scripts.json --noEmit",
-    "test": "npm run -ws test && vitest run scripts/lib/runtime.test.ts",
+    "test": "npm run -ws test && vitest run --config vitest.config.ts",
     "check": "npm run typecheck && npm run test",
     "dev:api": "npm --workspace @sheetflare/api run dev",
     "dev:admin": "npm --workspace @sheetflare/admin run dev",

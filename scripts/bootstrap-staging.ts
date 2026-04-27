@@ -5,44 +5,9 @@ import {
   readJsonEnv,
   requestJson,
   requireAdminCredential,
-  requireEnv,
-  ScriptError
+  requireEnv
 } from './lib/runtime';
-
-type BootstrapTable = {
-  tableSlug: string;
-  sheetTabName: string;
-  sheetGid?: number;
-  idColumn?: string;
-  indexedFields?: string[];
-  headerRow?: number;
-  dataStartRow?: number;
-  readEnabled?: boolean;
-  createEnabled?: boolean;
-  updateEnabled?: boolean;
-  deleteEnabled?: boolean;
-  cacheTtlSeconds?: number;
-};
-
-type BootstrapProject = {
-  slug: string;
-  name: string;
-  spreadsheetId: string;
-  googleCredentialRef?: string;
-  defaultAuthMode?: 'private' | 'public-read';
-  tables?: BootstrapTable[];
-};
-
-type BootstrapApiKey = {
-  name: string;
-  projectSlug?: string | null;
-  scopes: string[];
-};
-
-type BootstrapConfig = {
-  projects: BootstrapProject[];
-  apiKeys?: BootstrapApiKey[];
-};
+import { parseBootstrapConfig, type BootstrapConfig } from './lib/bootstrap-config';
 
 type ProjectResponse = {
   project: {
@@ -70,11 +35,7 @@ type ApiKeyResponse = {
 async function main() {
   const baseUrl = requireEnv('SHEETFLARE_BASE_URL');
   const bearer = requireAdminCredential();
-  const config = readJsonEnv<BootstrapConfig>('SHEETFLARE_BOOTSTRAP_CONFIG_JSON');
-
-  if (!Array.isArray(config.projects) || config.projects.length === 0) {
-    throw new ScriptError('SHEETFLARE_BOOTSTRAP_CONFIG_JSON must include at least one project.');
-  }
+  const config = parseBootstrapConfig(readJsonEnv<BootstrapConfig>('SHEETFLARE_BOOTSTRAP_CONFIG_JSON'));
 
   const createdKeys: ApiKeyResponse[] = [];
 
