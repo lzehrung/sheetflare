@@ -322,6 +322,26 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'table.cache.refresh') {
+      return Response.json({
+        type: 'table.cache.refresh.result',
+        result: {
+          ok: true,
+          rowCount: 3,
+          cache: {
+            status: 'ready',
+            cacheTtlSeconds: 15,
+            stale: false,
+            staleReason: 'fresh',
+            rowCount: 3,
+            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
+            lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
+            lastSyncError: null
+          }
+        }
+      });
+    }
+
     if (body.type === 'table.rows.list') {
       return Response.json({
         type: 'table.rows.list.result',
@@ -708,6 +728,46 @@ describe('api routes', () => {
     });
   });
 
+  it('refreshes a table cache if it is stale for admin requests', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __tableRequests: Array<{ type: string; requestContext?: Record<string, unknown> }>;
+    };
+    const response = await app.request(
+      '/v1/admin/projects/demo/tables/users/refresh',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      rowCount: 3,
+      cache: {
+        status: 'ready',
+        cacheTtlSeconds: 15,
+        stale: false,
+        staleReason: 'fresh',
+        rowCount: 3,
+        lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
+        lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
+        lastSyncError: null
+      }
+    });
+    expect(env.__tableRequests.at(-1)).toMatchObject({
+      type: 'table.cache.refresh',
+      requestContext: {
+        route: 'admin.cache.refresh',
+        principal: 'bootstrap-admin'
+      }
+    });
+  });
+
   it('parses filter queries for row listing', async () => {
     const app = createApp();
     const response = await app.request(
@@ -916,6 +976,7 @@ describe('api routes', () => {
     expect(document.paths['/v1/admin/projects']).toBeDefined();
     expect(document.paths['/v1/projects/{project}/tables/{table}/rows']).toBeDefined();
     expect(document.paths['/v1/admin/projects/{project}/tables/{table}/cache']).toBeDefined();
+    expect(document.paths['/v1/admin/projects/{project}/tables/{table}/refresh']).toBeDefined();
     expect(document.components?.securitySchemes?.bearerAuth).toBeDefined();
   });
 

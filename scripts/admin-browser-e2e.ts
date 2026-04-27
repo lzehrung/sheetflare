@@ -52,10 +52,9 @@ async function main() {
     assert(projectPressed === 'true', 'Project card should react to keyboard activation.');
     logSuccess('Project card is keyboard-activatable');
 
-    logStep('Load cache for the private table');
+    logStep('Wait for cache status to load for the private table');
     const projectTableCard = page.getByTestId(`table-card-${smokeConfig.privateTable}`);
     await projectTableCard.waitFor({ state: 'visible' });
-    await projectTableCard.getByRole('button', { name: 'Load cache' }).click();
     const cacheText = await waitForText(
       projectTableCard.locator('dd').nth(2),
       /ready \/ fresh \/ \d+ rows/

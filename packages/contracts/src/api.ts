@@ -110,6 +110,8 @@ export const reindexTableResultSchema = z.object({
   cache: tableCacheStatusSchema
 });
 
+export const refreshTableCacheResultSchema = reindexTableResultSchema;
+
 export const getTableCacheStatusResultSchema = z.object({
   data: tableCacheStatusSchema
 });
@@ -147,6 +149,7 @@ export type UpdateRowResult = z.infer<typeof updateRowResultSchema>;
 export type DeleteRowResult = z.infer<typeof deleteRowResultSchema>;
 export type GetSchemaResult = z.infer<typeof getSchemaResultSchema>;
 export type ReindexTableResult = z.infer<typeof reindexTableResultSchema>;
+export type RefreshTableCacheResult = z.infer<typeof refreshTableCacheResultSchema>;
 export type GetTableCacheStatusResult = z.infer<typeof getTableCacheStatusResultSchema>;
 export type AdminCreateApiKeyInput = z.infer<typeof adminCreateApiKeyInputSchema>;
 export type AdminListApiKeysResult = z.infer<typeof adminListApiKeysResultSchema>;

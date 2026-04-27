@@ -251,7 +251,7 @@ export class GoogleSheetsService {
   private tokenCache: { value: string; expiresAtMs: number } | null = null;
 
   constructor(private readonly config: GoogleServiceAccountConfig) {
-    this.fetchImpl = config.fetch ?? fetch;
+    this.fetchImpl = config.fetch ?? ((input, init) => fetch(input, init));
     this.oauthTokenUrl = config.oauthTokenUrl ?? defaultOauthTokenUrl;
     this.sheetsApiBaseUrl = config.sheetsApiBaseUrl ?? defaultSheetsApiBaseUrl;
     this.now = config.now ?? Date.now;

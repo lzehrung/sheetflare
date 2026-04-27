@@ -50,6 +50,18 @@ You will need:
 
 ## 3. Configure the Worker
 
+Verify Wrangler auth first:
+
+```powershell
+npx wrangler whoami
+```
+
+If needed:
+
+```powershell
+npx wrangler login
+```
+
 Set these for staging:
 
 - `GOOGLE_CLIENT_EMAIL`
@@ -155,6 +167,70 @@ The admin UI can now:
 - mint scoped API keys
 - inspect cache status
 - force reindex
+
+If you want a repeatable bootstrap instead of clicking through the admin UI, set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON` and run `npm run ops:bootstrap`.
+
+Template:
+
+```powershell
+$env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
+{
+  "projects": [
+    {
+      "slug": "demo-private",
+      "name": "Demo Private",
+      "spreadsheetId": "<PRIVATE_SPREADSHEET_ID>",
+      "googleCredentialRef": "default",
+      "defaultAuthMode": "private",
+      "tables": [
+        {
+          "tableSlug": "users",
+          "sheetTabName": "Users",
+          "idColumn": "_id",
+          "indexedFields": ["name", "status"],
+          "cacheTtlSeconds": 15
+        }
+      ]
+    },
+    {
+      "slug": "demo-public",
+      "name": "Demo Public",
+      "spreadsheetId": "<PUBLIC_SPREADSHEET_ID>",
+      "googleCredentialRef": "default",
+      "defaultAuthMode": "public-read",
+      "tables": [
+        {
+          "tableSlug": "users",
+          "sheetTabName": "Users",
+          "idColumn": "_id",
+          "indexedFields": ["name", "status"],
+          "cacheTtlSeconds": 15
+        }
+      ]
+    }
+  ],
+  "apiKeys": [
+    {
+      "name": "private-read",
+      "projectSlug": "demo-private",
+      "scopes": ["table:read"]
+    },
+    {
+      "name": "mutation",
+      "projectSlug": "demo-private",
+      "scopes": ["table:create", "table:update", "table:delete"]
+    },
+    {
+      "name": "ops-admin",
+      "projectSlug": null,
+      "scopes": ["admin:projects", "admin:keys"]
+    }
+  ]
+}
+'@
+
+npm run ops:bootstrap
+```
 
 ## 8. Create the keys needed for smoke testing
 

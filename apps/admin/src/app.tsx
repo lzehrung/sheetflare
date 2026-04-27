@@ -19,6 +19,7 @@ import {
   getProject,
   listApiKeys,
   listProjects,
+  refreshTableCache,
   revokeApiKey,
   reindexTable
 } from './api';
@@ -66,6 +67,8 @@ type NoticeState =
   | { tone: 'error'; message: string };
 
 type CacheStateByTable = Record<string, TableCacheStatus | null>;
+type CacheStatusErrorByTable = Record<string, string | null>;
+type CacheStatusLoadingByTable = Record<string, boolean>;
 
 function getInitialCredential() {
   if (typeof window === 'undefined') {
@@ -114,6 +117,8 @@ export function App() {
     message: 'Load a global admin credential to inspect global keys.'
   });
   const [cacheStateByTable, setCacheStateByTable] = useState<CacheStateByTable>({});
+  const [cacheStatusErrorByTable, setCacheStatusErrorByTable] = useState<CacheStatusErrorByTable>({});
+  const [cacheStatusLoadingByTable, setCacheStatusLoadingByTable] = useState<CacheStatusLoadingByTable>({});
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeState>({
     tone: 'idle',
@@ -283,6 +288,71 @@ export function App() {
     };
   }, [credential, selectedProjectSlug]);
 
+  useEffect(() => {
+    if (!credential || projectDetailState.status !== 'ready' || projectDetailState.tables.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    const tableEntries = projectDetailState.tables.map((table) => ({
+      table,
+      cacheKey: getTableCacheKey(table.projectSlug, table.tableSlug)
+    }));
+
+    setCacheStatusLoadingByTable((current) => ({
+      ...current,
+      ...Object.fromEntries(tableEntries.map((entry) => [entry.cacheKey, true]))
+    }));
+    setCacheStatusErrorByTable((current) => ({
+      ...current,
+      ...Object.fromEntries(tableEntries.map((entry) => [entry.cacheKey, null]))
+    }));
+
+    void (async () => {
+      const results = await Promise.all(
+        tableEntries.map(async (entry) => {
+          try {
+            const response = await getCacheStatus(credential, entry.table.projectSlug, entry.table.tableSlug);
+            return {
+              cache: response.data,
+              cacheKey: entry.cacheKey,
+              errorMessage: null,
+              ok: true as const
+            };
+          } catch (error) {
+            return {
+              cache: null,
+              cacheKey: entry.cacheKey,
+              errorMessage: error instanceof Error ? error.message : 'Unknown error',
+              ok: false as const
+            };
+          }
+        })
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      setCacheStateByTable((current) => ({
+        ...current,
+        ...Object.fromEntries(results.filter((result) => result.ok).map((result) => [result.cacheKey, result.cache]))
+      }));
+      setCacheStatusErrorByTable((current) => ({
+        ...current,
+        ...Object.fromEntries(results.map((result) => [result.cacheKey, result.errorMessage]))
+      }));
+      setCacheStatusLoadingByTable((current) => ({
+        ...current,
+        ...Object.fromEntries(results.map((result) => [result.cacheKey, false]))
+      }));
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [credential, projectDetailState]);
+
   async function refreshProjects(credentialValue: string) {
     const body = await listProjects(credentialValue);
     setState({ status: 'ready', data: body.data });
@@ -376,6 +446,47 @@ export function App() {
     });
   }
 
+  function setCacheStatusLoading(projectSlug: string, tableSlug: string, loading: boolean) {
+    const cacheKey = getTableCacheKey(projectSlug, tableSlug);
+    setCacheStatusLoadingByTable((current) => ({
+      ...current,
+      [cacheKey]: loading
+    }));
+  }
+
+  function setCacheStatusError(projectSlug: string, tableSlug: string, message: string | null) {
+    const cacheKey = getTableCacheKey(projectSlug, tableSlug);
+    setCacheStatusErrorByTable((current) => ({
+      ...current,
+      [cacheKey]: message
+    }));
+  }
+
+  function setCacheStatusValue(projectSlug: string, tableSlug: string, cache: TableCacheStatus) {
+    const cacheKey = getTableCacheKey(projectSlug, tableSlug);
+    setCacheStateByTable((current) => ({
+      ...current,
+      [cacheKey]: cache
+    }));
+  }
+
+  async function fetchCacheStatusForTable(credentialValue: string, projectSlug: string, tableSlug: string) {
+    setCacheStatusLoading(projectSlug, tableSlug, true);
+    setCacheStatusError(projectSlug, tableSlug, null);
+
+    try {
+      const response = await getCacheStatus(credentialValue, projectSlug, tableSlug);
+      setCacheStatusValue(projectSlug, tableSlug, response.data);
+      return response.data;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      setCacheStatusError(projectSlug, tableSlug, message);
+      throw error instanceof Error ? error : new Error(message);
+    } finally {
+      setCacheStatusLoading(projectSlug, tableSlug, false);
+    }
+  }
+
   function clearCredential() {
     if (typeof window !== 'undefined') {
       writeStoredAdminCredential(window.localStorage, null);
@@ -383,6 +494,8 @@ export function App() {
 
     setCredential(null);
     setCacheStateByTable({});
+    setCacheStatusErrorByTable({});
+    setCacheStatusLoadingByTable({});
     setCreatedKey(null);
     setDraftCredential('');
     setRememberCredential(false);
@@ -451,25 +564,46 @@ export function App() {
 
   async function handleLoadCache(tableSlug: string) {
     if (!credential || !selectedProjectSlug) return;
-    await runAction(`Loading cache state for ${selectedProjectSlug}/${tableSlug}`, async () => {
-      const response = await getCacheStatus(credential, selectedProjectSlug, tableSlug);
-      const cacheKey = getTableCacheKey(selectedProjectSlug, tableSlug);
-      setCacheStateByTable((current) => ({
-        ...current,
-        [cacheKey]: response.data
-      }));
+    await runAction(`Getting cache status for ${selectedProjectSlug}/${tableSlug}`, async () => {
+      await fetchCacheStatusForTable(credential, selectedProjectSlug, tableSlug);
+    });
+  }
+
+  async function handleRefreshIfStale(tableSlug: string) {
+    if (!credential || !selectedProjectSlug) return;
+    setCacheStatusLoading(selectedProjectSlug, tableSlug, true);
+    setCacheStatusError(selectedProjectSlug, tableSlug, null);
+
+    await runAction(`Refreshing cache for ${selectedProjectSlug}/${tableSlug} if stale`, async () => {
+      try {
+        const response = await refreshTableCache(credential, selectedProjectSlug, tableSlug);
+        setCacheStatusValue(selectedProjectSlug, tableSlug, response.cache);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        setCacheStatusError(selectedProjectSlug, tableSlug, message);
+        throw error;
+      } finally {
+        setCacheStatusLoading(selectedProjectSlug, tableSlug, false);
+      }
     });
   }
 
   async function handleReindex(tableSlug: string) {
     if (!credential || !selectedProjectSlug) return;
+    setCacheStatusLoading(selectedProjectSlug, tableSlug, true);
+    setCacheStatusError(selectedProjectSlug, tableSlug, null);
+
     await runAction(`Reindexing ${selectedProjectSlug}/${tableSlug}`, async () => {
-      const response = await reindexTable(credential, selectedProjectSlug, tableSlug);
-      const cacheKey = getTableCacheKey(selectedProjectSlug, tableSlug);
-      setCacheStateByTable((current) => ({
-        ...current,
-        [cacheKey]: response.cache
-      }));
+      try {
+        const response = await reindexTable(credential, selectedProjectSlug, tableSlug);
+        setCacheStatusValue(selectedProjectSlug, tableSlug, response.cache);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        setCacheStatusError(selectedProjectSlug, tableSlug, message);
+        throw error;
+      } finally {
+        setCacheStatusLoading(selectedProjectSlug, tableSlug, false);
+      }
     });
   }
 
@@ -602,9 +736,12 @@ export function App() {
         createTableDraft={createTableDraft}
         tableFieldErrors={createTableValidation.fieldErrors}
         cacheStateByTable={cacheStateByTable}
+        cacheStatusErrorByTable={cacheStatusErrorByTable}
+        cacheStatusLoadingByTable={cacheStatusLoadingByTable}
         onCreateTableDraftChange={setCreateTableDraft}
         onCreateTable={() => void handleCreateTable()}
         onLoadCache={(tableSlug) => void handleLoadCache(tableSlug)}
+        onRefreshIfStale={(tableSlug) => void handleRefreshIfStale(tableSlug)}
         onReindex={(tableSlug) => void handleReindex(tableSlug)}
         onRefresh={() => void handleRefreshSelectedProject()}
         busy={busyAction !== null}

@@ -1,4 +1,4 @@
-import { ScriptError, getEnv } from './runtime';
+import { ScriptError } from './runtime';
 import { readSmokeConfig, type SmokeConfig } from './smoke-config';
 
 export type LoadConfig = SmokeConfig & {

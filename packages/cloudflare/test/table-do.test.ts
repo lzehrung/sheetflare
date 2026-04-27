@@ -1286,6 +1286,152 @@ describe('TableDO', () => {
     });
   });
 
+  it('returns cached status without a resync when refresh-if-stale is called on a fresh cache', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['name'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    const requestedRangeCountBeforeRefresh = sheet.requestedRanges.length;
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.refresh',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect((response as {
+      type: 'table.cache.refresh.result';
+      result: { rowCount: number; cache: { staleReason: string } };
+    }).result).toMatchObject({
+      rowCount: 1,
+      cache: {
+        staleReason: 'fresh'
+      }
+    });
+    expect(sheet.requestedRanges.length).toBe(requestedRangeCountBeforeRefresh);
+  });
+
+  it('rebuilds the cache when refresh-if-stale is called after ttl expiry', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['name'],
+          cacheTtlSeconds: 0
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    sheet.rows = [
+      ['_id', 'name'],
+      ['row-1', 'Ada'],
+      ['row-2', 'Grace']
+    ];
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.refresh',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect((response as {
+      type: 'table.cache.refresh.result';
+      result: { rowCount: number; cache: { rowCount: number; lastSyncCompletedAt: string | null } };
+    }).result).toMatchObject({
+      rowCount: 2,
+      cache: {
+        rowCount: 2
+      }
+    });
+    expect((response as {
+      type: 'table.cache.refresh.result';
+      result: { cache: { lastSyncCompletedAt: string | null } };
+    }).result.cache.lastSyncCompletedAt).not.toBeNull();
+  });
+
   it('fails hard when duplicate managed IDs are detected upstream', async () => {
     const sheet: SheetState = {
       rows: [

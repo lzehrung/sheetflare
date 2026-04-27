@@ -219,10 +219,13 @@ export class ControlPlaneDO {
     };
   }
 
+  private selectOptionalRow<Row>(query: string, ...params: unknown[]): Row | null {
+    const rows = this.ctx.storage.sql.exec(query, ...params).toArray() as Row[];
+    return rows[0] ?? null;
+  }
+
   private verifyApiKey(apiKeyId: string, hash: string): ApiKeyPrincipal | null {
-    const row = this.ctx.storage.sql
-      .exec(`SELECT * FROM api_keys WHERE id = ?`, apiKeyId)
-      .one() as ApiKeyRow | null;
+    const row = this.selectOptionalRow<ApiKeyRow>(`SELECT * FROM api_keys WHERE id = ?`, apiKeyId);
 
     if (!row || row.revoked_at || row.hash !== hash) {
       return null;
@@ -253,9 +256,7 @@ export class ControlPlaneDO {
   }
 
   private getApiKeyPrincipal(apiKeyId: string): ApiKeyPrincipal | null {
-    const row = this.ctx.storage.sql
-      .exec(`SELECT * FROM api_keys WHERE id = ?`, apiKeyId)
-      .one() as ApiKeyRow | null;
+    const row = this.selectOptionalRow<ApiKeyRow>(`SELECT * FROM api_keys WHERE id = ?`, apiKeyId);
 
     return row ? this.mapApiKeyPrincipal(row) : null;
   }

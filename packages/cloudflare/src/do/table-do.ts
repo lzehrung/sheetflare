@@ -1,6 +1,8 @@
 import {
+  AppError,
   BadRequestError,
   ForbiddenError,
+  type RefreshTableCacheResult,
   type GetTableCacheStatusResult,
   type GetSchemaResult,
   type ListRowsQuery,
@@ -315,6 +317,11 @@ export class TableDO {
             type: 'table.cache.get.result',
             result: await this.getCacheStatus(body.projectSlug, body.tableSlug, body.resolvedConfig)
           };
+        case 'table.cache.refresh':
+          return {
+            type: 'table.cache.refresh.result',
+            result: await this.refreshCacheIfStale(body.projectSlug, body.tableSlug, body.resolvedConfig)
+          };
         case 'table.reindex':
           return {
             type: 'table.reindex.result',
@@ -591,6 +598,29 @@ export class TableDO {
     };
   }
 
+  private async refreshCacheIfStale(
+    projectSlug: string,
+    tableSlug: string,
+    resolvedConfig?: ResolvedTableConfigSnapshot
+  ): Promise<RefreshTableCacheResult> {
+    const config = await this.getTableConfig(projectSlug, tableSlug, resolvedConfig);
+    const cacheState = this.getCacheState(config);
+
+    if (cacheState.staleReason !== 'fresh') {
+      await this.syncCache(projectSlug, tableSlug, {
+        force: cacheState.staleReason === 'never-synced' || cacheState.staleReason === 'error',
+        resolvedConfig: config
+      });
+    }
+
+    const refreshedCache = this.getCacheState(config);
+    return {
+      ok: true,
+      rowCount: refreshedCache.rowCount,
+      cache: refreshedCache
+    };
+  }
+
   private async ensureQueryCacheReady(config: GoogleSheetTableConfig) {
     const cacheState = this.getCacheState(config);
     if (cacheState.staleReason === 'fresh') {
@@ -720,6 +750,8 @@ export class TableDO {
         tableSlug: config.tableSlug,
         durationMs: Date.now() - syncStartedAtMs,
         errorMessage: error instanceof Error ? error.message : 'Unknown sync error',
+        errorDetails: error instanceof AppError ? error.details ?? null : null,
+        errorStack: error instanceof Error ? error.stack ?? null : null,
         requestId: this.currentRequestContext?.requestId ?? null,
         route: this.currentRequestContext?.route ?? null,
         principal: this.currentRequestContext?.principal ?? null
@@ -816,10 +848,16 @@ export class TableDO {
     }));
   }
 
+  private selectOptionalRow<Row>(query: string, ...params: unknown[]): Row | null {
+    const rows = this.ctx.storage.sql.exec(query, ...params).toArray() as Row[];
+    return rows[0] ?? null;
+  }
+
   private getCachedRow(rowId: string): RowEnvelope | null {
-    const row = this.ctx.storage.sql
-      .exec(`SELECT row_id, row_number, values_json FROM cached_rows WHERE row_id = ?`, rowId)
-      .one() as CachedRowRow | null;
+    const row = this.selectOptionalRow<CachedRowRow>(
+      `SELECT row_id, row_number, values_json FROM cached_rows WHERE row_id = ?`,
+      rowId
+    );
 
     if (!row) return null;
     return {
@@ -830,9 +868,10 @@ export class TableDO {
   }
 
   private lookupRowNumber(rowId: string): number | null {
-    const row = this.ctx.storage.sql
-      .exec(`SELECT row_number FROM row_index WHERE row_id = ?`, rowId)
-      .one() as { row_number: number } | null;
+    const row = this.selectOptionalRow<{ row_number: number }>(
+      `SELECT row_number FROM row_index WHERE row_id = ?`,
+      rowId
+    );
 
     return row?.row_number ?? null;
   }
@@ -954,9 +993,7 @@ export class TableDO {
   }
 
   private getMeta(key: string): string | null {
-    const row = this.ctx.storage.sql
-      .exec(`SELECT key, value FROM meta WHERE key = ?`, key)
-      .one() as TableMetaRow | null;
+    const row = this.selectOptionalRow<TableMetaRow>(`SELECT key, value FROM meta WHERE key = ?`, key);
 
     return row?.value ?? null;
   }
@@ -1031,9 +1068,7 @@ export class TableDO {
 
   private countCachedRows(kind: 'live' | 'staging' = 'live') {
     const tables = getCacheTableNames(kind);
-    const row = this.ctx.storage.sql
-      .exec(`SELECT COUNT(*) AS count FROM ${tables.cachedRows}`)
-      .one() as { count: number } | null;
+    const row = this.selectOptionalRow<{ count: number }>(`SELECT COUNT(*) AS count FROM ${tables.cachedRows}`);
 
     return row?.count ?? 0;
   }
@@ -1070,8 +1105,7 @@ export class TableDO {
   private promoteStagingCache() {
     const live = getCacheTableNames('live');
     const staging = getCacheTableNames('staging');
-    this.ctx.storage.sql.exec('BEGIN');
-    try {
+    const promote = () => {
       this.ctx.storage.sql.exec(`DELETE FROM ${live.rowIndex}`);
       this.ctx.storage.sql.exec(`DELETE FROM ${live.cachedRows}`);
       this.ctx.storage.sql.exec(`DELETE FROM ${live.cachedCells}`);
@@ -1085,10 +1119,20 @@ export class TableDO {
         `INSERT INTO ${live.cachedCells} (row_id, field_name, value_kind, value_text, value_number, value_boolean)
          SELECT row_id, field_name, value_kind, value_text, value_number, value_boolean FROM ${staging.cachedCells}`
       );
-      this.ctx.storage.sql.exec('COMMIT');
-    } catch (error) {
-      this.ctx.storage.sql.exec('ROLLBACK');
-      throw error;
+    };
+
+    try {
+      const transactionSync = (
+        this.ctx.storage as DurableObjectStorage & {
+          transactionSync?: ((callback: () => void) => void) | undefined;
+        }
+      ).transactionSync;
+
+      if (transactionSync) {
+        transactionSync.call(this.ctx.storage, promote);
+      } else {
+        promote();
+      }
     } finally {
       this.clearCacheTables('staging');
     }

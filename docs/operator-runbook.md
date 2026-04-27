@@ -47,6 +47,58 @@ For routine scripts, set `SHEETFLARE_ADMIN_CREDENTIAL` to the scoped admin API k
 
 For Google credential setup details, use [google-service-accounts.md](./google-service-accounts.md).
 
+## Bootstrap A New Spreadsheet-Backed Project
+
+When you are onboarding a spreadsheet for the first time, the minimal operator flow is:
+
+1. Share the spreadsheet with the configured Sheetflare service-account email as an `Editor`.
+2. Confirm the source tab has a stable `_id` column with unique non-blank values.
+3. Set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON`.
+4. Run `npm run ops:bootstrap`.
+
+Example:
+
+```powershell
+$env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
+{
+  "projects": [
+    {
+      "slug": "demo-private",
+      "name": "Demo Private",
+      "spreadsheetId": "<SPREADSHEET_ID>",
+      "googleCredentialRef": "default",
+      "defaultAuthMode": "private",
+      "tables": [
+        {
+          "tableSlug": "users",
+          "sheetTabName": "Users",
+          "idColumn": "_id",
+          "indexedFields": ["name", "status"],
+          "cacheTtlSeconds": 15
+        }
+      ]
+    }
+  ],
+  "apiKeys": [
+    {
+      "name": "private-read",
+      "projectSlug": "demo-private",
+      "scopes": ["table:read"]
+    },
+    {
+      "name": "mutation",
+      "projectSlug": "demo-private",
+      "scopes": ["table:create", "table:update", "table:delete"]
+    }
+  ]
+}
+'@
+
+npm run ops:bootstrap
+```
+
+For a public anonymous read surface, create a separate project with `defaultAuthMode` set to `"public-read"` rather than widening the private project's auth model.
+
 ## Check Cache Status
 
 Set the target table:

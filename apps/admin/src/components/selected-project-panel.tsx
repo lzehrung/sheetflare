@@ -14,9 +14,12 @@ type SelectedProjectPanelProps = {
   createTableDraft: CreateTableDraft;
   tableFieldErrors: Partial<Record<keyof CreateTableDraft | 'form', string>>;
   cacheStateByTable: Record<string, TableCacheStatus | null>;
+  cacheStatusErrorByTable: Record<string, string | null>;
+  cacheStatusLoadingByTable: Record<string, boolean>;
   onCreateTableDraftChange: (next: CreateTableDraft) => void;
   onCreateTable: () => void;
   onLoadCache: (tableSlug: string) => void;
+  onRefreshIfStale: (tableSlug: string) => void;
   onReindex: (tableSlug: string) => void;
   onRefresh: () => void;
   busy: boolean;
@@ -34,15 +37,23 @@ export function SelectedProjectPanel({
   createTableDraft,
   tableFieldErrors,
   cacheStateByTable,
+  cacheStatusErrorByTable,
+  cacheStatusLoadingByTable,
   onCreateTableDraftChange,
   onCreateTable,
   onLoadCache,
+  onRefreshIfStale,
   onReindex,
   onRefresh,
   busy,
   createTableDisabled,
   getTableCacheKey
 }: SelectedProjectPanelProps) {
+  const spreadsheetUrl =
+    detailState.status === 'ready'
+      ? `https://docs.google.com/spreadsheets/d/${encodeURIComponent(detailState.project.spreadsheetId)}/edit`
+      : null;
+
   return (
     <section className="panel">
       <div className="panelHeader">
@@ -74,7 +85,14 @@ export function SelectedProjectPanel({
             </div>
             <div>
               <dt>Spreadsheet</dt>
-              <dd>{detailState.project.spreadsheetId}</dd>
+              <dd>
+                <span>{detailState.project.spreadsheetId}</span>{' '}
+                {spreadsheetUrl ? (
+                  <a href={spreadsheetUrl} target="_blank" rel="noreferrer">
+                    Open in Google Sheets
+                  </a>
+                ) : null}
+              </dd>
             </div>
             <div>
               <dt>Default Auth</dt>
@@ -211,7 +229,10 @@ export function SelectedProjectPanel({
           {detailState.tables.length > 0 ? (
             <div className="cards">
               {detailState.tables.map((table) => {
-                const cache = cacheStateByTable[getTableCacheKey(table.projectSlug, table.tableSlug)] ?? null;
+                const cacheKey = getTableCacheKey(table.projectSlug, table.tableSlug);
+                const cache = cacheStateByTable[cacheKey] ?? null;
+                const cacheStatusError = cacheStatusErrorByTable[cacheKey] ?? null;
+                const cacheStatusLoading = cacheStatusLoadingByTable[cacheKey] ?? false;
                 return (
                   <article key={table.tableSlug} className="card" data-testid={`table-card-${table.tableSlug}`}>
                     <div className="cardTop">
@@ -236,11 +257,32 @@ export function SelectedProjectPanel({
                           {table.createEnabled ? 'create' : 'create off'} / {table.updateEnabled ? 'update' : 'update off'} / {table.deleteEnabled ? 'delete' : 'delete off'}
                         </dd>
                       </div>
+                      {!cache && cacheStatusLoading ? (
+                        <div>
+                          <dt>Cache</dt>
+                          <dd>Loading cache status...</dd>
+                        </div>
+                      ) : null}
+                      {!cache && !cacheStatusLoading && cacheStatusError ? (
+                        <div>
+                          <dt>Cache</dt>
+                          <dd className="error">{cacheStatusError}</dd>
+                        </div>
+                      ) : null}
+                      {!cache && !cacheStatusLoading && !cacheStatusError ? (
+                        <div>
+                          <dt>Cache</dt>
+                          <dd>Cache status not loaded yet.</dd>
+                        </div>
+                      ) : null}
                       {cache ? <CacheStatusSummary cache={cache} /> : null}
                     </dl>
                     <div className="actions compactActions">
                       <button type="button" onClick={() => onLoadCache(table.tableSlug)} disabled={busy}>
-                        Load cache
+                        Get cache status
+                      </button>
+                      <button type="button" className="secondaryButton" onClick={() => onRefreshIfStale(table.tableSlug)} disabled={busy}>
+                        Refresh if stale
                       </button>
                       <button type="button" className="secondaryButton" onClick={() => onReindex(table.tableSlug)} disabled={busy}>
                         Reindex

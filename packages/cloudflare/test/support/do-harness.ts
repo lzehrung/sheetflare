@@ -10,7 +10,15 @@ class SqlResult {
   }
 
   one() {
-    return this.rows[0] ?? null;
+    if (this.rows.length !== 1) {
+      throw new Error(
+        this.rows.length === 0
+          ? 'Expected exactly one result from SQL query, but got no results.'
+          : `Expected exactly one result from SQL query, but got ${this.rows.length} results.`
+      );
+    }
+
+    return this.rows[0];
   }
 }
 
@@ -34,7 +42,11 @@ function createDurableObjectState() {
   const database = new Database(':memory:');
   return {
     storage: {
-      sql: new SqlStorageHarness(database)
+      sql: new SqlStorageHarness(database),
+      transactionSync<T>(callback: () => T) {
+        const transaction = database.transaction(callback);
+        return transaction();
+      }
     }
   } as DurableObjectState;
 }

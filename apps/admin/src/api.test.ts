@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { listApiKeys, listProjects, revokeApiKey } from './api';
+import { adminCredentialHeaderName } from './auth';
+import { listApiKeys, listProjects, refreshTableCache, revokeApiKey } from './api';
 
 describe('admin api helpers', () => {
   afterEach(() => {
@@ -82,7 +83,41 @@ describe('admin api helpers', () => {
       expect.objectContaining({
         method: 'DELETE',
         headers: {
-          authorization: 'Bearer secret'
+          [adminCredentialHeaderName]: 'secret'
+        }
+      })
+    );
+  });
+
+  it('refreshes a stale table cache through the admin api', async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        ok: true,
+        rowCount: 3,
+        cache: {
+          status: 'ready',
+          cacheTtlSeconds: 15,
+          stale: false,
+          staleReason: 'fresh',
+          rowCount: 3,
+          lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
+          lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
+          lastSyncError: null
+        }
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(refreshTableCache('secret', 'demo', 'users')).resolves.toMatchObject({
+      ok: true,
+      rowCount: 3
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/v1/admin/projects/demo/tables/users/refresh',
+      expect.objectContaining({
+        method: 'POST',
+        headers: {
+          [adminCredentialHeaderName]: 'secret'
         }
       })
     );

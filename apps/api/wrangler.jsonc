@@ -1,7 +1,8 @@
 {
-  "name": "sheetflare-api",
+  "name": "sheetflare-staging-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-04-26",
+  "workers_dev": true,
   "durable_objects": {
     "bindings": [
       { "name": "CONTROL_PLANE_DO", "class_name": "ControlPlaneDO" },
@@ -17,10 +18,7 @@
     }
   ],
   "vars": {
-    "GOOGLE_CLIENT_EMAIL": "",
-    "GOOGLE_PRIVATE_KEY": "",
-    "GOOGLE_CREDENTIALS_JSON": "",
-    "ADMIN_BEARER_TOKEN": "",
+    "GOOGLE_CLIENT_EMAIL": "sheetflare-staging@sheetflare-staging.iam.gserviceaccount.com",
     "RATE_LIMIT_MAX_REQUESTS": "300",
     "RATE_LIMIT_WINDOW_SECONDS": "60",
     "TABLE_MAX_FULL_SCAN_ROWS": "10000"

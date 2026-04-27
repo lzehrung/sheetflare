@@ -48,15 +48,33 @@ That means:
 Example `gcloud` flow:
 
 ```powershell
-gcloud config set project YOUR_GCP_PROJECT_ID
+$projectId = "YOUR_GCP_PROJECT_ID"
+$serviceAccountName = "sheetflare-staging"
+
+gcloud config set project $projectId
 gcloud services enable sheets.googleapis.com
 
-gcloud iam service-accounts create sheetflare-staging `
+gcloud iam service-accounts create $serviceAccountName `
   --description="Dedicated service account for Sheetflare staging" `
   --display-name="Sheetflare Staging"
 
-gcloud iam service-accounts keys create .\sheetflare-staging-key.json `
-  --iam-account=sheetflare-staging@YOUR_GCP_PROJECT_ID.iam.gserviceaccount.com
+gcloud iam service-accounts keys create "$env:TEMP\$serviceAccountName-key.json" `
+  --iam-account="$serviceAccountName@$projectId.iam.gserviceaccount.com"
+```
+
+Useful verification commands:
+
+```powershell
+$projectId = "YOUR_GCP_PROJECT_ID"
+$serviceAccountEmail = "sheetflare-staging@YOUR_GCP_PROJECT_ID.iam.gserviceaccount.com"
+
+gcloud iam service-accounts describe `
+  $serviceAccountEmail `
+  --project $projectId
+
+gcloud iam service-accounts keys list `
+  --iam-account=$serviceAccountEmail `
+  --project $projectId
 ```
 
 If key creation is blocked, that is usually an org-policy restriction. Sheetflare currently needs a service-account private key, so resolve that restriction before continuing.
@@ -105,6 +123,18 @@ Then set each Sheetflare project's `googleCredentialRef` to the matching key, fo
 If you use only one shared credential, leave `googleCredentialRef` unset during project creation or set it to `default`.
 
 ## Wrangler Secret Examples
+
+Before setting Worker secrets, verify Wrangler is authenticated:
+
+```powershell
+npx wrangler whoami
+```
+
+If it reports that you are not authenticated, run:
+
+```powershell
+npx wrangler login
+```
 
 One shared credential:
 

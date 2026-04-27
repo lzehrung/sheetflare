@@ -50,6 +50,11 @@ export class RateLimitDO {
     }
   }
 
+  private selectOptionalRow<Row>(query: string, ...params: unknown[]): Row | null {
+    const rows = this.ctx.storage.sql.exec(query, ...params).toArray() as Row[];
+    return rows[0] ?? null;
+  }
+
   private check(input: Extract<RateLimitDoRequest, { type: 'rate-limit.check' }>) {
     const limit = Math.max(1, Math.floor(input.limit));
     const windowSeconds = Math.max(1, Math.floor(input.windowSeconds));
@@ -64,12 +69,10 @@ export class RateLimitDO {
       nowMs
     );
 
-    const existing = this.ctx.storage.sql
-      .exec(
-        `SELECT bucket_key, count, reset_at_ms FROM rate_limit_windows WHERE bucket_key = ?`,
-        bucketKey
-      )
-      .one() as WindowRow | null;
+    const existing = this.selectOptionalRow<WindowRow>(
+      `SELECT bucket_key, count, reset_at_ms FROM rate_limit_windows WHERE bucket_key = ?`,
+      bucketKey
+    );
 
     if (!existing) {
       this.ctx.storage.sql.exec(
