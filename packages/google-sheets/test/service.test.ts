@@ -556,3 +556,68 @@ describe('GoogleSheetsService.readAllRows', () => {
     ]);
   });
 });
+
+describe('GoogleSheetsService.writeRow', () => {
+  it('sends raw values to Sheets so the API preserves literal cell contents', async () => {
+    const requestedUrls: string[] = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input, init) => {
+        const url = String(input);
+        requestedUrls.push(url);
+
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes(':append')) {
+          return Response.json({
+            updates: {
+              updatedRange: `'Users'!A2:B2`
+            }
+          });
+        }
+
+        if (init?.method === 'PUT') {
+          return Response.json({});
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    const config: GoogleSheetTableConfig = {
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    };
+
+    await service.appendRow(config, ['_id', 'name'], {
+      _id: '001',
+      name: 'Ada'
+    });
+    await service.writeRow(config, 2, ['_id', 'name'], {
+      _id: '001',
+      name: 'Ada'
+    });
+
+    expect(requestedUrls.some((url) => url.includes('valueInputOption=RAW'))).toBe(true);
+    expect(requestedUrls.every((url) => !url.includes('valueInputOption=USER_ENTERED'))).toBe(true);
+  });
+});

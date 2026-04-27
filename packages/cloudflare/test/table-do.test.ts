@@ -739,7 +739,7 @@ describe('TableDO', () => {
     expect(sheet.requestedRanges).toContain("'Users'!1:1");
   });
 
-  it('updates a cached row through the hinted row number without rescanning the managed id column', async () => {
+  it('updates a cached row through the hinted row number without forcing a full-sheet resync', async () => {
     const sheet: SheetState = {
       rows: [
         ['_id', 'name'],
@@ -810,7 +810,8 @@ describe('TableDO', () => {
         }
       }
     });
-    expect(sheet.requestedRanges).not.toContain("'Users'!A2:A");
+    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+    expect(sheet.requestedRanges).not.toContain("'Users'");
   });
 
   it('resolves uncached point reads through the narrow row-id lookup path', async () => {
@@ -1333,6 +1334,82 @@ describe('TableDO', () => {
         }
       )
     ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  it('rejects updates when a cached row id has become duplicated upstream', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Grace']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'secondary'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          sheetGid: 1,
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    sheet.rows = [
+      ['_id', 'name'],
+      ['row-1', 'Ada'],
+      ['row-1', 'Duplicate']
+    ];
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.row.update',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          rowId: 'row-1',
+          input: {
+            values: {
+              name: 'Ada Lovelace'
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Duplicate managed row id detected for row-1.'
+    });
   });
 
   it('avoids a full-sheet resync for stale updates when a narrow row-id repair is sufficient', async () => {

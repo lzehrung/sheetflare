@@ -380,7 +380,7 @@ export class GoogleSheetsService {
     const accessToken = await this.getAccessToken();
     const range = `${escapeSheetName(config.sheetTabName)}!A${config.dataStartRow}`;
     const response = await this.authorizedRequest(
-      `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+      `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
       {
         method: 'POST',
         headers: {
@@ -406,7 +406,7 @@ export class GoogleSheetsService {
     const endColumn = columnNumberToA1(headers.length);
     const range = `${escapeSheetName(config.sheetTabName)}!A${rowNumber}:${endColumn}${rowNumber}`;
     const response = await this.authorizedRequest(
-      `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`,
+      `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
       {
         method: 'PUT',
         headers: {

@@ -324,18 +324,25 @@ function buildEqualityClause(
   value: QueryScalarValue,
   operator: '=' | '!='
 ) {
+  if (value === null) {
+    if (!options.kindSql) {
+      return {
+        sql: operator === '=' ? `${options.fieldSql} IS NULL` : `${options.fieldSql} IS NOT NULL`,
+        parameters: [] as SqlParameter[]
+      };
+    }
+
+    return {
+      sql: operator === '=' ? `${options.kindSql} = 'null'` : `${options.kindSql} != 'null'`,
+      parameters: [] as SqlParameter[]
+    };
+  }
+
   const kind = getScalarKind(value);
   if (!options.kindSql) {
     return {
       sql: `${options.fieldSql} ${operator} ?`,
       parameters: [value as SqlParameter]
-    };
-  }
-
-  if (kind === 'null') {
-    return {
-      sql: operator === '=' ? `${options.kindSql} = 'null'` : `${options.kindSql} != 'null'`,
-      parameters: [] as SqlParameter[]
     };
   }
 
