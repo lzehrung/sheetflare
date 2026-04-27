@@ -1,5 +1,7 @@
 # Sheetflare
 
+![Sheetflare](./docs/assets/sheetflare.jpg)
+
 Sheetflare is a Cloudflare-first starter for exposing Google Sheets tabs through a small Hono API backed by Durable Objects.
 
 Production hardening guidance lives in [production-readiness-checklist.md](./production-readiness-checklist.md).
