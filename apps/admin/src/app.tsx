@@ -1,10 +1,16 @@
 import { useEffect, useState } from 'react';
-import type { ApiKeyPrincipal, ApiScope, ProjectSummary, TableCacheStatus, TableConfig } from '@sheetflare/contracts';
+import type { ApiKeyPrincipal, ProjectConfig, ProjectSummary, TableCacheStatus, TableConfig } from '@sheetflare/contracts';
 import {
-  normalizeAdminCredential,
-  readStoredAdminCredential,
-  writeStoredAdminCredential
-} from './auth';
+  initialCreateKeyDraft,
+  initialCreateProjectDraft,
+  initialCreateTableDraft,
+  validateCreateKeyDraft,
+  validateCreateProjectDraft,
+  validateCreateTableDraft,
+  type CreateKeyDraft,
+  type CreateProjectDraft,
+  type CreateTableDraft
+} from './admin-drafts';
 import {
   createApiKey,
   createProject,
@@ -16,8 +22,17 @@ import {
   revokeApiKey,
   reindexTable
 } from './api';
-import { ApiKeySections } from './components/api-key-sections';
+import {
+  normalizeAdminCredential,
+  readStoredAdminCredential,
+  writeStoredAdminCredential
+} from './auth';
+import { ApiKeyPanel } from './components/api-key-panel';
+import { CredentialPanel } from './components/credential-panel';
+import { CreateProjectForm } from './components/create-project-form';
+import { NoticeBanner } from './components/notice-banner';
 import { ProjectCards } from './components/project-cards';
+import { SelectedProjectPanel } from './components/selected-project-panel';
 import './styles.css';
 
 type LoadState =
@@ -29,7 +44,7 @@ type LoadState =
 type ProjectDetailState =
   | { status: 'idle'; message: string }
   | { status: 'loading' }
-  | { status: 'ready'; tables: TableConfig[] }
+  | { status: 'ready'; project: ProjectConfig; tables: TableConfig[] }
   | { status: 'error'; message: string };
 
 type ProjectKeysState =
@@ -51,15 +66,6 @@ type NoticeState =
   | { tone: 'error'; message: string };
 
 type CacheStateByTable = Record<string, TableCacheStatus | null>;
-
-const allScopes: ApiScope[] = [
-  'admin:projects',
-  'admin:keys',
-  'table:read',
-  'table:create',
-  'table:update',
-  'table:delete'
-];
 
 function getInitialCredential() {
   if (typeof window === 'undefined') {
@@ -114,32 +120,13 @@ export function App() {
     message: null
   });
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [createProjectDraft, setCreateProjectDraft] = useState<CreateProjectDraft>({
-    slug: '',
-    name: '',
-    spreadsheetId: '',
-    googleCredentialRef: '',
-    defaultAuthMode: 'private'
-  });
-  const [createTableDraft, setCreateTableDraft] = useState<CreateTableDraft>({
-    tableSlug: '',
-    sheetTabName: '',
-    sheetGid: '',
-    idColumn: '_id',
-    indexedFields: 'name,status',
-    headerRow: '1',
-    dataStartRow: '2',
-    cacheTtlSeconds: '15',
-    readEnabled: true,
-    createEnabled: true,
-    updateEnabled: true,
-    deleteEnabled: true
-  });
-  const [createKeyDraft, setCreateKeyDraft] = useState<CreateKeyDraft>({
-    name: 'ops-key',
-    projectScoped: true,
-    scopes: ['admin:projects', 'admin:keys', 'table:read']
-  });
+  const [createProjectDraft, setCreateProjectDraft] = useState<CreateProjectDraft>(initialCreateProjectDraft);
+  const [createTableDraft, setCreateTableDraft] = useState<CreateTableDraft>(initialCreateTableDraft);
+  const [createKeyDraft, setCreateKeyDraft] = useState<CreateKeyDraft>(initialCreateKeyDraft);
+
+  const createProjectValidation = validateCreateProjectDraft(createProjectDraft);
+  const createTableValidation = validateCreateTableDraft(createTableDraft);
+  const createKeyValidation = validateCreateKeyDraft(createKeyDraft, selectedProjectSlug);
 
   useEffect(() => {
     if (!credential) {
@@ -203,6 +190,7 @@ export function App() {
         if (!cancelled) {
           setProjectDetailState({
             status: 'ready',
+            project: detail.project,
             tables: detail.tables
           });
         }
@@ -295,15 +283,38 @@ export function App() {
     };
   }, [credential, selectedProjectSlug]);
 
-  async function refreshProjectDetail(credentialValue: string, projectSlug: string) {
+  async function refreshProjects(credentialValue: string) {
+    const body = await listProjects(credentialValue);
+    setState({ status: 'ready', data: body.data });
+    setSelectedProjectSlug((current) => getSelectedProjectSlug(body.data, current));
+  }
+
+  async function refreshProjectDetail(
+    credentialValue: string,
+    projectSlug: string,
+    options?: { showLoading?: boolean }
+  ) {
+    if (options?.showLoading) {
+      setProjectDetailState({ status: 'loading' });
+    }
+
     const detail = await getProject(credentialValue, projectSlug);
     setProjectDetailState({
       status: 'ready',
+      project: detail.project,
       tables: detail.tables
     });
   }
 
-  async function refreshProjectKeys(credentialValue: string, projectSlug: string) {
+  async function refreshProjectKeys(
+    credentialValue: string,
+    projectSlug: string,
+    options?: { showLoading?: boolean }
+  ) {
+    if (options?.showLoading) {
+      setProjectKeysState({ status: 'loading' });
+    }
+
     const result = await listApiKeys(credentialValue, projectSlug);
     setProjectKeysState({
       status: 'ready',
@@ -311,7 +322,14 @@ export function App() {
     });
   }
 
-  async function refreshGlobalKeys(credentialValue: string) {
+  async function refreshGlobalKeys(
+    credentialValue: string,
+    options?: { showLoading?: boolean }
+  ) {
+    if (options?.showLoading) {
+      setGlobalKeysState({ status: 'loading' });
+    }
+
     const result = await listApiKeys(credentialValue);
     setGlobalKeysState({
       status: 'ready',
@@ -365,9 +383,9 @@ export function App() {
 
     setCredential(null);
     setCacheStateByTable({});
+    setCreatedKey(null);
     setDraftCredential('');
     setRememberCredential(false);
-    setCreatedKey(null);
     setSelectedProjectSlug(null);
     setProjectDetailState({
       status: 'idle',
@@ -387,104 +405,45 @@ export function App() {
     });
   }
 
-  async function refreshProjects() {
-    if (!credential) return;
-    setState({ status: 'loading' });
-    try {
-      const body = await listProjects(credential);
-      setState({ status: 'ready', data: body.data });
-      setSelectedProjectSlug((current) => getSelectedProjectSlug(body.data, current));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      setState({
-        status: 'error',
-        message,
-        unauthorized: message.includes('rejected')
-      });
-    }
-  }
-
   async function handleCreateProject() {
-    if (!credential) return;
-    const input = {
-      slug: createProjectDraft.slug.trim(),
-      name: createProjectDraft.name.trim(),
-      spreadsheetId: createProjectDraft.spreadsheetId.trim(),
-      ...(createProjectDraft.googleCredentialRef.trim().length > 0
-        ? { googleCredentialRef: createProjectDraft.googleCredentialRef.trim() }
-        : {}),
-      defaultAuthMode: createProjectDraft.defaultAuthMode
-    };
+    if (!credential || !createProjectValidation.value) return;
+    const input = createProjectValidation.value;
+
     await runAction(`Saving project ${input.slug}`, async () => {
       await createProject(credential, input);
-      setCreateProjectDraft({
-        slug: '',
-        name: '',
-        spreadsheetId: '',
-        googleCredentialRef: '',
-        defaultAuthMode: 'private'
-      });
-      await refreshProjects();
+      setCreateProjectDraft(initialCreateProjectDraft);
+      await refreshProjects(credential);
       setSelectedProjectSlug(input.slug);
     });
   }
 
   async function handleCreateTable() {
-    if (!credential || !selectedProjectSlug) return;
-    const tableInput = {
-      tableSlug: createTableDraft.tableSlug.trim(),
-      sheetTabName: createTableDraft.sheetTabName.trim(),
-      ...(createTableDraft.sheetGid.trim().length > 0
-        ? { sheetGid: Number(createTableDraft.sheetGid) }
-        : {}),
-      idColumn: createTableDraft.idColumn.trim(),
-      indexedFields: createTableDraft.indexedFields
-        .split(',')
-        .map((entry) => entry.trim())
-        .filter(Boolean),
-      headerRow: Number(createTableDraft.headerRow),
-      dataStartRow: Number(createTableDraft.dataStartRow),
-      cacheTtlSeconds: Number(createTableDraft.cacheTtlSeconds),
-      readEnabled: createTableDraft.readEnabled,
-      createEnabled: createTableDraft.createEnabled,
-      updateEnabled: createTableDraft.updateEnabled,
-      deleteEnabled: createTableDraft.deleteEnabled
-    };
-    await runAction(`Saving table ${selectedProjectSlug}/${tableInput.tableSlug}`, async () => {
-      await createTable(credential, selectedProjectSlug, tableInput);
-      setCreateTableDraft({
-        tableSlug: '',
-        sheetTabName: '',
-        sheetGid: '',
-        idColumn: '_id',
-        indexedFields: 'name,status',
-        headerRow: '1',
-        dataStartRow: '2',
-        cacheTtlSeconds: '15',
-        readEnabled: true,
-        createEnabled: true,
-        updateEnabled: true,
-        deleteEnabled: true
-      });
+    if (!credential || !selectedProjectSlug || !createTableValidation.value) return;
+    const input = createTableValidation.value;
+
+    await runAction(`Saving table ${selectedProjectSlug}/${input.tableSlug}`, async () => {
+      await createTable(credential, selectedProjectSlug, input);
+      setCreateTableDraft(initialCreateTableDraft);
       await refreshProjectDetail(credential, selectedProjectSlug);
     });
   }
 
   async function handleCreateKey() {
-    if (!credential) return;
-    if (createKeyDraft.projectScoped && !selectedProjectSlug) return;
-    const keyInput = {
-      name: createKeyDraft.name.trim(),
-      projectSlug: createKeyDraft.projectScoped ? selectedProjectSlug : null,
-      scopes: createKeyDraft.scopes
+    if (!credential || !createKeyValidation.value) return;
+    const validatedInput = createKeyValidation.value;
+    const input = {
+      name: validatedInput.name,
+      scopes: validatedInput.scopes,
+      ...(validatedInput.projectSlug !== undefined ? { projectSlug: validatedInput.projectSlug } : {})
     };
-    await runAction(`Creating API key ${keyInput.name}`, async () => {
-      const response = await createApiKey(credential, keyInput);
+
+    await runAction(`Creating API key ${input.name}`, async () => {
+      const response = await createApiKey(credential, input);
       setCreatedKey(response.apiKey);
       if (selectedProjectSlug) {
         await refreshProjectKeys(credential, selectedProjectSlug);
       }
-      if (!keyInput.projectSlug) {
+      if (!input.projectSlug) {
         await refreshGlobalKeys(credential);
       }
     });
@@ -526,6 +485,35 @@ export function App() {
     });
   }
 
+  async function handleRefreshProjects() {
+    if (!credential) return;
+    setState({ status: 'loading' });
+    await runAction('Refreshing project registry', async () => {
+      await refreshProjects(credential);
+    });
+  }
+
+  async function handleRefreshSelectedProject() {
+    if (!credential || !selectedProjectSlug) return;
+    await runAction(`Refreshing project ${selectedProjectSlug}`, async () => {
+      await refreshProjectDetail(credential, selectedProjectSlug, { showLoading: true });
+    });
+  }
+
+  async function handleRefreshProjectKeys() {
+    if (!credential || !selectedProjectSlug) return;
+    await runAction(`Refreshing keys for ${selectedProjectSlug}`, async () => {
+      await refreshProjectKeys(credential, selectedProjectSlug, { showLoading: true });
+    });
+  }
+
+  async function handleRefreshGlobalKeys() {
+    if (!credential) return;
+    await runAction('Refreshing global admin keys', async () => {
+      await refreshGlobalKeys(credential, { showLoading: true });
+    });
+  }
+
   const projectCount = state.status === 'ready' ? state.data.length : '...';
 
   return (
@@ -538,59 +526,30 @@ export function App() {
         </p>
       </section>
 
-      <section className="panel authPanel">
-        <div className="panelHeader">
-          <div>
-            <h2>Operator Access</h2>
-            <p className="muted compact">
-              Use a bootstrap admin token or a scoped admin API key. The credential is only stored locally if you opt in below.
-            </p>
-          </div>
-          <span className="badge">{credential ? 'Configured' : 'Required'}</span>
-        </div>
-
-        <label className="field">
-          <span>Admin credential</span>
-          <input
-            type="password"
-            value={draftCredential}
-            onChange={(event) => setDraftCredential(event.target.value)}
-            placeholder="sfk_... or bootstrap token"
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </label>
-
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={rememberCredential}
-            onChange={(event) => setRememberCredential(event.target.checked)}
-          />
-          <span>Remember this credential in this browser</span>
-        </label>
-
-        <div className="actions">
-          <button type="button" onClick={saveCredential}>
-            Save and load
-          </button>
-          <button type="button" className="secondaryButton" onClick={clearCredential}>
-            Clear
-          </button>
-        </div>
-      </section>
+      <CredentialPanel
+        credentialConfigured={Boolean(credential)}
+        draftCredential={draftCredential}
+        rememberCredential={rememberCredential}
+        onDraftCredentialChange={setDraftCredential}
+        onRememberCredentialChange={setRememberCredential}
+        onSave={saveCredential}
+        onClear={clearCredential}
+        saveDisabled={draftCredential.trim().length === 0}
+        busy={busyAction !== null}
+      />
 
       <section className="panel">
         <div className="panelHeader">
           <h2>Projects</h2>
-          <span className="badge">{projectCount}</span>
+          <div className="actions compactHeaderActions">
+            <button type="button" className="secondaryButton" onClick={() => void handleRefreshProjects()} disabled={!credential || busyAction !== null}>
+              Refresh projects
+            </button>
+            <span className="badge">{projectCount}</span>
+          </div>
         </div>
 
-        {notice.tone !== 'idle' && notice.message ? (
-          <p className={notice.tone === 'error' ? 'error' : notice.tone === 'success' ? 'success' : 'muted'}>
-            {notice.message}
-          </p>
-        ) : null}
+        <NoticeBanner tone={notice.tone} message={notice.message} />
 
         {state.status === 'idle' ? <p className="muted">{state.message}</p> : null}
         {state.status === 'loading' ? <p className="muted">Loading project registry...</p> : null}
@@ -613,276 +572,45 @@ export function App() {
       </section>
 
       <section className="panel splitPanel">
-        <div>
-          <div className="panelHeader">
-            <h2>Create Project</h2>
-          </div>
-          <div className="stack">
-            <label className="field">
-              <span>Slug</span>
-              <input value={createProjectDraft.slug} onChange={(event) => setCreateProjectDraft((current) => ({ ...current, slug: event.target.value }))} />
-            </label>
-            <label className="field">
-              <span>Name</span>
-              <input value={createProjectDraft.name} onChange={(event) => setCreateProjectDraft((current) => ({ ...current, name: event.target.value }))} />
-            </label>
-            <label className="field">
-              <span>Spreadsheet ID</span>
-              <input value={createProjectDraft.spreadsheetId} onChange={(event) => setCreateProjectDraft((current) => ({ ...current, spreadsheetId: event.target.value }))} />
-            </label>
-            <label className="field">
-              <span>Google Credential Ref</span>
-              <input value={createProjectDraft.googleCredentialRef} onChange={(event) => setCreateProjectDraft((current) => ({ ...current, googleCredentialRef: event.target.value }))} placeholder="default or named credential ref" />
-            </label>
-            <label className="field">
-              <span>Default Auth Mode</span>
-              <select value={createProjectDraft.defaultAuthMode} onChange={(event) => setCreateProjectDraft((current) => ({ ...current, defaultAuthMode: event.target.value as 'private' | 'public-read' }))}>
-                <option value="private">private</option>
-                <option value="public-read">public-read</option>
-              </select>
-            </label>
-            <div className="actions">
-              <button type="button" onClick={() => void handleCreateProject()} disabled={!credential || busyAction !== null}>
-                Save project
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div>
-          <div className="panelHeader">
-            <h2>Create API Key</h2>
-          </div>
-          <div className="stack">
-            <label className="field">
-              <span>Name</span>
-              <input value={createKeyDraft.name} onChange={(event) => setCreateKeyDraft((current) => ({ ...current, name: event.target.value }))} />
-            </label>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={createKeyDraft.projectScoped}
-                onChange={(event) => setCreateKeyDraft((current) => ({ ...current, projectScoped: event.target.checked }))}
-              />
-              <span>Scope this key to the selected project</span>
-            </label>
-            <div className="scopeGrid">
-              {allScopes.map((scope) => (
-                <label key={scope} className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={createKeyDraft.scopes.includes(scope)}
-                    onChange={(event) => {
-                      setCreateKeyDraft((current) => ({
-                        ...current,
-                        scopes: event.target.checked
-                          ? [...current.scopes, scope]
-                          : current.scopes.filter((entry) => entry !== scope)
-                      }));
-                    }}
-                  />
-                  <span>{scope}</span>
-                </label>
-              ))}
-            </div>
-            <div className="actions">
-              <button
-                type="button"
-                onClick={() => void handleCreateKey()}
-                disabled={!credential || createKeyDraft.scopes.length === 0 || (createKeyDraft.projectScoped && !selectedProjectSlug) || busyAction !== null}
-              >
-                Create key
-              </button>
-            </div>
-            {createdKey ? <p className="success">New key: <code>{createdKey}</code></p> : null}
-            {projectKeysState.status === 'idle' ? <p className="muted">{projectKeysState.message}</p> : null}
-            {projectKeysState.status === 'loading' ? <p className="muted">Loading scoped keys...</p> : null}
-            {projectKeysState.status === 'error' ? <p className="error">{projectKeysState.message}</p> : null}
-            {projectKeysState.status === 'ready' && projectKeysState.data.length === 0 ? (
-              <p className="muted">No scoped keys yet for this project.</p>
-            ) : null}
-            {projectKeysState.status === 'ready' && projectKeysState.data.length > 0 ? (
-              <ApiKeySections
-                keys={projectKeysState.data}
-                onRevoke={(apiKeyId) => void handleRevokeKey(apiKeyId)}
-                busy={busyAction !== null}
-                emptyMessage="No scoped keys yet for this project."
-                title="Selected Project Keys"
-              />
-            ) : null}
-            <div className="stack compactStack">
-              <h3>Global Admin Keys</h3>
-              {globalKeysState.status === 'idle' ? <p className="muted">{globalKeysState.message}</p> : null}
-              {globalKeysState.status === 'loading' ? <p className="muted">Loading global keys...</p> : null}
-              {globalKeysState.status === 'error' ? (
-                globalKeysState.unauthorized
-                  ? <p className="muted">Global key listing requires a global admin credential.</p>
-                  : <p className="error">{globalKeysState.message}</p>
-              ) : null}
-              {globalKeysState.status === 'ready' ? (
-                <ApiKeySections
-                  keys={globalKeysState.data}
-                  onRevoke={(apiKeyId) => void handleRevokeKey(apiKeyId)}
-                  busy={busyAction !== null}
-                  emptyMessage="No global admin keys yet."
-                />
-              ) : null}
-            </div>
-          </div>
-        </div>
+        <CreateProjectForm
+          draft={createProjectDraft}
+          fieldErrors={createProjectValidation.fieldErrors}
+          onChange={setCreateProjectDraft}
+          onSubmit={() => void handleCreateProject()}
+          submitDisabled={!credential || busyAction !== null || !createProjectValidation.isValid}
+        />
+        <ApiKeyPanel
+          selectedProjectSlug={selectedProjectSlug}
+          draft={createKeyDraft}
+          fieldErrors={createKeyValidation.fieldErrors}
+          onChange={setCreateKeyDraft}
+          onSubmit={() => void handleCreateKey()}
+          submitDisabled={!credential || busyAction !== null || !createKeyValidation.isValid}
+          createdKey={createdKey}
+          projectKeysState={projectKeysState}
+          globalKeysState={globalKeysState}
+          busy={busyAction !== null}
+          onRevoke={(apiKeyId) => void handleRevokeKey(apiKeyId)}
+          onRefreshProjectKeys={() => void handleRefreshProjectKeys()}
+          onRefreshGlobalKeys={() => void handleRefreshGlobalKeys()}
+        />
       </section>
 
-      <section className="panel">
-        <div className="panelHeader">
-          <div>
-            <h2>Selected Project</h2>
-            <p className="muted compact">{selectedProjectSlug ?? 'No project selected'}</p>
-          </div>
-        </div>
-
-        {projectDetailState.status === 'idle' ? <p className="muted">{projectDetailState.message}</p> : null}
-        {projectDetailState.status === 'loading' ? <p className="muted">Loading project details...</p> : null}
-        {projectDetailState.status === 'error' ? <p className="error">{projectDetailState.message}</p> : null}
-        {projectDetailState.status === 'ready' ? (
-          <>
-            <div className="tableForm">
-              <div className="panelHeader">
-                <h3>Create Table</h3>
-              </div>
-              <div className="stack compactStack">
-                <label className="field">
-                  <span>Table Slug</span>
-                  <input value={createTableDraft.tableSlug} onChange={(event) => setCreateTableDraft((current) => ({ ...current, tableSlug: event.target.value }))} />
-                </label>
-                <label className="field">
-                  <span>Sheet Tab</span>
-                  <input value={createTableDraft.sheetTabName} onChange={(event) => setCreateTableDraft((current) => ({ ...current, sheetTabName: event.target.value }))} />
-                </label>
-                <label className="field">
-                  <span>Sheet GID</span>
-                  <input value={createTableDraft.sheetGid} onChange={(event) => setCreateTableDraft((current) => ({ ...current, sheetGid: event.target.value }))} placeholder="Optional numeric sheet id" />
-                </label>
-                <label className="field">
-                  <span>ID Column</span>
-                  <input value={createTableDraft.idColumn} onChange={(event) => setCreateTableDraft((current) => ({ ...current, idColumn: event.target.value }))} />
-                </label>
-                <label className="field">
-                  <span>Indexed Fields</span>
-                  <input value={createTableDraft.indexedFields} onChange={(event) => setCreateTableDraft((current) => ({ ...current, indexedFields: event.target.value }))} />
-                </label>
-                <label className="field">
-                  <span>Header Row</span>
-                  <input value={createTableDraft.headerRow} onChange={(event) => setCreateTableDraft((current) => ({ ...current, headerRow: event.target.value }))} />
-                </label>
-                <label className="field">
-                  <span>Data Start Row</span>
-                  <input value={createTableDraft.dataStartRow} onChange={(event) => setCreateTableDraft((current) => ({ ...current, dataStartRow: event.target.value }))} />
-                </label>
-                <label className="field">
-                  <span>Cache TTL Seconds</span>
-                  <input value={createTableDraft.cacheTtlSeconds} onChange={(event) => setCreateTableDraft((current) => ({ ...current, cacheTtlSeconds: event.target.value }))} />
-                </label>
-                <div className="scopeGrid">
-                  <label className="toggle">
-                    <input type="checkbox" checked={createTableDraft.readEnabled} onChange={(event) => setCreateTableDraft((current) => ({ ...current, readEnabled: event.target.checked }))} />
-                    <span>Read enabled</span>
-                  </label>
-                  <label className="toggle">
-                    <input type="checkbox" checked={createTableDraft.createEnabled} onChange={(event) => setCreateTableDraft((current) => ({ ...current, createEnabled: event.target.checked }))} />
-                    <span>Create enabled</span>
-                  </label>
-                  <label className="toggle">
-                    <input type="checkbox" checked={createTableDraft.updateEnabled} onChange={(event) => setCreateTableDraft((current) => ({ ...current, updateEnabled: event.target.checked }))} />
-                    <span>Update enabled</span>
-                  </label>
-                  <label className="toggle">
-                    <input type="checkbox" checked={createTableDraft.deleteEnabled} onChange={(event) => setCreateTableDraft((current) => ({ ...current, deleteEnabled: event.target.checked }))} />
-                    <span>Delete enabled</span>
-                  </label>
-                </div>
-                <div className="actions">
-                  <button type="button" onClick={() => void handleCreateTable()} disabled={busyAction !== null}>
-                    Save table
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {projectDetailState.tables.length === 0 ? <p className="muted">No tables configured yet.</p> : null}
-            {projectDetailState.tables.length > 0 ? (
-              <div className="cards">
-                {projectDetailState.tables.map((table) => {
-                  const cache = cacheStateByTable[getTableCacheKey(table.projectSlug, table.tableSlug)] ?? null;
-                  return (
-                    <article key={table.tableSlug} className="card" data-testid={`table-card-${table.tableSlug}`}>
-                      <div className="cardTop">
-                        <div>
-                          <p className="slug">{table.tableSlug}</p>
-                          <h3>{table.sheetTabName}</h3>
-                        </div>
-                        <span className="badge">{table.cacheTtlSeconds}s TTL</span>
-                      </div>
-                      <dl className="facts">
-                        <div>
-                          <dt>ID Column</dt>
-                          <dd>{table.idColumn}</dd>
-                        </div>
-                        <div>
-                          <dt>Indexed</dt>
-                          <dd>{table.indexedFields.join(', ')}</dd>
-                        </div>
-                        {cache ? (
-                          <div>
-                            <dt>Cache</dt>
-                            <dd>{cache.status} / {cache.staleReason} / {cache.rowCount} rows</dd>
-                          </div>
-                        ) : null}
-                      </dl>
-                      <div className="actions compactActions">
-                        <button type="button" onClick={() => void handleLoadCache(table.tableSlug)} disabled={busyAction !== null}>
-                          Load cache
-                        </button>
-                        <button type="button" className="secondaryButton" onClick={() => void handleReindex(table.tableSlug)} disabled={busyAction !== null}>
-                          Reindex
-                        </button>
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            ) : null}
-          </>
-        ) : null}
-      </section>
+      <SelectedProjectPanel
+        selectedProjectSlug={selectedProjectSlug}
+        detailState={projectDetailState}
+        createTableDraft={createTableDraft}
+        tableFieldErrors={createTableValidation.fieldErrors}
+        cacheStateByTable={cacheStateByTable}
+        onCreateTableDraftChange={setCreateTableDraft}
+        onCreateTable={() => void handleCreateTable()}
+        onLoadCache={(tableSlug) => void handleLoadCache(tableSlug)}
+        onReindex={(tableSlug) => void handleReindex(tableSlug)}
+        onRefresh={() => void handleRefreshSelectedProject()}
+        busy={busyAction !== null}
+        createTableDisabled={!credential || !selectedProjectSlug || busyAction !== null || !createTableValidation.isValid}
+        getTableCacheKey={getTableCacheKey}
+      />
     </main>
   );
 }
-
-type CreateProjectDraft = {
-  slug: string;
-  name: string;
-  spreadsheetId: string;
-  googleCredentialRef: string;
-  defaultAuthMode: 'private' | 'public-read';
-};
-
-type CreateTableDraft = {
-  tableSlug: string;
-  sheetTabName: string;
-  sheetGid: string;
-  idColumn: string;
-  indexedFields: string;
-  headerRow: string;
-  dataStartRow: string;
-  cacheTtlSeconds: string;
-  readEnabled: boolean;
-  createEnabled: boolean;
-  updateEnabled: boolean;
-  deleteEnabled: boolean;
-};
-
-type CreateKeyDraft = {
-  name: string;
-  projectScoped: boolean;
-  scopes: ApiScope[];
-};
