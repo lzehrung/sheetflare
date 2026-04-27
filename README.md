@@ -22,6 +22,7 @@ npm install
 npm run check
 npm run dev:api
 npm run dev:admin
+npm run e2e:local
 npm run smoke:staging
 ```
 
@@ -31,6 +32,8 @@ npm run smoke:staging
 - `npm run ops:bootstrap`
 - `npm run ops:cache`
 - `npm run ops:reindex`
+- `npm run e2e:browser`
+- `npm run e2e:local`
 - `npm run smoke:staging`
 
 ## Setup Path
@@ -148,3 +151,26 @@ Performance notes:
 - Rate limits are bucketed by route family and operation key, for example `admin.projects.list`, `rows.list`, and `admin.cache.reindex`, so hot endpoints do not starve unrelated calls from the same principal.
 - Rate-limit principals are derived only from verified credentials; unverified API-key-shaped strings fall back to the anonymous/IP bucket.
 - `npm run build`, `npm run typecheck`, and `npm test` all pass from the repo root.
+
+## Local End-To-End Checks
+
+Once you have live Google Sheets credentials and the smoke-test projects/tables configured:
+
+Required smoke env vars:
+
+- `SHEETFLARE_ADMIN_CREDENTIAL`
+- `SHEETFLARE_PRIVATE_PROJECT`
+- `SHEETFLARE_PRIVATE_TABLE`
+- `SHEETFLARE_PRIVATE_READ_KEY`
+- `SHEETFLARE_MUTATION_KEY`
+- `SHEETFLARE_PUBLIC_PROJECT`
+- `SHEETFLARE_PUBLIC_TABLE`
+- `SHEETFLARE_SMOKE_CREATE_VALUES_JSON`
+- `SHEETFLARE_SMOKE_UPDATE_VALUES_JSON`
+
+```powershell
+npx playwright install chromium
+npm run e2e:local
+```
+
+`npm run e2e:local` starts the local API and admin UI, runs the API smoke checks against the local Worker, then runs browser automation against the admin UI.

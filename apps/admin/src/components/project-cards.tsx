@@ -13,6 +13,7 @@ export function ProjectCards({ projects, selectedProjectSlug, onSelect }: Projec
         <article
           key={project.slug}
           className={`card selectableCard${selectedProjectSlug === project.slug ? ' selectedCard' : ''}`}
+          data-testid={`project-card-${project.slug}`}
           onClick={() => onSelect(project.slug)}
           onKeyDown={(event) => {
             if (event.key === 'Enter' || event.key === ' ') {
