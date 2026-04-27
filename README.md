@@ -137,6 +137,8 @@ Performance notes:
   - create scoped API keys
   - list global and project-scoped keys
   - revoke keys with visible active/revoked state
+  - validate project/table/key drafts before submit
+  - refresh project and key views explicitly
   - inspect cache status
   - force reindex
 - Credential persistence is opt-in. You can use the UI in session-only mode or explicitly remember the credential in the browser.
