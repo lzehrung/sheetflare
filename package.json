@@ -19,8 +19,10 @@
     "ops:create-admin-key": "tsx scripts/create-admin-key.ts",
     "ops:bootstrap": "tsx scripts/bootstrap-staging.ts",
     "ops:cache": "tsx scripts/get-cache-status.ts",
+    "ops:cache:health": "tsx scripts/check-cache-health.ts",
     "ops:reindex": "tsx scripts/reindex-table.ts",
-    "smoke:staging": "tsx scripts/smoke-staging.ts"
+    "smoke:staging": "tsx scripts/smoke-staging.ts",
+    "load:staging": "tsx scripts/load-staging.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260418.0",

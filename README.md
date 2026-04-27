@@ -5,6 +5,7 @@ Sheetflare is a Cloudflare-first starter for exposing Google Sheets tabs through
 Production hardening guidance lives in [production-readiness-checklist.md](./production-readiness-checklist.md).
 Start with [docs/quickstart.md](./docs/quickstart.md).
 Operational docs live in [docs/operator-runbook.md](./docs/operator-runbook.md) and [docs/deploy.md](./docs/deploy.md).
+Production evidence workflows live in [docs/benchmarking.md](./docs/benchmarking.md) and [docs/observability.md](./docs/observability.md).
 
 ## Workspaces
 
@@ -31,10 +32,12 @@ npm run smoke:staging
 - `npm run ops:create-admin-key`
 - `npm run ops:bootstrap`
 - `npm run ops:cache`
+- `npm run ops:cache:health`
 - `npm run ops:reindex`
 - `npm run e2e:browser`
 - `npm run e2e:local`
 - `npm run smoke:staging`
+- `npm run load:staging`
 
 ## Setup Path
 
@@ -94,6 +97,18 @@ Bootstrap and deployment steps are documented in [docs/quickstart.md](./docs/qui
 - Table config changes that affect cache shape, indexing, or sheet layout automatically mark the cache stale and force a resync on the next read or write.
 
 Operational procedures for reindex, cache inspection, and failure handling live in [docs/operator-runbook.md](./docs/operator-runbook.md).
+
+## Initial Envelope
+
+These are conservative starting constraints, not benchmark-proven public limits:
+
+- one `TableDO` owns one table, so each hot table is effectively single-threaded at the Durable Object boundary
+- `TABLE_MAX_FULL_SCAN_ROWS` defaults to `10000`
+- scan-heavy operators like `contains` should stay off the hot path for public workloads
+- keep `cacheTtlSeconds` in the `15` to `60` second range until staging data proves a better setting
+- keep indexed fields lean even though the hard limit is `32` including the managed ID column
+
+Use [docs/benchmarking.md](./docs/benchmarking.md) to replace these starting assumptions with measured limits from your own staging deployment.
 
 ## Query Semantics
 

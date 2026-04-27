@@ -169,6 +169,13 @@ Run:
 npm run smoke:staging
 ```
 
+Optional artifact:
+
+```powershell
+$env:SHEETFLARE_SMOKE_REPORT_PATH = "reports/staging/smoke-$(Get-Date -Format yyyyMMdd-HHmmss).md"
+npm run smoke:staging
+```
+
 The smoke suite checks:
 
 - readiness endpoint internal checks
@@ -219,6 +226,13 @@ Force reindex:
 
 ```powershell
 npm run ops:reindex
+```
+
+Run the load and churn harness:
+
+```powershell
+$env:SHEETFLARE_LOAD_REPORT_PATH = "reports/staging/load-$(Get-Date -Format yyyyMMdd-HHmmss).md"
+npm run load:staging
 ```
 
 ## 12. If setup fails

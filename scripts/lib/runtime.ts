@@ -73,12 +73,14 @@ export async function requestJson<T>(options: {
   path: string;
   method?: HttpMethod;
   bearer?: string | null;
+  headers?: Record<string, string>;
   body?: unknown;
   expectedStatus?: number;
 }) {
   const init: RequestInit = {
     method: options.method ?? 'GET',
     headers: {
+      ...(options.headers ?? {}),
       ...(options.bearer ? { authorization: `Bearer ${options.bearer}` } : {}),
       ...(options.body !== undefined ? { 'content-type': 'application/json' } : {})
     }
