@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  adminCredentialHeaderName,
   adminCredentialStorageKey,
   buildAdminHeaders,
   normalizeAdminCredential,
@@ -57,9 +58,9 @@ describe('stored admin credential helpers', () => {
 });
 
 describe('buildAdminHeaders', () => {
-  it('builds a bearer authorization header when a credential exists', () => {
+  it('builds the dedicated proxy credential header when a credential exists', () => {
     expect(buildAdminHeaders('secret-token')).toEqual({
-      authorization: 'Bearer secret-token'
+      [adminCredentialHeaderName]: 'secret-token'
     });
   });
 

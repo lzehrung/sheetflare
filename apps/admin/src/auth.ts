@@ -1,4 +1,5 @@
 export const adminCredentialStorageKey = 'sheetflare.adminCredential';
+export const adminCredentialHeaderName = 'x-sheetflare-admin-credential';
 
 export interface StorageLike {
   getItem(key: string): string | null;
@@ -40,6 +41,6 @@ export function buildAdminHeaders(credential: string | null): HeadersInit | unde
   }
 
   return {
-    authorization: `Bearer ${credential}`
+    [adminCredentialHeaderName]: credential
   };
 }

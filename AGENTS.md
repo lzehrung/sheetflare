@@ -193,6 +193,20 @@ Bad tests in this repo:
 - snapshot arbitrary large payloads without intent
 - mock away the logic we actually care about
 
+### Every bug fix requires a regression test
+
+Any correctness fix must add or update automated tests that would have failed before the fix.
+
+That requirement is mandatory for:
+
+- runtime bug fixes
+- auth or permission fixes
+- sync/cache behavior fixes
+- query or mutation correctness fixes
+- deployment or configuration fixes when the behavior can be exercised in automation
+
+When a live failure reveals an environment-specific edge case, tighten the local test harness so the same class of regression is catchable before deploy.
+
 ## Code Review Expectations
 
 When reviewing changes, prioritize:

@@ -1,0 +1,10 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "sheetflare-staging-admin",
+  "pages_build_output_dir": "./dist",
+  "compatibility_date": "2026-04-27",
+  "upload_source_maps": true,
+  "vars": {
+    "SHEETFLARE_API_BASE_URL": "https://sheetflare-staging-api.lzehrung.workers.dev"
+  }
+}

@@ -11,6 +11,7 @@ import type {
   GetTableCacheStatusResult,
   GetRowResult,
   GetSchemaResult,
+  RefreshTableCacheResult,
   ReindexTableResult,
   UpdateRowInput,
   UpdateRowResult,
@@ -79,6 +80,7 @@ export type TableDoRequest =
   | { type: 'table.row.delete'; projectSlug: string; tableSlug: string; rowId: string; requestContext?: TableRequestContext }
   | { type: 'table.schema.get'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext }
   | { type: 'table.cache.get'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext }
+  | { type: 'table.cache.refresh'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext }
   | { type: 'table.reindex'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext };
 
 export type TableDoResponse =
@@ -89,6 +91,7 @@ export type TableDoResponse =
   | { type: 'table.row.delete.result'; result: DeleteRowResult }
   | { type: 'table.schema.get.result'; result: GetSchemaResult }
   | { type: 'table.cache.get.result'; result: GetTableCacheStatusResult }
+  | { type: 'table.cache.refresh.result'; result: RefreshTableCacheResult }
   | { type: 'table.reindex.result'; result: ReindexTableResult };
 
 export type TableRequestContext = {

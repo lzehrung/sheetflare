@@ -310,10 +310,6 @@ describe('App', () => {
         });
       }
 
-      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys?project=prod' || url === '/v1/admin/keys') {
-        return createJsonResponse({ data: [] });
-      }
-
       if (url === '/v1/admin/projects/demo/tables/users/cache') {
         return createJsonResponse({
           data: {
@@ -329,6 +325,25 @@ describe('App', () => {
         });
       }
 
+      if (url === '/v1/admin/projects/prod/tables/users/cache') {
+        return createJsonResponse({
+          data: {
+            status: 'ready',
+            cacheTtlSeconds: 15,
+            stale: false,
+            staleReason: 'fresh',
+            rowCount: 1,
+            lastSyncStartedAt: '2026-04-27T00:00:00.000Z',
+            lastSyncCompletedAt: '2026-04-27T00:00:01.000Z',
+            lastSyncError: null
+          }
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys?project=prod' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
       throw new Error(`Unexpected request: ${method} ${url}`);
     }));
 
@@ -340,7 +355,6 @@ describe('App', () => {
     fireEvent.click(screen.getByText('Save and load'));
 
     await screen.findByTestId('table-card-users');
-    fireEvent.click(screen.getByRole('button', { name: 'Load cache' }));
     await screen.findByText('ready / fresh / 3 rows');
 
     fireEvent.click(screen.getByTestId('project-card-prod'));
@@ -350,7 +364,114 @@ describe('App', () => {
 
     await waitFor(() => {
       expect(screen.queryByText('ready / fresh / 3 rows')).toBeNull();
+      expect(screen.getByText('ready / fresh / 1 rows')).toBeTruthy();
     });
+  });
+
+  it('auto-loads cache status, links to the spreadsheet, and refreshes stale tables on demand', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: 1,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: [
+            {
+              projectSlug: 'demo',
+              tableSlug: 'users',
+              sheetTabName: 'Users',
+              idColumn: '_id',
+              indexedFields: ['_id', 'status'],
+              headerRow: 1,
+              dataStartRow: 2,
+              readEnabled: true,
+              createEnabled: true,
+              updateEnabled: true,
+              deleteEnabled: true,
+              cacheTtlSeconds: 15,
+              createdAt: '2026-04-26T00:00:00.000Z',
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects/demo/tables/users/cache' && method === 'GET') {
+        return createJsonResponse({
+          data: {
+            status: 'ready',
+            cacheTtlSeconds: 15,
+            stale: true,
+            staleReason: 'ttl-expired',
+            rowCount: 0,
+            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
+            lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
+            lastSyncError: null
+          }
+        });
+      }
+
+      if (url === '/v1/admin/projects/demo/tables/users/refresh' && method === 'POST') {
+        return createJsonResponse({
+          ok: true,
+          rowCount: 3,
+          cache: {
+            status: 'ready',
+            cacheTtlSeconds: 15,
+            stale: false,
+            staleReason: 'fresh',
+            rowCount: 3,
+            lastSyncStartedAt: '2026-04-26T00:00:02.000Z',
+            lastSyncCompletedAt: '2026-04-26T00:00:03.000Z',
+            lastSyncError: null
+          }
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByText('ready / ttl-expired / 0 rows');
+    const spreadsheetLink = screen.getByRole('link', { name: 'Open in Google Sheets' });
+    expect(spreadsheetLink.getAttribute('href')).toBe('https://docs.google.com/spreadsheets/d/sheet-1/edit');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh if stale' }));
+    await screen.findByText('Refreshing cache for demo/users if stale complete.');
+    await screen.findByText('ready / fresh / 3 rows');
   });
 
   it('clears the revealed key when the selected project changes', async () => {

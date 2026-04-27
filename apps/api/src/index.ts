@@ -2,6 +2,7 @@ import { Scalar } from '@scalar/hono-api-reference';
 import type { Context } from 'hono';
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import {
+  AppError,
   adminCreateApiKeyInputSchema,
   adminCreateApiKeyResultSchema,
   adminGetProjectResultSchema,
@@ -20,6 +21,7 @@ import {
   getTableCacheStatusResultSchema,
   listRowsQuerySchema,
   listRowsResultSchema,
+  refreshTableCacheResultSchema,
   reindexTableResultSchema,
   rowParamsSchema,
   tableConfigSchema,
@@ -46,6 +48,7 @@ import {
   type ListRowsResult,
   type ProjectAccessResult,
   type ProjectDoResponse,
+  type RefreshTableCacheResult,
   type ResolvedProjectTableResult,
   type ReindexTableResult,
   type RateLimitDoResponse,
@@ -330,6 +333,10 @@ function getRateLimitOperationKey(
 
   if (path.startsWith('/v1/admin/projects/') && path.endsWith('/cache') && normalizedMethod === 'GET') {
     return 'admin.cache.get';
+  }
+
+  if (path.startsWith('/v1/admin/projects/') && path.endsWith('/refresh') && normalizedMethod === 'POST') {
+    return 'admin.cache.refresh';
   }
 
   if (path.startsWith('/v1/admin/projects/') && path.endsWith('/reindex') && normalizedMethod === 'POST') {
@@ -809,6 +816,24 @@ const reindexTableRoute = createRoute({
   }
 });
 
+const refreshTableCacheRoute = createRoute({
+  method: 'post',
+  path: '/v1/admin/projects/{project}/tables/{table}/refresh',
+  tags: ['Tables'],
+  security: adminSecurity,
+  request: {
+    params: adminProjectTableParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'Refresh the table cache if it is stale',
+      content: jsonContent(refreshTableCacheResultSchema)
+    },
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
 const getRowRoute = createRoute({
   method: 'get',
   path: '/v1/projects/{project}/tables/{table}/rows/{id}',
@@ -994,7 +1019,9 @@ function createApp() {
         requestId: c.get('requestId'),
         principal: c.get('authPrincipal') ?? 'anonymous',
         errorName: error instanceof Error ? error.name : 'UnknownError',
-        errorMessage: error instanceof Error ? error.message : String(error)
+        errorMessage: error instanceof Error ? error.message : String(error),
+        errorDetails: error instanceof AppError ? error.details ?? null : null,
+        errorStack: error instanceof Error ? error.stack ?? null : null
       })
     );
     const { status, body } = toErrorResponse(error);
@@ -1205,6 +1232,20 @@ function createApp() {
     });
 
     return c.json((response as { type: 'table.cache.get.result'; result: GetTableCacheStatusResult }).result);
+  });
+
+  app.openapi(refreshTableCacheRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
+    assertProjectScope(auth, 'admin:projects', project);
+    const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
+      type: 'table.cache.refresh',
+      projectSlug: project,
+      tableSlug: table,
+      requestContext: buildTableRequestContext(c, 'admin.cache.refresh')
+    });
+
+    return c.json((response as { type: 'table.cache.refresh.result'; result: RefreshTableCacheResult }).result);
   });
 
   app.openapi(reindexTableRoute, async (c) => {

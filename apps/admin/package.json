@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "dev:pages": "npx wrangler@4.85.0 pages dev",
+    "deploy:staging": "vite build && npx wrangler@4.85.0 pages deploy",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests"
   },

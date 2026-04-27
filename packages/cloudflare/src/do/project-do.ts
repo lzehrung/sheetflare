@@ -278,9 +278,11 @@ export class ProjectDO {
   }
 
   private async getTable(projectSlug: string, tableSlug: string): Promise<TableConfig> {
-    const table = this.ctx.storage.sql
-      .exec(`SELECT * FROM tables WHERE project_slug = ? AND table_slug = ?`, projectSlug, tableSlug)
-      .one() as TableRow | null;
+    const table = this.selectOptionalRow<TableRow>(
+      `SELECT * FROM tables WHERE project_slug = ? AND table_slug = ?`,
+      projectSlug,
+      tableSlug
+    );
 
     if (!table) {
       throw new NotFoundError(`Table ${projectSlug}/${tableSlug} was not found.`);
@@ -317,6 +319,11 @@ export class ProjectDO {
     return rows.map((row) => this.mapTable(row));
   }
 
+  private selectOptionalRow<Row>(query: string, ...params: unknown[]): Row | null {
+    const rows = this.ctx.storage.sql.exec(query, ...params).toArray() as Row[];
+    return rows[0] ?? null;
+  }
+
   private async syncRegistry(projectSlug: string) {
     const summary = this.getProjectSummary(projectSlug);
     await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), {
@@ -328,9 +335,10 @@ export class ProjectDO {
   private getProjectSummary(projectSlug: string): ProjectSummary {
     const project = this.requireProjectRow(projectSlug);
 
-    const countRow = this.ctx.storage.sql
-      .exec(`SELECT COUNT(*) AS count FROM tables WHERE project_slug = ?`, projectSlug)
-      .one() as { count: number } | null;
+    const countRow = this.selectOptionalRow<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM tables WHERE project_slug = ?`,
+      projectSlug
+    );
 
     return {
       slug: project.slug,
@@ -402,9 +410,7 @@ export class ProjectDO {
   }
 
   private requireProjectRow(projectSlug: string): ProjectRow {
-    const project = this.ctx.storage.sql
-      .exec(`SELECT * FROM project WHERE slug = ?`, projectSlug)
-      .one() as ProjectRow | null;
+    const project = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, projectSlug);
 
     if (!project) {
       throw new NotFoundError(`Project ${projectSlug} was not found.`);

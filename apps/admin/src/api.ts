@@ -7,6 +7,7 @@ import type {
   CreateProjectInput,
   CreateTableInput,
   GetTableCacheStatusResult,
+  RefreshTableCacheResult,
   ReindexTableResult
 } from '@sheetflare/contracts';
 import { buildAdminHeaders } from './auth';
@@ -170,6 +171,16 @@ export function getCacheStatus(credential: string, projectSlug: string, tableSlu
   return requestAdminJson<GetTableCacheStatusResult>(
     credential,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}/cache`
+  );
+}
+
+export function refreshTableCache(credential: string, projectSlug: string, tableSlug: string) {
+  return requestAdminJson<RefreshTableCacheResult>(
+    credential,
+    `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}/refresh`,
+    {
+      method: 'POST'
+    }
   );
 }
 

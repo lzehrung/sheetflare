@@ -50,6 +50,74 @@ describe('parseSheetCellValue', () => {
 });
 
 describe('GoogleSheetsService.readAllRows', () => {
+  it('uses the live global fetch at call time instead of storing a detached reference', async () => {
+    const staleFetch = async () => {
+      throw new Error('stale fetch should not be used');
+    };
+
+    const liveFetch = async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return Response.json({
+          access_token: 'token',
+          expires_in: 3600
+        });
+      }
+
+      if (url.includes('/values/')) {
+        return Response.json({
+          values: [
+            ['_id', 'name'],
+            ['row-1', 'Ada']
+          ]
+        });
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    };
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = staleFetch as typeof fetch;
+
+    try {
+      const service = new GoogleSheetsService({
+        clientEmail: 'service@example.com',
+        privateKey: testPrivateKey
+      });
+
+      globalThis.fetch = liveFetch as typeof fetch;
+
+      await expect(service.readAllRows({
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        spreadsheetId: 'sheet-1',
+        sheetTabName: 'Users',
+        idColumn: '_id',
+        indexedFields: ['_id'],
+        headerRow: 1,
+        dataStartRow: 2,
+        readEnabled: true,
+        createEnabled: true,
+        updateEnabled: true,
+        deleteEnabled: true,
+        cacheTtlSeconds: 15,
+        createdAt: '2026-04-26T00:00:00.000Z',
+        updatedAt: '2026-04-26T00:00:00.000Z'
+      })).resolves.toEqual([
+        {
+          id: 'row-1',
+          rowNumber: 2,
+          values: {
+            _id: 'row-1',
+            name: 'Ada'
+          }
+        }
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('rejects duplicate non-empty header names', async () => {
     const service = new GoogleSheetsService({
       clientEmail: 'service@example.com',
