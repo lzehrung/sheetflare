@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { ApiScope, ProjectSummary, TableConfig } from '@sheetflare/contracts';
+import type { ApiKeyPrincipal, ApiScope, ProjectSummary, TableConfig } from '@sheetflare/contracts';
 import {
   normalizeAdminCredential,
   readStoredAdminCredential,
@@ -11,9 +11,13 @@ import {
   createTable,
   getCacheStatus,
   getProject,
+  listApiKeys,
   listProjects,
+  revokeApiKey,
   reindexTable
 } from './api';
+import { ApiKeySections } from './components/api-key-sections';
+import { ProjectCards } from './components/project-cards';
 import './styles.css';
 
 type LoadState =
@@ -27,6 +31,24 @@ type ProjectDetailState =
   | { status: 'loading' }
   | { status: 'ready'; tables: TableConfig[] }
   | { status: 'error'; message: string };
+
+type ProjectKeysState =
+  | { status: 'idle'; message: string }
+  | { status: 'loading' }
+  | { status: 'ready'; data: ApiKeyPrincipal[] }
+  | { status: 'error'; message: string };
+
+type GlobalKeysState =
+  | { status: 'idle'; message: string }
+  | { status: 'loading' }
+  | { status: 'ready'; data: ApiKeyPrincipal[] }
+  | { status: 'error'; message: string; unauthorized: boolean };
+
+type NoticeState =
+  | { tone: 'idle'; message: string | null }
+  | { tone: 'loading'; message: string }
+  | { tone: 'success'; message: string }
+  | { tone: 'error'; message: string };
 
 type CacheStateByTable = Record<string, { status: string; staleReason: string; rowCount: number } | null>;
 
@@ -65,8 +87,21 @@ export function App() {
     status: 'idle',
     message: 'Select a project to inspect tables, cache state, and keys.'
   });
+  const [projectKeysState, setProjectKeysState] = useState<ProjectKeysState>({
+    status: 'idle',
+    message: 'Select a project to inspect and manage scoped API keys.'
+  });
+  const [globalKeysState, setGlobalKeysState] = useState<GlobalKeysState>({
+    status: 'idle',
+    message: 'Load a global admin credential to inspect global keys.'
+  });
   const [cacheStateByTable, setCacheStateByTable] = useState<CacheStateByTable>({});
   const [createdKey, setCreatedKey] = useState<string | null>(null);
+  const [notice, setNotice] = useState<NoticeState>({
+    tone: 'idle',
+    message: null
+  });
+  const [busyAction, setBusyAction] = useState<string | null>(null);
   const [createProjectDraft, setCreateProjectDraft] = useState<CreateProjectDraft>({
     slug: '',
     name: '',
@@ -130,6 +165,10 @@ export function App() {
         status: 'idle',
         message: 'Select a project to inspect tables, cache state, and keys.'
       });
+      setProjectKeysState({
+        status: 'idle',
+        message: 'Select a project to inspect and manage scoped API keys.'
+      });
       return;
     }
 
@@ -160,6 +199,127 @@ export function App() {
     };
   }, [credential, selectedProjectSlug]);
 
+  useEffect(() => {
+    if (!credential) {
+      setGlobalKeysState({
+        status: 'idle',
+        message: 'Load a global admin credential to inspect global keys.'
+      });
+      return;
+    }
+
+    let cancelled = false;
+    setGlobalKeysState({ status: 'loading' });
+
+    void (async () => {
+      try {
+        const result = await listApiKeys(credential);
+        if (!cancelled) {
+          setGlobalKeysState({
+            status: 'ready',
+            data: result.data.filter((apiKey) => apiKey.projectSlug === null)
+          });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          setGlobalKeysState({
+            status: 'error',
+            message,
+            unauthorized: message.includes('rejected') || message.includes('global admin key')
+          });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [credential]);
+
+  useEffect(() => {
+    if (!credential || !selectedProjectSlug) {
+      setProjectKeysState({
+        status: 'idle',
+        message: 'Select a project to inspect and manage scoped API keys.'
+      });
+      return;
+    }
+
+    let cancelled = false;
+    setProjectKeysState({ status: 'loading' });
+
+    void (async () => {
+      try {
+        const result = await listApiKeys(credential, selectedProjectSlug);
+        if (!cancelled) {
+          setProjectKeysState({
+            status: 'ready',
+            data: result.data
+          });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setProjectKeysState({
+            status: 'error',
+            message: error instanceof Error ? error.message : 'Unknown error'
+          });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [credential, selectedProjectSlug]);
+
+  async function refreshProjectDetail(credentialValue: string, projectSlug: string) {
+    const detail = await getProject(credentialValue, projectSlug);
+    setProjectDetailState({
+      status: 'ready',
+      tables: detail.tables
+    });
+  }
+
+  async function refreshProjectKeys(credentialValue: string, projectSlug: string) {
+    const result = await listApiKeys(credentialValue, projectSlug);
+    setProjectKeysState({
+      status: 'ready',
+      data: result.data
+    });
+  }
+
+  async function refreshGlobalKeys(credentialValue: string) {
+    const result = await listApiKeys(credentialValue);
+    setGlobalKeysState({
+      status: 'ready',
+      data: result.data.filter((apiKey) => apiKey.projectSlug === null)
+    });
+  }
+
+  async function runAction(actionLabel: string, work: () => Promise<void>) {
+    setBusyAction(actionLabel);
+    setNotice({
+      tone: 'loading',
+      message: actionLabel
+    });
+
+    try {
+      await work();
+      setNotice({
+        tone: 'success',
+        message: `${actionLabel} complete.`
+      });
+    } catch (error) {
+      setNotice({
+        tone: 'error',
+        message: error instanceof Error ? error.message : 'Unknown error'
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   function saveCredential() {
     const normalized = normalizeAdminCredential(draftCredential);
     if (typeof window !== 'undefined') {
@@ -168,6 +328,10 @@ export function App() {
 
     setCredential(normalized);
     setDraftCredential(normalized ?? '');
+    setNotice({
+      tone: 'idle',
+      message: null
+    });
   }
 
   function clearCredential() {
@@ -182,6 +346,18 @@ export function App() {
     setProjectDetailState({
       status: 'idle',
       message: 'Select a project to inspect tables, cache state, and keys.'
+    });
+    setProjectKeysState({
+      status: 'idle',
+      message: 'Select a project to inspect and manage scoped API keys.'
+    });
+    setGlobalKeysState({
+      status: 'idle',
+      message: 'Load a global admin credential to inspect global keys.'
+    });
+    setNotice({
+      tone: 'idle',
+      message: null
     });
   }
 
@@ -212,20 +388,22 @@ export function App() {
       spreadsheetId: createProjectDraft.spreadsheetId.trim(),
       defaultAuthMode: createProjectDraft.defaultAuthMode
     };
-    await createProject(credential, input);
-    setCreateProjectDraft({
-      slug: '',
-      name: '',
-      spreadsheetId: '',
-      defaultAuthMode: 'private'
+    await runAction(`Saving project ${input.slug}`, async () => {
+      await createProject(credential, input);
+      setCreateProjectDraft({
+        slug: '',
+        name: '',
+        spreadsheetId: '',
+        defaultAuthMode: 'private'
+      });
+      await refreshProjects();
+      setSelectedProjectSlug(input.slug);
     });
-    await refreshProjects();
-    setSelectedProjectSlug(input.slug);
   }
 
   async function handleCreateTable() {
     if (!credential || !selectedProjectSlug) return;
-    await createTable(credential, selectedProjectSlug, {
+    const tableInput = {
       tableSlug: createTableDraft.tableSlug.trim(),
       sheetTabName: createTableDraft.sheetTabName.trim(),
       idColumn: createTableDraft.idColumn.trim(),
@@ -234,55 +412,80 @@ export function App() {
         .map((entry) => entry.trim())
         .filter(Boolean),
       cacheTtlSeconds: Number(createTableDraft.cacheTtlSeconds)
-    });
-    setCreateTableDraft({
-      tableSlug: '',
-      sheetTabName: '',
-      idColumn: '_id',
-      indexedFields: 'name,status',
-      cacheTtlSeconds: '15'
-    });
-    const detail = await getProject(credential, selectedProjectSlug);
-    setProjectDetailState({
-      status: 'ready',
-      tables: detail.tables
+    };
+    await runAction(`Saving table ${selectedProjectSlug}/${tableInput.tableSlug}`, async () => {
+      await createTable(credential, selectedProjectSlug, tableInput);
+      setCreateTableDraft({
+        tableSlug: '',
+        sheetTabName: '',
+        idColumn: '_id',
+        indexedFields: 'name,status',
+        cacheTtlSeconds: '15'
+      });
+      await refreshProjectDetail(credential, selectedProjectSlug);
     });
   }
 
   async function handleCreateKey() {
     if (!credential) return;
-    const response = await createApiKey(credential, {
+    if (createKeyDraft.projectScoped && !selectedProjectSlug) return;
+    const keyInput = {
       name: createKeyDraft.name.trim(),
       projectSlug: createKeyDraft.projectScoped ? selectedProjectSlug : null,
       scopes: createKeyDraft.scopes
+    };
+    await runAction(`Creating API key ${keyInput.name}`, async () => {
+      const response = await createApiKey(credential, keyInput);
+      setCreatedKey(response.apiKey);
+      if (selectedProjectSlug) {
+        await refreshProjectKeys(credential, selectedProjectSlug);
+      }
+      if (!keyInput.projectSlug) {
+        await refreshGlobalKeys(credential);
+      }
     });
-    setCreatedKey(response.apiKey);
   }
 
   async function handleLoadCache(tableSlug: string) {
     if (!credential || !selectedProjectSlug) return;
-    const response = await getCacheStatus(credential, selectedProjectSlug, tableSlug);
-    setCacheStateByTable((current) => ({
-      ...current,
-      [tableSlug]: {
-        status: response.data.status,
-        staleReason: response.data.staleReason,
-        rowCount: response.data.rowCount
-      }
-    }));
+    await runAction(`Loading cache state for ${selectedProjectSlug}/${tableSlug}`, async () => {
+      const response = await getCacheStatus(credential, selectedProjectSlug, tableSlug);
+      setCacheStateByTable((current) => ({
+        ...current,
+        [tableSlug]: {
+          status: response.data.status,
+          staleReason: response.data.staleReason,
+          rowCount: response.data.rowCount
+        }
+      }));
+    });
   }
 
   async function handleReindex(tableSlug: string) {
     if (!credential || !selectedProjectSlug) return;
-    const response = await reindexTable(credential, selectedProjectSlug, tableSlug);
-    setCacheStateByTable((current) => ({
-      ...current,
-      [tableSlug]: {
-        status: response.cache.status,
-        staleReason: response.cache.staleReason,
-        rowCount: response.rowCount
+    await runAction(`Reindexing ${selectedProjectSlug}/${tableSlug}`, async () => {
+      const response = await reindexTable(credential, selectedProjectSlug, tableSlug);
+      setCacheStateByTable((current) => ({
+        ...current,
+        [tableSlug]: {
+          status: response.cache.status,
+          staleReason: response.cache.staleReason,
+          rowCount: response.rowCount
+        }
+      }));
+    });
+  }
+
+  async function handleRevokeKey(apiKeyId: string) {
+    if (!credential) return;
+    await runAction(`Revoking key ${apiKeyId}`, async () => {
+      await revokeApiKey(credential, apiKeyId);
+      setCreatedKey((current) => (current?.startsWith(`sfk_${apiKeyId}.`) ? null : current));
+      if (selectedProjectSlug) {
+        await refreshProjectKeys(credential, selectedProjectSlug);
       }
-    }));
+      await refreshGlobalKeys(credential);
+    });
   }
 
   const projectCount = state.status === 'ready' ? state.data.length : '...';
@@ -302,7 +505,7 @@ export function App() {
           <div>
             <h2>Operator Access</h2>
             <p className="muted compact">
-              Use a bootstrap admin token or a scoped admin API key. The credential is stored locally in this browser.
+              Use a bootstrap admin token or a scoped admin API key. The credential is only stored locally if you opt in below.
             </p>
           </div>
           <span className="badge">{credential ? 'Configured' : 'Required'}</span>
@@ -345,6 +548,12 @@ export function App() {
           <span className="badge">{projectCount}</span>
         </div>
 
+        {notice.tone !== 'idle' && notice.message ? (
+          <p className={notice.tone === 'error' ? 'error' : notice.tone === 'success' ? 'success' : 'muted'}>
+            {notice.message}
+          </p>
+        ) : null}
+
         {state.status === 'idle' ? <p className="muted">{state.message}</p> : null}
         {state.status === 'loading' ? <p className="muted">Loading project registry...</p> : null}
         {state.status === 'error' ? (
@@ -354,36 +563,14 @@ export function App() {
           </p>
         ) : null}
         {state.status === 'ready' && state.data.length === 0 ? (
-          <p className="muted">No projects yet. Create one through the admin API to get started.</p>
+          <p className="muted">No projects yet. Use the form below to create the first project.</p>
         ) : null}
         {state.status === 'ready' && state.data.length > 0 ? (
-          <div className="cards">
-            {state.data.map((project) => (
-              <article
-                key={project.slug}
-                className={`card selectableCard${selectedProjectSlug === project.slug ? ' selectedCard' : ''}`}
-                onClick={() => setSelectedProjectSlug(project.slug)}
-              >
-                <div className="cardTop">
-                  <div>
-                    <p className="slug">{project.slug}</p>
-                    <h3>{project.name}</h3>
-                  </div>
-                  <span className="badge">{project.tableCount} tables</span>
-                </div>
-                <dl className="facts">
-                  <div>
-                    <dt>Spreadsheet</dt>
-                    <dd>{project.spreadsheetId}</dd>
-                  </div>
-                  <div>
-                    <dt>Updated</dt>
-                    <dd>{new Date(project.updatedAt).toLocaleString()}</dd>
-                  </div>
-                </dl>
-              </article>
-            ))}
-          </div>
+          <ProjectCards
+            projects={state.data}
+            selectedProjectSlug={selectedProjectSlug}
+            onSelect={setSelectedProjectSlug}
+          />
         ) : null}
       </section>
 
@@ -413,7 +600,7 @@ export function App() {
               </select>
             </label>
             <div className="actions">
-              <button type="button" onClick={() => void handleCreateProject()} disabled={!credential}>
+              <button type="button" onClick={() => void handleCreateProject()} disabled={!credential || busyAction !== null}>
                 Save project
               </button>
             </div>
@@ -457,11 +644,48 @@ export function App() {
               ))}
             </div>
             <div className="actions">
-              <button type="button" onClick={() => void handleCreateKey()} disabled={!credential || createKeyDraft.scopes.length === 0}>
+              <button
+                type="button"
+                onClick={() => void handleCreateKey()}
+                disabled={!credential || createKeyDraft.scopes.length === 0 || (createKeyDraft.projectScoped && !selectedProjectSlug) || busyAction !== null}
+              >
                 Create key
               </button>
             </div>
             {createdKey ? <p className="success">New key: <code>{createdKey}</code></p> : null}
+            {projectKeysState.status === 'idle' ? <p className="muted">{projectKeysState.message}</p> : null}
+            {projectKeysState.status === 'loading' ? <p className="muted">Loading scoped keys...</p> : null}
+            {projectKeysState.status === 'error' ? <p className="error">{projectKeysState.message}</p> : null}
+            {projectKeysState.status === 'ready' && projectKeysState.data.length === 0 ? (
+              <p className="muted">No scoped keys yet for this project.</p>
+            ) : null}
+            {projectKeysState.status === 'ready' && projectKeysState.data.length > 0 ? (
+              <ApiKeySections
+                keys={projectKeysState.data}
+                onRevoke={(apiKeyId) => void handleRevokeKey(apiKeyId)}
+                busy={busyAction !== null}
+                emptyMessage="No scoped keys yet for this project."
+                title="Selected Project Keys"
+              />
+            ) : null}
+            <div className="stack compactStack">
+              <h3>Global Admin Keys</h3>
+              {globalKeysState.status === 'idle' ? <p className="muted">{globalKeysState.message}</p> : null}
+              {globalKeysState.status === 'loading' ? <p className="muted">Loading global keys...</p> : null}
+              {globalKeysState.status === 'error' ? (
+                globalKeysState.unauthorized
+                  ? <p className="muted">Global key listing requires a global admin credential.</p>
+                  : <p className="error">{globalKeysState.message}</p>
+              ) : null}
+              {globalKeysState.status === 'ready' ? (
+                <ApiKeySections
+                  keys={globalKeysState.data}
+                  onRevoke={(apiKeyId) => void handleRevokeKey(apiKeyId)}
+                  busy={busyAction !== null}
+                  emptyMessage="No global admin keys yet."
+                />
+              ) : null}
+            </div>
           </div>
         </div>
       </section>
@@ -505,7 +729,7 @@ export function App() {
                   <input value={createTableDraft.cacheTtlSeconds} onChange={(event) => setCreateTableDraft((current) => ({ ...current, cacheTtlSeconds: event.target.value }))} />
                 </label>
                 <div className="actions">
-                  <button type="button" onClick={() => void handleCreateTable()}>
+                  <button type="button" onClick={() => void handleCreateTable()} disabled={busyAction !== null}>
                     Save table
                   </button>
                 </div>
@@ -543,10 +767,10 @@ export function App() {
                         ) : null}
                       </dl>
                       <div className="actions compactActions">
-                        <button type="button" onClick={() => void handleLoadCache(table.tableSlug)}>
+                        <button type="button" onClick={() => void handleLoadCache(table.tableSlug)} disabled={busyAction !== null}>
                           Load cache
                         </button>
-                        <button type="button" className="secondaryButton" onClick={() => void handleReindex(table.tableSlug)}>
+                        <button type="button" className="secondaryButton" onClick={() => void handleReindex(table.tableSlug)} disabled={busyAction !== null}>
                           Reindex
                         </button>
                       </div>

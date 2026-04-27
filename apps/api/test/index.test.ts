@@ -387,7 +387,9 @@ describe('api routes', () => {
         defaultGoogleCredential: 'configured',
         bootstrapAdmin: 'configured'
       },
-      notes: []
+      notes: [
+        'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
+      ]
     });
   });
 
@@ -668,8 +670,8 @@ describe('api routes', () => {
     );
 
     expect(env.__rateLimitRequests).toEqual([
-      { name: 'rate-limit:admin:bootstrap-admin', key: 'GET' },
-      { name: 'rate-limit:data:api-key:project-key', key: 'GET' }
+      { name: 'rate-limit:admin:bootstrap-admin', key: 'admin.projects.list' },
+      { name: 'rate-limit:data:api-key:project-key', key: 'rows.list' }
     ]);
   });
 
@@ -689,7 +691,7 @@ describe('api routes', () => {
 
     expect(response.status).toBe(401);
     expect(env.__rateLimitRequests).toEqual([
-      { name: 'rate-limit:admin:client:anonymous', key: 'GET' }
+      { name: 'rate-limit:admin:client:anonymous', key: 'admin.projects.list' }
     ]);
   });
 

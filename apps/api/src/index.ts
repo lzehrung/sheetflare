@@ -293,6 +293,75 @@ function getRateLimitRouteFamily(path: string) {
   return 'data';
 }
 
+function getRateLimitOperationKey(
+  path: string,
+  method: string
+) {
+  const normalizedMethod = method.toUpperCase();
+
+  if (path === '/v1/admin/projects' && normalizedMethod === 'GET') {
+    return 'admin.projects.list';
+  }
+
+  if (path === '/v1/admin/projects' && normalizedMethod === 'POST') {
+    return 'admin.projects.upsert';
+  }
+
+  if (path === '/v1/admin/keys' && normalizedMethod === 'GET') {
+    return 'admin.keys.list';
+  }
+
+  if (path === '/v1/admin/keys' && normalizedMethod === 'POST') {
+    return 'admin.keys.create';
+  }
+
+  if (path.startsWith('/v1/admin/projects/') && path.endsWith('/tables') && normalizedMethod === 'GET') {
+    return 'admin.tables.list';
+  }
+
+  if (path.startsWith('/v1/admin/projects/') && path.endsWith('/tables') && normalizedMethod === 'POST') {
+    return 'admin.tables.upsert';
+  }
+
+  if (path.startsWith('/v1/admin/projects/') && path.endsWith('/cache') && normalizedMethod === 'GET') {
+    return 'admin.cache.get';
+  }
+
+  if (path.startsWith('/v1/admin/projects/') && path.endsWith('/reindex') && normalizedMethod === 'POST') {
+    return 'admin.cache.reindex';
+  }
+
+  if (path.startsWith('/v1/admin/keys/') && normalizedMethod === 'DELETE') {
+    return 'admin.keys.revoke';
+  }
+
+  if (path.endsWith('/schema') && normalizedMethod === 'GET') {
+    return 'rows.schema.get';
+  }
+
+  if (/\/v1\/projects\/[^/]+\/tables\/[^/]+\/rows\/[^/]+$/.test(path) && normalizedMethod === 'GET') {
+    return 'rows.get';
+  }
+
+  if (/\/v1\/projects\/[^/]+\/tables\/[^/]+\/rows\/[^/]+$/.test(path) && normalizedMethod === 'PATCH') {
+    return 'rows.update';
+  }
+
+  if (/\/v1\/projects\/[^/]+\/tables\/[^/]+\/rows\/[^/]+$/.test(path) && normalizedMethod === 'DELETE') {
+    return 'rows.delete';
+  }
+
+  if (path.endsWith('/rows') && normalizedMethod === 'GET') {
+    return 'rows.list';
+  }
+
+  if (path.endsWith('/rows') && normalizedMethod === 'POST') {
+    return 'rows.create';
+  }
+
+  return `${getRateLimitRouteFamily(path)}.${normalizedMethod.toLowerCase()}`;
+}
+
 async function resolveRateLimitPrincipal(c: AppContext) {
   const authorization = c.req.header('authorization');
   if (authorization?.startsWith('Bearer ')) {
@@ -318,9 +387,10 @@ async function enforceRateLimit(c: AppContext) {
 
   const principal = await resolveRateLimitPrincipal(c);
   const routeFamily = getRateLimitRouteFamily(c.req.path);
+  const operationKey = getRateLimitOperationKey(c.req.path, c.req.method);
   const response = await doRpc<RateLimitDoResponse>(getRateLimitStub(c.env, `${routeFamily}:${principal}`), {
     type: 'rate-limit.check',
-    key: c.req.method,
+    key: operationKey,
     limit: config.maxRequests,
     windowSeconds: config.windowSeconds
   });
@@ -906,6 +976,8 @@ function createApp() {
     if (!hasBootstrapAdmin) {
       notes.push('Bootstrap admin bearer token is not configured. Admin access must use API keys.');
     }
+
+    notes.push('This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.');
 
     return c.json({
       ok: true,
