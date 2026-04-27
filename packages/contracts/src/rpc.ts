@@ -42,6 +42,7 @@ export type ControlPlaneDoResponse =
 
 export type ProjectDoRequest =
   | { type: 'project.get'; projectSlug: string }
+  | { type: 'project.access.get'; projectSlug: string }
   | { type: 'project.create'; input: CreateProjectInput }
   | { type: 'project.table.create'; projectSlug: string; input: CreateTableInput }
   | { type: 'project.table.list'; projectSlug: string }
@@ -50,6 +51,7 @@ export type ProjectDoRequest =
 
 export type ProjectDoResponse =
   | { type: 'project.get.result'; result: AdminGetProjectResult }
+  | { type: 'project.access.get.result'; result: { data: ProjectAccessResult } }
   | { type: 'project.create.result'; result: AdminGetProjectResult }
   | { type: 'project.table.create.result'; result: UpsertTableResult }
   | { type: 'project.table.list.result'; result: { data: UpsertTableResult['data'][] } }
@@ -67,15 +69,17 @@ export type ResolvedProjectTableResult = {
   resolvedConfig: ResolvedTableConfigSnapshot;
 };
 
+export type ProjectAccessResult = Pick<ProjectConfig, 'slug' | 'defaultAuthMode'>;
+
 export type TableDoRequest =
-  | { type: 'table.rows.list'; projectSlug: string; tableSlug: string; query: ListRowsQuery; resolvedConfig?: ResolvedTableConfigSnapshot }
-  | { type: 'table.row.get'; projectSlug: string; tableSlug: string; rowId: string; resolvedConfig?: ResolvedTableConfigSnapshot }
-  | { type: 'table.row.create'; projectSlug: string; tableSlug: string; input: CreateRowInput }
-  | { type: 'table.row.update'; projectSlug: string; tableSlug: string; rowId: string; input: UpdateRowInput }
-  | { type: 'table.row.delete'; projectSlug: string; tableSlug: string; rowId: string }
-  | { type: 'table.schema.get'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot }
-  | { type: 'table.cache.get'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot }
-  | { type: 'table.reindex'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot };
+  | { type: 'table.rows.list'; projectSlug: string; tableSlug: string; query: ListRowsQuery; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext }
+  | { type: 'table.row.get'; projectSlug: string; tableSlug: string; rowId: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext }
+  | { type: 'table.row.create'; projectSlug: string; tableSlug: string; input: CreateRowInput; requestContext?: TableRequestContext }
+  | { type: 'table.row.update'; projectSlug: string; tableSlug: string; rowId: string; input: UpdateRowInput; requestContext?: TableRequestContext }
+  | { type: 'table.row.delete'; projectSlug: string; tableSlug: string; rowId: string; requestContext?: TableRequestContext }
+  | { type: 'table.schema.get'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext }
+  | { type: 'table.cache.get'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext }
+  | { type: 'table.reindex'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext };
 
 export type TableDoResponse =
   | { type: 'table.rows.list.result'; result: ListRowsResult }
@@ -86,6 +90,12 @@ export type TableDoResponse =
   | { type: 'table.schema.get.result'; result: GetSchemaResult }
   | { type: 'table.cache.get.result'; result: GetTableCacheStatusResult }
   | { type: 'table.reindex.result'; result: ReindexTableResult };
+
+export type TableRequestContext = {
+  requestId: string;
+  route: string;
+  principal: string;
+};
 
 export type RateLimitDoRequest =
   | {

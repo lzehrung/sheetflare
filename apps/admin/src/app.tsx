@@ -106,14 +106,22 @@ export function App() {
     slug: '',
     name: '',
     spreadsheetId: '',
+    googleCredentialRef: '',
     defaultAuthMode: 'private'
   });
   const [createTableDraft, setCreateTableDraft] = useState<CreateTableDraft>({
     tableSlug: '',
     sheetTabName: '',
+    sheetGid: '',
     idColumn: '_id',
     indexedFields: 'name,status',
-    cacheTtlSeconds: '15'
+    headerRow: '1',
+    dataStartRow: '2',
+    cacheTtlSeconds: '15',
+    readEnabled: true,
+    createEnabled: true,
+    updateEnabled: true,
+    deleteEnabled: true
   });
   const [createKeyDraft, setCreateKeyDraft] = useState<CreateKeyDraft>({
     name: 'ops-key',
@@ -386,6 +394,9 @@ export function App() {
       slug: createProjectDraft.slug.trim(),
       name: createProjectDraft.name.trim(),
       spreadsheetId: createProjectDraft.spreadsheetId.trim(),
+      ...(createProjectDraft.googleCredentialRef.trim().length > 0
+        ? { googleCredentialRef: createProjectDraft.googleCredentialRef.trim() }
+        : {}),
       defaultAuthMode: createProjectDraft.defaultAuthMode
     };
     await runAction(`Saving project ${input.slug}`, async () => {
@@ -394,6 +405,7 @@ export function App() {
         slug: '',
         name: '',
         spreadsheetId: '',
+        googleCredentialRef: '',
         defaultAuthMode: 'private'
       });
       await refreshProjects();
@@ -406,21 +418,37 @@ export function App() {
     const tableInput = {
       tableSlug: createTableDraft.tableSlug.trim(),
       sheetTabName: createTableDraft.sheetTabName.trim(),
+      ...(createTableDraft.sheetGid.trim().length > 0
+        ? { sheetGid: Number(createTableDraft.sheetGid) }
+        : {}),
       idColumn: createTableDraft.idColumn.trim(),
       indexedFields: createTableDraft.indexedFields
         .split(',')
         .map((entry) => entry.trim())
         .filter(Boolean),
-      cacheTtlSeconds: Number(createTableDraft.cacheTtlSeconds)
+      headerRow: Number(createTableDraft.headerRow),
+      dataStartRow: Number(createTableDraft.dataStartRow),
+      cacheTtlSeconds: Number(createTableDraft.cacheTtlSeconds),
+      readEnabled: createTableDraft.readEnabled,
+      createEnabled: createTableDraft.createEnabled,
+      updateEnabled: createTableDraft.updateEnabled,
+      deleteEnabled: createTableDraft.deleteEnabled
     };
     await runAction(`Saving table ${selectedProjectSlug}/${tableInput.tableSlug}`, async () => {
       await createTable(credential, selectedProjectSlug, tableInput);
       setCreateTableDraft({
         tableSlug: '',
         sheetTabName: '',
+        sheetGid: '',
         idColumn: '_id',
         indexedFields: 'name,status',
-        cacheTtlSeconds: '15'
+        headerRow: '1',
+        dataStartRow: '2',
+        cacheTtlSeconds: '15',
+        readEnabled: true,
+        createEnabled: true,
+        updateEnabled: true,
+        deleteEnabled: true
       });
       await refreshProjectDetail(credential, selectedProjectSlug);
     });
@@ -593,6 +621,10 @@ export function App() {
               <input value={createProjectDraft.spreadsheetId} onChange={(event) => setCreateProjectDraft((current) => ({ ...current, spreadsheetId: event.target.value }))} />
             </label>
             <label className="field">
+              <span>Google Credential Ref</span>
+              <input value={createProjectDraft.googleCredentialRef} onChange={(event) => setCreateProjectDraft((current) => ({ ...current, googleCredentialRef: event.target.value }))} placeholder="default or named credential ref" />
+            </label>
+            <label className="field">
               <span>Default Auth Mode</span>
               <select value={createProjectDraft.defaultAuthMode} onChange={(event) => setCreateProjectDraft((current) => ({ ...current, defaultAuthMode: event.target.value as 'private' | 'public-read' }))}>
                 <option value="private">private</option>
@@ -717,6 +749,10 @@ export function App() {
                   <input value={createTableDraft.sheetTabName} onChange={(event) => setCreateTableDraft((current) => ({ ...current, sheetTabName: event.target.value }))} />
                 </label>
                 <label className="field">
+                  <span>Sheet GID</span>
+                  <input value={createTableDraft.sheetGid} onChange={(event) => setCreateTableDraft((current) => ({ ...current, sheetGid: event.target.value }))} placeholder="Optional numeric sheet id" />
+                </label>
+                <label className="field">
                   <span>ID Column</span>
                   <input value={createTableDraft.idColumn} onChange={(event) => setCreateTableDraft((current) => ({ ...current, idColumn: event.target.value }))} />
                 </label>
@@ -725,9 +761,35 @@ export function App() {
                   <input value={createTableDraft.indexedFields} onChange={(event) => setCreateTableDraft((current) => ({ ...current, indexedFields: event.target.value }))} />
                 </label>
                 <label className="field">
+                  <span>Header Row</span>
+                  <input value={createTableDraft.headerRow} onChange={(event) => setCreateTableDraft((current) => ({ ...current, headerRow: event.target.value }))} />
+                </label>
+                <label className="field">
+                  <span>Data Start Row</span>
+                  <input value={createTableDraft.dataStartRow} onChange={(event) => setCreateTableDraft((current) => ({ ...current, dataStartRow: event.target.value }))} />
+                </label>
+                <label className="field">
                   <span>Cache TTL Seconds</span>
                   <input value={createTableDraft.cacheTtlSeconds} onChange={(event) => setCreateTableDraft((current) => ({ ...current, cacheTtlSeconds: event.target.value }))} />
                 </label>
+                <div className="scopeGrid">
+                  <label className="toggle">
+                    <input type="checkbox" checked={createTableDraft.readEnabled} onChange={(event) => setCreateTableDraft((current) => ({ ...current, readEnabled: event.target.checked }))} />
+                    <span>Read enabled</span>
+                  </label>
+                  <label className="toggle">
+                    <input type="checkbox" checked={createTableDraft.createEnabled} onChange={(event) => setCreateTableDraft((current) => ({ ...current, createEnabled: event.target.checked }))} />
+                    <span>Create enabled</span>
+                  </label>
+                  <label className="toggle">
+                    <input type="checkbox" checked={createTableDraft.updateEnabled} onChange={(event) => setCreateTableDraft((current) => ({ ...current, updateEnabled: event.target.checked }))} />
+                    <span>Update enabled</span>
+                  </label>
+                  <label className="toggle">
+                    <input type="checkbox" checked={createTableDraft.deleteEnabled} onChange={(event) => setCreateTableDraft((current) => ({ ...current, deleteEnabled: event.target.checked }))} />
+                    <span>Delete enabled</span>
+                  </label>
+                </div>
                 <div className="actions">
                   <button type="button" onClick={() => void handleCreateTable()} disabled={busyAction !== null}>
                     Save table
@@ -790,15 +852,23 @@ type CreateProjectDraft = {
   slug: string;
   name: string;
   spreadsheetId: string;
+  googleCredentialRef: string;
   defaultAuthMode: 'private' | 'public-read';
 };
 
 type CreateTableDraft = {
   tableSlug: string;
   sheetTabName: string;
+  sheetGid: string;
   idColumn: string;
   indexedFields: string;
+  headerRow: string;
+  dataStartRow: string;
   cacheTtlSeconds: string;
+  readEnabled: boolean;
+  createEnabled: boolean;
+  updateEnabled: boolean;
+  deleteEnabled: boolean;
 };
 
 type CreateKeyDraft = {

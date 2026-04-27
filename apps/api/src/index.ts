@@ -44,6 +44,7 @@ import {
   type GetTableCacheStatusResult,
   type ListRowsQuery,
   type ListRowsResult,
+  type ProjectAccessResult,
   type ProjectDoResponse,
   type ResolvedProjectTableResult,
   type ReindexTableResult,
@@ -59,6 +60,7 @@ import type { Env } from './env';
 
 type AppVariables = {
   requestId: string;
+  authPrincipal?: string;
   verifiedApiKeyCredential?: {
     credential: string;
     record: ApiKeyPrincipal | null;
@@ -197,6 +199,8 @@ const notFoundResponse = {
 
 const adminSecurity = [{ bearerAuth: [] }];
 const optionalBearerSecurity = [{ bearerAuth: [] }, {}];
+const apiKeyTouchIntervalMs = 5 * 60 * 1000;
+const recentApiKeyTouches = new Map<string, number>();
 
 function getControlPlaneStub(env: Env) {
   return env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
@@ -422,9 +426,37 @@ async function hashApiKeySecret(secret: string) {
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
 }
 
+async function touchApiKeyIfNeeded(env: Env, apiKeyId: string) {
+  const nowMs = Date.now();
+  const lastTouchedAtMs = recentApiKeyTouches.get(apiKeyId);
+  if (lastTouchedAtMs !== undefined && nowMs - lastTouchedAtMs < apiKeyTouchIntervalMs) {
+    return;
+  }
+
+  recentApiKeyTouches.set(apiKeyId, nowMs);
+  await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
+    type: 'control.api-key.touch',
+    apiKeyId,
+    usedAt: new Date(nowMs).toISOString()
+  });
+}
+
+function getRequestPrincipal(c: AppContext) {
+  return c.get('authPrincipal') ?? 'anonymous';
+}
+
+function buildTableRequestContext(c: AppContext, route: string) {
+  return {
+    requestId: c.get('requestId'),
+    route,
+    principal: getRequestPrincipal(c)
+  };
+}
+
 async function authenticateRequest(c: AppContext): Promise<AuthContext> {
   const authorization = c.req.header('authorization');
   if (!authorization) {
+    c.set('authPrincipal', 'anonymous');
     return { kind: 'anonymous' };
   }
 
@@ -438,6 +470,7 @@ async function authenticateRequest(c: AppContext): Promise<AuthContext> {
   }
 
   if (c.env.ADMIN_BEARER_TOKEN && credential === c.env.ADMIN_BEARER_TOKEN) {
+    c.set('authPrincipal', 'bootstrap-admin');
     return { kind: 'bootstrap-admin' };
   }
 
@@ -446,11 +479,8 @@ async function authenticateRequest(c: AppContext): Promise<AuthContext> {
     throw new UnauthorizedError('Invalid API key.');
   }
 
-  await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
-    type: 'control.api-key.touch',
-    apiKeyId: record.id,
-    usedAt: new Date().toISOString()
-  });
+  c.set('authPrincipal', `api-key:${record.id}`);
+  await touchApiKeyIfNeeded(c.env, record.id);
 
   return {
     kind: 'api-key',
@@ -505,6 +535,18 @@ async function loadProject(c: { env: Env }, projectSlug: string) {
   });
 
   return (response as { type: 'project.get.result'; result: AdminGetProjectResult }).result;
+}
+
+async function loadProjectAccess(c: { env: Env }, projectSlug: string) {
+  const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, projectSlug), {
+    type: 'project.access.get',
+    projectSlug
+  });
+
+  return (response as {
+    type: 'project.access.get.result';
+    result: { data: ProjectAccessResult };
+  }).result.data;
 }
 
 async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug: string) {
@@ -907,7 +949,8 @@ function createApp() {
         path: c.req.path,
         status: c.res.status,
         durationMs: Date.now() - startedAt,
-        requestId: c.get('requestId')
+        requestId: c.get('requestId'),
+        principal: c.get('authPrincipal') ?? 'anonymous'
       })
     );
   });
@@ -924,6 +967,7 @@ function createApp() {
         method: c.req.method,
         path: c.req.path,
         requestId: c.get('requestId'),
+        principal: c.get('authPrincipal') ?? 'anonymous',
         errorName: error instanceof Error ? error.name : 'UnknownError',
         errorMessage: error instanceof Error ? error.message : String(error)
       })
@@ -1084,8 +1128,14 @@ function createApp() {
   app.openapi(listRowsRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
+    if (auth.kind === 'anonymous') {
+      const projectAccess = await loadProjectAccess(c, params.project).catch(() => null);
+      if (!projectAccess || projectAccess.defaultAuthMode !== 'public-read') {
+        throw new UnauthorizedError();
+      }
+    }
     const tableAccess = await loadProjectTable(c, params.project, params.table);
-    if (tableAccess.project.defaultAuthMode !== 'public-read') {
+    if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
       assertProjectScope(auth, 'table:read', params.project);
     }
     const query = parseListRowsQuery(c);
@@ -1094,7 +1144,8 @@ function createApp() {
       projectSlug: params.project,
       tableSlug: params.table,
       query,
-      resolvedConfig: tableAccess.resolvedConfig
+      resolvedConfig: tableAccess.resolvedConfig,
+      requestContext: buildTableRequestContext(c, 'rows.list')
     });
 
     return c.json((response as { type: 'table.rows.list.result'; result: ListRowsResult }).result);
@@ -1103,15 +1154,22 @@ function createApp() {
   app.openapi(getSchemaRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
+    if (auth.kind === 'anonymous') {
+      const projectAccess = await loadProjectAccess(c, params.project).catch(() => null);
+      if (!projectAccess || projectAccess.defaultAuthMode !== 'public-read') {
+        throw new UnauthorizedError();
+      }
+    }
     const tableAccess = await loadProjectTable(c, params.project, params.table);
-    if (tableAccess.project.defaultAuthMode !== 'public-read') {
+    if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
       assertProjectScope(auth, 'table:read', params.project);
     }
     const response = await doRpc<TableDoResponse>(getTableStub(c.env, params.project, params.table), {
       type: 'table.schema.get',
       projectSlug: params.project,
       tableSlug: params.table,
-      resolvedConfig: tableAccess.resolvedConfig
+      resolvedConfig: tableAccess.resolvedConfig,
+      requestContext: buildTableRequestContext(c, 'rows.schema.get')
     });
 
     return c.json((response as { type: 'table.schema.get.result'; result: GetSchemaResult }).result);
@@ -1137,7 +1195,8 @@ function createApp() {
     const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
       type: 'table.reindex',
       projectSlug: project,
-      tableSlug: table
+      tableSlug: table,
+      requestContext: buildTableRequestContext(c, 'admin.cache.reindex')
     });
 
     return c.json((response as { type: 'table.reindex.result'; result: ReindexTableResult }).result);
@@ -1146,8 +1205,14 @@ function createApp() {
   app.openapi(getRowRoute, async (c) => {
     const params = parsePathParams(c, rowParamsSchema);
     const auth = await authenticateRequest(c);
+    if (auth.kind === 'anonymous') {
+      const projectAccess = await loadProjectAccess(c, params.project).catch(() => null);
+      if (!projectAccess || projectAccess.defaultAuthMode !== 'public-read') {
+        throw new UnauthorizedError();
+      }
+    }
     const tableAccess = await loadProjectTable(c, params.project, params.table);
-    if (tableAccess.project.defaultAuthMode !== 'public-read') {
+    if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
       assertProjectScope(auth, 'table:read', params.project);
     }
     const response = await doRpc<TableDoResponse>(getTableStub(c.env, params.project, params.table), {
@@ -1155,7 +1220,8 @@ function createApp() {
       projectSlug: params.project,
       tableSlug: params.table,
       rowId: params.id,
-      resolvedConfig: tableAccess.resolvedConfig
+      resolvedConfig: tableAccess.resolvedConfig,
+      requestContext: buildTableRequestContext(c, 'rows.get')
     });
 
     return c.json((response as { type: 'table.row.get.result'; result: GetRowResult }).result);
@@ -1170,7 +1236,8 @@ function createApp() {
       type: 'table.row.create',
       projectSlug: project,
       tableSlug: table,
-      input
+      input,
+      requestContext: buildTableRequestContext(c, 'rows.create')
     });
 
     return c.json((response as { type: 'table.row.create.result'; result: CreateRowResult }).result, 201);
@@ -1186,7 +1253,8 @@ function createApp() {
       projectSlug: project,
       tableSlug: table,
       rowId: id,
-      input
+      input,
+      requestContext: buildTableRequestContext(c, 'rows.update')
     });
 
     return c.json((response as { type: 'table.row.update.result'; result: UpdateRowResult }).result);
@@ -1200,7 +1268,8 @@ function createApp() {
       type: 'table.row.delete',
       projectSlug: project,
       tableSlug: table,
-      rowId: id
+      rowId: id,
+      requestContext: buildTableRequestContext(c, 'rows.delete')
     });
 
     return c.json(

@@ -25,11 +25,12 @@ class FakeDurableObjectNamespace {
   }
 }
 
-function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
+function createEnv(options?: { rateLimitAllowed?: boolean; defaultAuthMode?: 'private' | 'public-read' }): Env {
   const rateLimitRequests: Array<{ name: string; key: string }> = [];
   const projectRequests: string[] = [];
-  const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown> }> = [];
+  const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }> = [];
   let verifyApiKeyCallCount = 0;
+  let apiKeyTouchCallCount = 0;
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
     const body = (await request.json()) as { type: string; apiKeyId?: string; hash?: string; projectSlug?: string | null };
 
@@ -49,6 +50,16 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
                   revokedAt: null,
                   lastUsedAt: null
                 }
+              : body.apiKeyId === 'touch-key'
+                ? {
+                    id: 'touch-key',
+                    projectSlug: 'demo',
+                    name: 'Touch key',
+                    scopes: ['table:read'],
+                    createdAt: '2026-04-26T00:00:00.000Z',
+                    revokedAt: null,
+                    lastUsedAt: null
+                  }
               : body.apiKeyId === 'project-admin-key'
                 ? {
                     id: 'project-admin-key',
@@ -65,6 +76,7 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
     }
 
     if (body.type === 'control.api-key.touch') {
+      apiKeyTouchCallCount += 1;
       return Response.json({
         type: 'control.api-key.touch.result',
         result: { ok: true }
@@ -122,6 +134,16 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
                 revokedAt: null,
                 lastUsedAt: null
               }
+            : body.apiKeyId === 'touch-key'
+              ? {
+                  id: 'touch-key',
+                  projectSlug: 'demo',
+                  name: 'Touch key',
+                  scopes: ['table:read'],
+                  createdAt: '2026-04-26T00:00:00.000Z',
+                  revokedAt: null,
+                  lastUsedAt: null
+                }
             : body.apiKeyId === 'global-key'
               ? {
                   id: 'global-key',
@@ -184,9 +206,21 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
             googleCredentialRef: 'default',
             createdAt: '2026-04-26T00:00:00.000Z',
             updatedAt: '2026-04-26T00:00:00.000Z',
-            defaultAuthMode: 'private'
+            defaultAuthMode: options?.defaultAuthMode ?? 'private'
           },
           tables: [table]
+        }
+      });
+    }
+
+    if (body.type === 'project.access.get') {
+      return Response.json({
+        type: 'project.access.get.result',
+        result: {
+          data: {
+            slug: 'demo',
+            defaultAuthMode: options?.defaultAuthMode ?? 'private'
+          }
         }
       });
     }
@@ -200,7 +234,7 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
               slug: 'demo',
               spreadsheetId: 'sheet-1',
               googleCredentialRef: 'default',
-              defaultAuthMode: 'private'
+              defaultAuthMode: options?.defaultAuthMode ?? 'private'
             },
             table,
             resolvedConfig: {
@@ -227,10 +261,12 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
       input?: { values?: Record<string, unknown> };
       query?: unknown;
       resolvedConfig?: Record<string, unknown>;
+      requestContext?: Record<string, unknown>;
     };
     tableRequests.push({
       type: body.type,
-      resolvedConfig: body.resolvedConfig
+      resolvedConfig: body.resolvedConfig,
+      requestContext: body.requestContext
     });
 
     if (body.type === 'table.row.create') {
@@ -326,6 +362,10 @@ function createEnv(options?: { rateLimitAllowed?: boolean }): Env {
   });
   Object.defineProperty(env, '__verifyApiKeyCallCount', {
     get: () => verifyApiKeyCallCount,
+    enumerable: false
+  });
+  Object.defineProperty(env, '__apiKeyTouchCallCount', {
+    get: () => apiKeyTouchCallCount,
     enumerable: false
   });
 
@@ -463,6 +503,46 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  it('does not leak private project existence on anonymous read routes', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __projectRequests: string[] };
+
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {},
+      env
+    );
+
+    expect(response.status).toBe(401);
+    expect(env.__projectRequests).toContain('project.access.get');
+    expect(env.__projectRequests).not.toContain('project.table.resolve');
+  });
+
+  it('allows anonymous reads for public-read projects and still resolves the table', async () => {
+    const app = createApp();
+    const env = createEnv({ defaultAuthMode: 'public-read' }) as Env & {
+      __projectRequests: string[];
+      __tableRequests: Array<{ type: string; requestContext?: Record<string, unknown> }>;
+    };
+
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {},
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(env.__projectRequests).toContain('project.access.get');
+    expect(env.__projectRequests).toContain('project.table.resolve');
+    expect(env.__tableRequests[0]).toMatchObject({
+      type: 'table.rows.list',
+      requestContext: {
+        route: 'rows.list',
+        principal: 'anonymous'
+      }
+    });
   });
 
   it('returns 429 when the edge rate limit is exceeded', async () => {
@@ -713,6 +793,34 @@ describe('api routes', () => {
     expect(env.__verifyApiKeyCallCount).toBe(1);
   });
 
+  it('throttles api-key touch updates across repeated requests from the same key', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __apiKeyTouchCallCount: number };
+
+    const first = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          authorization: 'Bearer sfk_touch-key.any-secret'
+        }
+      },
+      env
+    );
+    const second = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          authorization: 'Bearer sfk_touch-key.any-secret'
+        }
+      },
+      env
+    );
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(env.__apiKeyTouchCallCount).toBe(1);
+  });
+
   it('passes resolved table config to public-read route durable-object calls', async () => {
     const app = createApp();
     const env = createEnv() as Env & {
@@ -731,14 +839,20 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(env.__tableRequests).toContainEqual({
+    expect(env.__tableRequests[0]).toMatchObject({
       type: 'table.rows.list',
-      resolvedConfig: expect.objectContaining({
+      resolvedConfig: {
         projectSlug: 'demo',
         tableSlug: 'users',
         spreadsheetId: 'sheet-1',
         googleCredentialRef: 'default'
-      })
+      }
+    });
+    expect(env.__tableRequests[0]).toMatchObject({
+      requestContext: {
+        route: 'rows.list',
+        principal: 'api-key:project-key'
+      }
     });
     expect(env.__projectRequests).toContain('project.table.resolve');
     expect(env.__projectRequests).not.toContain('project.get');
