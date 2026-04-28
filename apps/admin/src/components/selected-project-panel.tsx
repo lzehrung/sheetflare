@@ -111,8 +111,8 @@ export function SelectedProjectPanel({
           <details className="disclosureCard">
             <summary className="disclosureSummary">
               <div>
-                <h3>Create Table</h3>
-                <p className="muted compact">Add a new tab mapping for this spreadsheet.</p>
+                <h3>Connect Existing Tab</h3>
+                <p className="muted compact">Choose an API resource name and connect it to an existing Google Sheets tab.</p>
               </div>
               <span className="badge badgeMuted">Optional</span>
             </summary>
@@ -120,12 +120,13 @@ export function SelectedProjectPanel({
               {tableFieldErrors.form ? <p className="error">{tableFieldErrors.form}</p> : null}
               <div className="formGrid">
                 <label className="field">
-                  <span>Table Slug</span>
+                  <span>Table Entity</span>
                   <input
                     value={createTableDraft.tableSlug}
                     onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, tableSlug: event.target.value })}
                     aria-invalid={tableFieldErrors.tableSlug ? 'true' : 'false'}
                   />
+                  <p className="fieldMessage muted">This is the API resource name, for example <code>tasks</code>.</p>
                   {renderFieldError(tableFieldErrors.tableSlug)}
                 </label>
                 <label className="field">
@@ -135,6 +136,7 @@ export function SelectedProjectPanel({
                     onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, sheetTabName: event.target.value })}
                     aria-invalid={tableFieldErrors.sheetTabName ? 'true' : 'false'}
                   />
+                  <p className="fieldMessage muted">Use the existing tab name from Google Sheets, for example <code>Tasks</code>.</p>
                   {renderFieldError(tableFieldErrors.sheetTabName)}
                 </label>
                 <label className="field">

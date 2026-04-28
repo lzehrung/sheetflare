@@ -712,13 +712,13 @@ describe('App', () => {
     });
     fireEvent.click(screen.getByText('Save and load'));
 
-    await screen.findByText('Create Table');
+    await screen.findByText('Connect Existing Tab');
     const selectedProjectSection = screen.getByText('Project');
     const panel = selectedProjectSection.closest('section');
     expect(panel).not.toBeNull();
 
     const scope = within(panel as HTMLElement);
-    const tableSlugInput = scope.getByText('Table Slug').closest('label')?.querySelector('input');
+    const tableSlugInput = scope.getByText('Table Entity').closest('label')?.querySelector('input');
     const headerRowInput = scope.getByText('Header Row').closest('label')?.querySelector('input');
     const dataStartRowInput = scope.getByText('Data Start Row').closest('label')?.querySelector('input');
     const cacheTtlInput = scope.getByText('Cache TTL Seconds').closest('label')?.querySelector('input');
