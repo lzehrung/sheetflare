@@ -14,6 +14,7 @@ import {
   type ResolvedProjectTableResult,
   type TableConfig
 } from '@sheetflare/contracts';
+import { normalizeFieldRules } from '@sheetflare/domain';
 import type { CloudflareEnv } from '../types';
 import { doRpc } from '../rpc';
 import { defaultGoogleCredentialRef, resolveGoogleCredential } from '../google-credentials';
@@ -36,6 +37,7 @@ type TableRow = {
   id_column: string;
   indexed_fields: string;
   read_only_fields: string;
+  field_rules: string;
   header_row: number;
   data_start_row: number;
   read_enabled: number;
@@ -100,6 +102,7 @@ export class ProjectDO {
         id_column TEXT NOT NULL,
         indexed_fields TEXT NOT NULL,
         read_only_fields TEXT NOT NULL DEFAULT '[]',
+        field_rules TEXT NOT NULL DEFAULT '{}',
         header_row INTEGER NOT NULL,
         data_start_row INTEGER NOT NULL,
         read_enabled INTEGER NOT NULL,
@@ -115,6 +118,14 @@ export class ProjectDO {
 
     try {
       this.ctx.storage.sql.exec(`ALTER TABLE tables ADD COLUMN read_only_fields TEXT NOT NULL DEFAULT '[]'`);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('duplicate column name')) {
+        throw error;
+      }
+    }
+
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE tables ADD COLUMN field_rules TEXT NOT NULL DEFAULT '{}'`);
     } catch (error) {
       if (!(error instanceof Error) || !error.message.includes('duplicate column name')) {
         throw error;
@@ -236,27 +247,31 @@ export class ProjectDO {
     const idColumn = normalizeOptionalFieldName(input.idColumn) ?? '_id';
     const indexedFields = this.buildIndexedFields(idColumn, normalizeFieldNames(input.indexedFields ?? []));
     const readOnlyFields = normalizeFieldNames(input.readOnlyFields ?? []);
+    const fieldRules = normalizeFieldRules(input.fieldRules);
     const headerRow = input.headerRow ?? 1;
     const dataStartRow = input.dataStartRow ?? 2;
 
     this.validateTableConfig({
+      idColumn,
       headerRow,
       dataStartRow,
-      indexedFields
+      indexedFields,
+      fieldRules
     });
 
     this.ctx.storage.sql.exec(
       `
       INSERT INTO tables (
-        project_slug, table_slug, sheet_tab_name, sheet_gid, id_column, indexed_fields, read_only_fields, header_row, data_start_row,
+        project_slug, table_slug, sheet_tab_name, sheet_gid, id_column, indexed_fields, read_only_fields, field_rules, header_row, data_start_row,
         read_enabled, create_enabled, update_enabled, delete_enabled, cache_ttl_seconds, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(project_slug, table_slug) DO UPDATE SET
         sheet_tab_name = excluded.sheet_tab_name,
         sheet_gid = excluded.sheet_gid,
         id_column = excluded.id_column,
         indexed_fields = excluded.indexed_fields,
         read_only_fields = excluded.read_only_fields,
+        field_rules = excluded.field_rules,
         header_row = excluded.header_row,
         data_start_row = excluded.data_start_row,
         read_enabled = excluded.read_enabled,
@@ -273,6 +288,7 @@ export class ProjectDO {
       idColumn,
       JSON.stringify(indexedFields),
       JSON.stringify(readOnlyFields),
+      JSON.stringify(fieldRules),
       headerRow,
       dataStartRow,
       (input.readEnabled ?? true) ? 1 : 0,
@@ -383,6 +399,7 @@ export class ProjectDO {
       idColumn: row.id_column,
       indexedFields: JSON.parse(row.indexed_fields) as string[],
       readOnlyFields: JSON.parse(row.read_only_fields) as string[],
+      fieldRules: JSON.parse(row.field_rules) as TableConfig['fieldRules'],
       headerRow: row.header_row,
       dataStartRow: row.data_start_row,
       readEnabled: Boolean(row.read_enabled),
@@ -401,9 +418,11 @@ export class ProjectDO {
   }
 
   private validateTableConfig(config: {
+    idColumn: string;
     headerRow: number;
     dataStartRow: number;
     indexedFields: string[];
+    fieldRules: TableConfig['fieldRules'];
   }) {
     if (config.dataStartRow <= config.headerRow) {
       throw new BadRequestError('dataStartRow must be greater than headerRow.', {
@@ -420,6 +439,21 @@ export class ProjectDO {
           maxIndexedFieldCount
         }
       );
+    }
+
+    for (const [fieldName, rule] of Object.entries(config.fieldRules)) {
+      if (rule.enum && rule.enum.length === 0) {
+        throw new BadRequestError(`Field rule enum for ${fieldName} must include at least one value.`, {
+          field: fieldName
+        });
+      }
+
+      if (rule.unique && !config.indexedFields.includes(fieldName)) {
+        throw new BadRequestError(`Unique field ${fieldName} must also be indexed.`, {
+          field: fieldName,
+          indexedFields: config.indexedFields
+        });
+      }
     }
   }
 

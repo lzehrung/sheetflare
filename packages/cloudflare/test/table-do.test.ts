@@ -345,8 +345,18 @@ describe('TableDO', () => {
           tableSlug: 'users',
           sheetTabName: 'Users',
           idColumn: ' _id ',
-          indexedFields: [' status ', 'status', '  '],
-          readOnlyFields: [' derived ', 'derived', '  ']
+          indexedFields: [' email ', ' status ', 'status', '  '],
+          readOnlyFields: [' derived ', 'derived', '  '],
+          fieldRules: {
+            ' email ': {
+              required: true,
+              unique: true,
+              normalize: ['trim', 'lowercase', 'trim']
+            },
+            ' status ': {
+              enum: [' active ', 'active', 'pending']
+            }
+          }
         }
       }
     );
@@ -356,8 +366,18 @@ describe('TableDO', () => {
       result: {
         data: {
           idColumn: '_id',
-          indexedFields: ['_id', 'status'],
-          readOnlyFields: ['derived']
+          indexedFields: ['_id', 'email', 'status'],
+          readOnlyFields: ['derived'],
+          fieldRules: {
+            email: {
+              required: true,
+              unique: true,
+              normalize: ['trim', 'lowercase']
+            },
+            status: {
+              enum: ['active', 'pending']
+            }
+          }
         }
       }
     });
@@ -377,6 +397,44 @@ describe('TableDO', () => {
           googleCredentialRef: 'secondary'
         }
       }
+    });
+  });
+
+  it('rejects unique field rules when the field is not indexed', async () => {
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await expect(
+      doRpc<ProjectDoResponse>(
+        env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+        {
+          type: 'project.table.create',
+          projectSlug: 'demo',
+          input: {
+            tableSlug: 'users',
+            sheetTabName: 'Users',
+            fieldRules: {
+              email: {
+                unique: true
+              }
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Unique field email must also be indexed.'
     });
   });
 
@@ -521,6 +579,224 @@ describe('TableDO', () => {
       name: 'BadRequestError',
       message: 'Write payload contains read-only columns.'
     });
+  });
+
+  it('rejects create writes that violate required, enum, and type field rules', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'email', 'status', 'score', 'dueDate']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['email', 'status', 'score', 'dueDate'],
+          fieldRules: {
+            email: {
+              required: true,
+              unique: true,
+              normalize: ['trim', 'lowercase']
+            },
+            status: {
+              enum: ['pending', 'active']
+            },
+            score: {
+              type: 'number'
+            },
+            dueDate: {
+              type: 'date'
+            }
+          }
+        }
+      }
+    );
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.row.create',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          input: {
+            values: {
+              email: '   ',
+              status: 'disabled',
+              score: '10',
+              dueDate: '05/01/2026'
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Table row failed validation.',
+      details: {
+        fieldErrors: [
+          { field: 'email', code: 'REQUIRED' },
+          { field: 'status', code: 'ENUM' },
+          { field: 'score', code: 'TYPE' },
+          { field: 'dueDate', code: 'TYPE' }
+        ]
+      }
+    });
+  });
+
+  it('normalizes unique fields before storing and rejects duplicate creates with a conflict', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'email'],
+        ['row-1', 'alice@example.com']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['email'],
+          cacheTtlSeconds: 3600,
+          fieldRules: {
+            email: {
+              required: true,
+              unique: true,
+              normalize: ['trim', 'lowercase']
+            }
+          }
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.row.create',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          input: {
+            values: {
+              email: ' Alice@Example.com '
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'ConflictError',
+      message: 'email must be unique.'
+    });
+  });
+
+  it('normalizes constrained patch values before writing successful updates', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'email'],
+        ['row-1', 'alice@example.com']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['email'],
+          cacheTtlSeconds: 3600,
+          fieldRules: {
+            email: {
+              required: true,
+              unique: true,
+              normalize: ['trim', 'lowercase']
+            }
+          }
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.update',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-1',
+        input: {
+          values: {
+            email: ' Alice+Ops@Example.com '
+          }
+        }
+      }
+    );
+
+    expect(sheet.rows[1]).toEqual(['row-1', 'alice+ops@example.com']);
   });
 
   it('preserves read-only columns during sparse updates', async () => {

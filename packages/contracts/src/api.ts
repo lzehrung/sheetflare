@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { createApiKeyInputSchema, createApiKeyResultSchema, apiKeyPrincipalSchema } from './auth';
-import { defaultAuthModeSchema, maxIndexedFieldCount, projectConfigSchema, tableConfigSchema } from './project';
+import { defaultAuthModeSchema, fieldRulesSchema, maxIndexedFieldCount, projectConfigSchema, tableConfigSchema } from './project';
 import { apiKeyIdSchema, projectSlugSchema, rowIdSchema, spreadsheetIdSchema, tableSlugSchema } from './ids';
 import { rowEnvelopeSchema, rowRecordSchema, tableCacheStatusSchema, tableSchemaSchema } from './table';
 
@@ -19,6 +19,7 @@ export const createTableInputSchema = z.object({
   idColumn: z.string().min(1).optional(),
   indexedFields: z.array(z.string().min(1)).max(maxIndexedFieldCount).optional(),
   readOnlyFields: z.array(z.string().min(1)).optional(),
+  fieldRules: fieldRulesSchema.optional(),
   headerRow: z.number().int().positive().optional(),
   dataStartRow: z.number().int().positive().optional(),
   readEnabled: z.boolean().optional(),

@@ -3,6 +3,16 @@ import { projectSlugSchema, sheetTabNameSchema, spreadsheetIdSchema, tableSlugSc
 
 export const defaultAuthModeSchema = z.enum(['private', 'public-read']);
 export const maxIndexedFieldCount = 32;
+export const fieldNormalizationSchema = z.enum(['trim', 'lowercase']);
+export const constrainedFieldTypeSchema = z.enum(['string', 'number', 'boolean', 'date', 'datetime']);
+export const fieldRuleSchema = z.object({
+  required: z.boolean().optional(),
+  type: constrainedFieldTypeSchema.optional(),
+  enum: z.array(z.string().min(1)).min(1).optional(),
+  unique: z.boolean().optional(),
+  normalize: z.array(fieldNormalizationSchema).min(1).optional()
+});
+export const fieldRulesSchema = z.record(z.string().min(1), fieldRuleSchema);
 
 function validateTableLayout(
   value: {
@@ -47,6 +57,7 @@ export const tableConfigSchema = z.object({
   idColumn: z.string().min(1),
   indexedFields: z.array(z.string().min(1)).max(maxIndexedFieldCount),
   readOnlyFields: z.array(z.string().min(1)).default([]),
+  fieldRules: fieldRulesSchema.default({}),
   headerRow: z.number().int().positive(),
   dataStartRow: z.number().int().positive(),
   readEnabled: z.boolean(),
@@ -60,3 +71,7 @@ export const tableConfigSchema = z.object({
 
 export type ProjectConfig = z.infer<typeof projectConfigSchema>;
 export type TableConfig = z.infer<typeof tableConfigSchema>;
+export type FieldNormalization = z.infer<typeof fieldNormalizationSchema>;
+export type ConstrainedFieldType = z.infer<typeof constrainedFieldTypeSchema>;
+export type FieldRule = z.infer<typeof fieldRuleSchema>;
+export type FieldRules = z.infer<typeof fieldRulesSchema>;

@@ -1,6 +1,7 @@
 import {
   AppError,
   BadRequestError,
+  ConflictError,
   ForbiddenError,
   type RefreshTableCacheResult,
   type GetTableCacheStatusResult,
@@ -16,6 +17,7 @@ import {
   type ResolvedTableConfigSnapshot
 } from '@sheetflare/contracts';
 import {
+  applyFieldRuleNormalization,
   assertQueryableField,
   buildFilterSql,
   compareStableStrings,
@@ -32,7 +34,8 @@ import {
   inferTableSchema,
   normalizeRowValues,
   parseManagedRowId,
-  pickKnownColumns
+  pickKnownColumns,
+  validateFieldRules
 } from '@sheetflare/domain';
 import { GoogleSheetsService, type GoogleSheetTableConfig } from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from '../types';
@@ -148,6 +151,16 @@ function assertKnownWriteColumns(
   });
 }
 
+function buildValidationErrorDetails(violations: ReturnType<typeof validateFieldRules>) {
+  return {
+    fieldErrors: violations.map((violation) => ({
+      field: violation.field,
+      code: violation.code,
+      message: violation.message
+    }))
+  };
+}
+
 function buildCacheConfigSignature(config: {
   spreadsheetId: string;
   googleCredentialRef: string;
@@ -155,6 +168,7 @@ function buildCacheConfigSignature(config: {
   sheetGid?: number | undefined;
   idColumn: string;
   indexedFields: readonly string[];
+  fieldRules: ResolvedTableConfig['fieldRules'];
   headerRow: number;
   dataStartRow: number;
 }) {
@@ -165,6 +179,7 @@ function buildCacheConfigSignature(config: {
     sheetGid: config.sheetGid ?? null,
     idColumn: config.idColumn,
     indexedFields: [...config.indexedFields].sort((left, right) => left.localeCompare(right)),
+    fieldRules: config.fieldRules,
     headerRow: config.headerRow,
     dataStartRow: config.dataStartRow
   });
@@ -468,7 +483,7 @@ export class TableDO {
       throw new ForbiddenError(`Creates are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensurePointOperationReady(config);
+    await this.ensureMutationValidationReady(config);
     const normalizedInput = normalizeRowValues(input);
     assertWritableFields(normalizedInput, config.readOnlyFields);
     const headers = await this.getHeaders(config, {
@@ -500,10 +515,14 @@ export class TableDO {
     });
     const { values, ignoredKeys } = pickKnownColumns(normalizedValues, headers);
     assertKnownWriteColumns(ignoredKeys, headers);
+    const normalizedCandidate = applyFieldRuleNormalization(values, config.fieldRules);
+    normalizedCandidate[config.idColumn] = rowId;
+    this.assertFieldRules(normalizedCandidate, config);
+    this.assertUniqueFieldRules(normalizedCandidate, config);
     const sheets = this.getSheetsClient(config);
     const rowNumber = await sheets.appendRowSkeleton(config, rowId);
     const writableValues = Object.fromEntries(
-      Object.entries(values).filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
+      Object.entries(normalizedCandidate).filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
     ) as Partial<RowRecord>;
     await sheets.writeRowPatch(config, rowNumber, writableValues);
     const liveRow = await sheets.readSingleRow(config, rowNumber);
@@ -526,7 +545,7 @@ export class TableDO {
       throw new ForbiddenError(`Updates are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensurePointOperationReady(config);
+    await this.ensureMutationValidationReady(config);
     const headers = await this.getHeaders(config, {
       bypassCache: true
     });
@@ -541,8 +560,18 @@ export class TableDO {
     );
     const { values, ignoredKeys } = pickKnownColumns(normalizePartialRowValues(patchValues), headers);
     assertKnownWriteColumns(ignoredKeys, headers);
+    const normalizedCandidate = applyFieldRuleNormalization(normalizeRowValues({
+      ...existingRow.values,
+      ...values,
+      [config.idColumn]: rowId
+    }), config.fieldRules);
+    normalizedCandidate[config.idColumn] = rowId;
+    this.assertFieldRules(normalizedCandidate, config);
+    this.assertUniqueFieldRules(normalizedCandidate, config, rowId);
     const writableValues = Object.fromEntries(
-      Object.entries(values).filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
+      Object.entries(values)
+        .filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
+        .map(([fieldName]) => [fieldName, normalizedCandidate[fieldName]])
     ) as Partial<RowRecord>;
     const sheets = this.getSheetsClient(config);
     await sheets.writeRowPatch(config, existingRow.rowNumber, writableValues);
@@ -658,6 +687,15 @@ export class TableDO {
 
     await this.syncCache(config.projectSlug, config.tableSlug, { force: true });
     return this.getCacheState(config);
+  }
+
+  private async ensureMutationValidationReady(config: ResolvedTableConfig) {
+    if (this.hasUniqueFieldRules(config)) {
+      await this.ensureQueryCacheReady(config);
+      return;
+    }
+
+    await this.ensurePointOperationReady(config);
   }
 
   private async syncCache(
@@ -980,6 +1018,7 @@ export class TableDO {
           sheetGid: config.sheetGid,
           idColumn: config.idColumn,
           indexedFields: config.indexedFields,
+          fieldRules: config.fieldRules,
           headerRow: config.headerRow,
           dataStartRow: config.dataStartRow
         })
@@ -1447,6 +1486,71 @@ export class TableDO {
         Object.entries(row.values).filter(([key]) => allowed.has(key))
       )
     }));
+  }
+
+  private hasUniqueFieldRules(config: ResolvedTableConfig) {
+    return Object.values(config.fieldRules).some((rule) => rule.unique);
+  }
+
+  private assertFieldRules(values: RowRecord, config: ResolvedTableConfig) {
+    const violations = validateFieldRules(values, config.fieldRules);
+    if (violations.length > 0) {
+      throw new BadRequestError('Table row failed validation.', buildValidationErrorDetails(violations));
+    }
+  }
+
+  private assertUniqueFieldRules(values: RowRecord, config: ResolvedTableConfig, currentRowId?: string) {
+    for (const [fieldName, rule] of Object.entries(config.fieldRules)) {
+      if (!rule.unique) {
+        continue;
+      }
+
+      const value = values[fieldName];
+      if (value === undefined || value === null || (typeof value === 'string' && value.length === 0)) {
+        continue;
+      }
+
+      if (Array.isArray(value)) {
+        throw new BadRequestError(`Unique field ${fieldName} must be a scalar value.`, {
+          field: fieldName
+        });
+      }
+
+      const conflictingRowIds = this.findCachedRowIdsByIndexedValue(fieldName, value)
+        .filter((rowId) => rowId !== currentRowId);
+      if (conflictingRowIds.length > 0) {
+        throw new ConflictError(`${fieldName} must be unique.`, {
+          field: fieldName,
+          value,
+          conflictingRowIds
+        });
+      }
+    }
+  }
+
+  private findCachedRowIdsByIndexedValue(fieldName: string, value: string | number | boolean) {
+    const normalized = this.normalizeIndexedCellValue(value);
+    const rows = this.ctx.storage.sql.exec(
+      `
+      SELECT row_id
+      FROM cached_cells
+      WHERE field_name = ?
+        AND value_kind = ?
+        AND ((value_text IS NULL AND ? IS NULL) OR value_text = ?)
+        AND ((value_number IS NULL AND ? IS NULL) OR value_number = ?)
+        AND ((value_boolean IS NULL AND ? IS NULL) OR value_boolean = ?)
+      `,
+      fieldName,
+      normalized.valueKind,
+      normalized.valueText,
+      normalized.valueText,
+      normalized.valueNumber,
+      normalized.valueNumber,
+      normalized.valueBoolean,
+      normalized.valueBoolean
+    ).toArray() as Array<{ row_id: string }>;
+
+    return rows.map((row) => row.row_id);
   }
 
   private assertRequestedFields(fields: string[] | null, headers: readonly string[]) {
