@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "build": "wrangler deploy --dry-run",
+    "deploy:staging": "npx wrangler@4.85.0 deploy --config wrangler.jsonc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests"
   },
