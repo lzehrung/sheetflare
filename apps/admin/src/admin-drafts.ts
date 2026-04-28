@@ -2,6 +2,7 @@ import {
   adminCreateApiKeyInputSchema,
   createProjectInputSchema,
   createTableInputSchema,
+  fieldRulesSchema,
   slugPattern,
   type AdminCreateApiKeyInput,
   type ApiScope,
@@ -24,6 +25,7 @@ export type CreateTableDraft = {
   idColumn: string;
   indexedFields: string;
   readOnlyFields: string;
+  fieldRulesJson: string;
   headerRow: string;
   dataStartRow: string;
   cacheTtlSeconds: string;
@@ -69,6 +71,7 @@ export const initialCreateTableDraft: CreateTableDraft = {
   idColumn: '_id',
   indexedFields: 'name,status',
   readOnlyFields: '',
+  fieldRulesJson: '',
   headerRow: '1',
   dataStartRow: '2',
   cacheTtlSeconds: '15',
@@ -155,6 +158,36 @@ function collectSchemaErrors<FieldName extends string>(
   }
 }
 
+function parseJsonObject(value: string, fieldLabel: string) {
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    return {
+      value: undefined,
+      error: null
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(normalized) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return {
+        value: undefined,
+        error: `${fieldLabel} must be a JSON object.`
+      };
+    }
+
+    return {
+      value: parsed as Record<string, unknown>,
+      error: null
+    };
+  } catch {
+    return {
+      value: undefined,
+      error: `${fieldLabel} must be valid JSON.`
+    };
+  }
+}
+
 export function validateCreateProjectDraft(
   draft: CreateProjectDraft
 ): DraftValidation<CreateProjectInput, ProjectFieldName> {
@@ -222,6 +255,10 @@ export function validateCreateTableDraft(
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
+  const fieldRules = parseJsonObject(draft.fieldRulesJson, 'Field rules');
+  const parsedFieldRules = fieldRules.value !== undefined
+    ? fieldRulesSchema.safeParse(fieldRules.value)
+    : null;
 
   if (tableSlug.length === 0) {
     fieldErrors.tableSlug = 'Table slug is required.';
@@ -256,6 +293,14 @@ export function validateCreateTableDraft(
     fieldErrors.cacheTtlSeconds = cacheTtlSeconds.error;
   }
 
+  if (fieldRules.error) {
+    fieldErrors.fieldRulesJson = fieldRules.error;
+  }
+
+  if (parsedFieldRules && !parsedFieldRules.success) {
+    fieldErrors.fieldRulesJson = parsedFieldRules.error.issues[0]?.message ?? 'Field rules are invalid.';
+  }
+
   let parsedSheetGid: number | undefined;
   if (sheetGid.length > 0) {
     const parsed = parseNonNegativeInteger(sheetGid, 'Sheet GID');
@@ -281,6 +326,7 @@ export function validateCreateTableDraft(
     idColumn,
     indexedFields,
     readOnlyFields,
+    ...(parsedFieldRules?.success ? { fieldRules: parsedFieldRules.data } : {}),
     headerRow: headerRow.value ?? undefined,
     dataStartRow: dataStartRow.value ?? undefined,
     cacheTtlSeconds: cacheTtlSeconds.value ?? undefined,

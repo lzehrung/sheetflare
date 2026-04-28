@@ -177,6 +177,18 @@ export function SelectedProjectPanel({
                   />
                   {renderFieldError(tableFieldErrors.readOnlyFields)}
                 </label>
+                <label className="field fieldSpanFull">
+                  <span>Field Rules</span>
+                  <textarea
+                    value={createTableDraft.fieldRulesJson}
+                    onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, fieldRulesJson: event.target.value })}
+                    placeholder={'{"email":{"required":true,"unique":true,"normalize":["trim","lowercase"]},"status":{"enum":["pending","active"]},"score":{"type":"number"}}'}
+                    aria-invalid={tableFieldErrors.fieldRulesJson ? 'true' : 'false'}
+                    rows={6}
+                  />
+                  <p className="fieldMessage muted">Optional JSON object for required, unique, enum, normalize, and type rules.</p>
+                  {renderFieldError(tableFieldErrors.fieldRulesJson)}
+                </label>
                 <label className="field">
                   <span>Header Row</span>
                   <input
@@ -258,6 +270,7 @@ export function SelectedProjectPanel({
                 const cacheStatusError = cacheStatusErrorByTable[cacheKey] ?? null;
                 const cacheStatusLoading = cacheStatusLoadingByTable[cacheKey] ?? false;
                 const readOnlyFields = table.readOnlyFields ?? [];
+                const constrainedFields = Object.keys(table.fieldRules ?? {});
 
                 return (
                   <article key={table.tableSlug} className="card" data-testid={`table-card-${table.tableSlug}`}>
@@ -284,6 +297,10 @@ export function SelectedProjectPanel({
                       <div>
                         <dt>Read-only</dt>
                         <dd>{readOnlyFields.length > 0 ? readOnlyFields.join(', ') : 'none'}</dd>
+                      </div>
+                      <div>
+                        <dt>Rules</dt>
+                        <dd>{constrainedFields.length > 0 ? constrainedFields.join(', ') : 'none'}</dd>
                       </div>
                       <div>
                         <dt>Write Access</dt>

@@ -149,6 +149,7 @@ For each project, add a table config such as:
 - `idColumn`: `_id`
 - `indexedFields`: `["name","status"]`
 - `readOnlyFields`: optional, for formula-derived or operator-managed columns
+- `fieldRules`: optional, for required, unique, enum, normalize, and type validation
 - `cacheTtlSeconds`: `15` or `60` for staging
 
 Set `defaultAuthMode`:
@@ -172,6 +173,15 @@ The admin UI can now:
 If a sheet contains formula-derived columns that the API must never overwrite, configure them in `readOnlyFields`.
 Those columns remain readable through the API, but create/update requests cannot target them.
 
+If a table needs basic write-time validation, add `fieldRules`.
+Typical uses:
+
+- required fields such as `email`
+- finite string options such as `status`
+- unique values such as `email`
+- normalized fields such as trimmed/lowercased email addresses
+- typed fields such as numeric scores or ISO dates
+
 If you want a repeatable bootstrap instead of clicking through the admin UI, set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON` and run `npm run ops:bootstrap`.
 
 Template:
@@ -193,6 +203,19 @@ $env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
           "idColumn": "_id",
           "indexedFields": ["name", "status"],
           "readOnlyFields": ["status_label"],
+          "fieldRules": {
+            "email": {
+              "required": true,
+              "unique": true,
+              "normalize": ["trim", "lowercase"]
+            },
+            "status": {
+              "enum": ["pending", "active"]
+            },
+            "score": {
+              "type": "number"
+            }
+          },
           "cacheTtlSeconds": 15
         }
       ]
@@ -210,6 +233,16 @@ $env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
           "idColumn": "_id",
           "indexedFields": ["name", "status"],
           "readOnlyFields": ["status_label"],
+          "fieldRules": {
+            "email": {
+              "required": true,
+              "unique": true,
+              "normalize": ["trim", "lowercase"]
+            },
+            "status": {
+              "enum": ["pending", "active"]
+            }
+          },
           "cacheTtlSeconds": 15
         }
       ]

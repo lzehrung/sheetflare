@@ -117,6 +117,17 @@ body {
   font: inherit;
 }
 
+.field textarea {
+  width: 100%;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--ink);
+  font: inherit;
+  resize: vertical;
+}
+
 .field select {
   width: 100%;
   padding: 0.95rem 1rem;
@@ -128,6 +139,7 @@ body {
 }
 
 .field input:focus,
+.field textarea:focus,
 .field select:focus,
 .selectableCard:focus {
   outline: 2px solid rgba(216, 95, 56, 0.2);

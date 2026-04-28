@@ -44,7 +44,8 @@ describe('validateCreateTableDraft', () => {
       tableSlug: 'users',
       sheetTabName: 'Users',
       sheetGid: '12',
-      readOnlyFields: 'derived,status_label'
+      readOnlyFields: 'derived,status_label',
+      fieldRulesJson: '{"email":{"required":true,"unique":true,"normalize":["trim","lowercase"]}}'
     });
 
     expect(result.isValid).toBe(true);
@@ -54,11 +55,30 @@ describe('validateCreateTableDraft', () => {
         sheetTabName: 'Users',
         sheetGid: 12,
         readOnlyFields: ['derived', 'status_label'],
+        fieldRules: {
+          email: {
+            required: true,
+            unique: true,
+            normalize: ['trim', 'lowercase']
+          }
+        },
         headerRow: 1,
         dataStartRow: 2,
         cacheTtlSeconds: 15
       })
     );
+  });
+
+  it('surfaces invalid field-rules JSON before submit', () => {
+    const result = validateCreateTableDraft({
+      ...initialCreateTableDraft,
+      tableSlug: 'users',
+      sheetTabName: 'Users',
+      fieldRulesJson: '{invalid'
+    });
+
+    expect(result.isValid).toBe(false);
+    expect(result.fieldErrors.fieldRulesJson).toBe('Field rules must be valid JSON.');
   });
 });
 
