@@ -69,6 +69,39 @@ type ResolvedTableConfig = GoogleSheetTableConfig & {
   googleCredentialRef: string;
 };
 
+function assertWritableFields(
+  values: Partial<RowRecord>,
+  readOnlyFields: readonly string[]
+) {
+  const readOnlyFieldSet = new Set(readOnlyFields);
+  const attemptedReadOnlyFields = Object.keys(values).filter((field) => readOnlyFieldSet.has(field));
+  if (attemptedReadOnlyFields.length > 0) {
+    throw new BadRequestError('Write payload contains read-only columns.', {
+      attemptedReadOnlyFields,
+      readOnlyFields
+    });
+  }
+}
+
+function normalizePartialRowValues(input: Partial<RowRecord>): RowRecord {
+  const normalized: RowRecord = {};
+
+  for (const [rawKey, value] of Object.entries(input)) {
+    if (value === undefined) {
+      continue;
+    }
+
+    const key = rawKey.trim();
+    if (!key) {
+      continue;
+    }
+
+    normalized[key] = value;
+  }
+
+  return normalized;
+}
+
 function getCacheTableNames(kind: 'live' | 'staging') {
   return kind === 'live'
     ? {
@@ -437,6 +470,7 @@ export class TableDO {
 
     await this.ensurePointOperationReady(config);
     const normalizedInput = normalizeRowValues(input);
+    assertWritableFields(normalizedInput, config.readOnlyFields);
     const headers = await this.getHeaders(config, {
       bypassCache: true
     });
@@ -466,28 +500,22 @@ export class TableDO {
     });
     const { values, ignoredKeys } = pickKnownColumns(normalizedValues, headers);
     assertKnownWriteColumns(ignoredKeys, headers);
-    const rowNumber = await this.getSheetsClient(config).appendRow(config, headers, values);
+    const sheets = this.getSheetsClient(config);
+    const rowNumber = await sheets.appendRowSkeleton(config, rowId);
+    const writableValues = Object.fromEntries(
+      Object.entries(values).filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
+    ) as Partial<RowRecord>;
+    await sheets.writeRowPatch(config, rowNumber, writableValues);
+    const liveRow = await sheets.readSingleRow(config, rowNumber);
 
     this.upsertRowIndex(rowId, rowNumber);
-    this.upsertCachedRow({
-      id: rowId,
-      rowNumber,
-      values
-    });
-    this.upsertCachedCells(config, {
-      id: rowId,
-      rowNumber,
-      values
-    });
+    this.upsertCachedRow(liveRow);
+    this.upsertCachedCells(config, liveRow);
     this.refreshSchemaMeta(headers);
     this.markCacheFreshAfterMutation(config, headers);
 
     return {
-      data: {
-        id: rowId,
-        rowNumber,
-        values
-      },
+      data: liveRow,
       ignoredKeys: []
     };
   }
@@ -502,6 +530,7 @@ export class TableDO {
     const headers = await this.getHeaders(config, {
       bypassCache: true
     });
+    assertWritableFields(patch, config.readOnlyFields);
     const existingRow = await this.resolveRowById(config, rowId);
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
@@ -510,34 +539,22 @@ export class TableDO {
     const patchValues = Object.fromEntries(
       Object.entries(patch).filter((entry): entry is [string, RowRecord[string]] => entry[1] !== undefined)
     );
-    const mergedValues = normalizeRowValues({
-      ...existingRow.values,
-      ...patchValues,
-      [config.idColumn]: rowId
-    });
-    const { values, ignoredKeys } = pickKnownColumns(mergedValues, headers);
+    const { values, ignoredKeys } = pickKnownColumns(normalizePartialRowValues(patchValues), headers);
     assertKnownWriteColumns(ignoredKeys, headers);
-    await this.getSheetsClient(config).writeRow(config, existingRow.rowNumber, headers, values);
+    const writableValues = Object.fromEntries(
+      Object.entries(values).filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
+    ) as Partial<RowRecord>;
+    const sheets = this.getSheetsClient(config);
+    await sheets.writeRowPatch(config, existingRow.rowNumber, writableValues);
+    const liveRow = await sheets.readSingleRow(config, existingRow.rowNumber);
     this.upsertRowIndex(rowId, existingRow.rowNumber);
-    this.upsertCachedRow({
-      id: rowId,
-      rowNumber: existingRow.rowNumber,
-      values
-    });
-    this.upsertCachedCells(config, {
-      id: rowId,
-      rowNumber: existingRow.rowNumber,
-      values
-    });
+    this.upsertCachedRow(liveRow);
+    this.upsertCachedCells(config, liveRow);
     this.refreshSchemaMeta(headers);
     this.markCacheFreshAfterMutation(config, headers);
 
     return {
-      data: {
-        id: rowId,
-        rowNumber: existingRow.rowNumber,
-        values
-      },
+      data: liveRow,
       ignoredKeys: []
     };
   }

@@ -33,6 +33,10 @@ type GoogleAppendResponse = {
   };
 };
 
+type GoogleBatchValuesUpdateResponse = {
+  totalUpdatedRows?: number;
+};
+
 type GoogleSpreadsheetMetadataResponse = {
   sheets?: Array<{
     properties?: {
@@ -149,6 +153,49 @@ function columnNumberToA1(columnNumber: number): string {
   }
 
   return result;
+}
+
+type ColumnValueSegment = {
+  startColumnNumber: number;
+  values: Array<string | number | boolean>;
+};
+
+function buildColumnValueSegments(
+  layout: HeaderLayout,
+  values: Partial<RowRecord>
+): ColumnValueSegment[] {
+  const segments: ColumnValueSegment[] = [];
+  let currentSegment: ColumnValueSegment | null = null;
+
+  for (const entry of layout.entries) {
+    if (!Object.prototype.hasOwnProperty.call(values, entry.name)) {
+      currentSegment = null;
+      continue;
+    }
+
+    const nextValue = values[entry.name];
+    if (nextValue === undefined) {
+      currentSegment = null;
+      continue;
+    }
+
+    const serializedValue = serializeSheetCell(nextValue);
+    if (
+      currentSegment &&
+      currentSegment.startColumnNumber + currentSegment.values.length === entry.columnNumber
+    ) {
+      currentSegment.values.push(serializedValue);
+      continue;
+    }
+
+    currentSegment = {
+      startColumnNumber: entry.columnNumber,
+      values: [serializedValue]
+    };
+    segments.push(currentSegment);
+  }
+
+  return segments;
 }
 
 function parseUpdatedRangeRowNumber(updatedRange: string | undefined): number {
@@ -401,6 +448,33 @@ export class GoogleSheetsService {
     return parseUpdatedRangeRowNumber(body.updates?.updatedRange);
   }
 
+  async appendRowSkeleton(config: GoogleSheetTableConfig, rowId: string): Promise<number> {
+    const layout = await this.readHeaderLayout(config);
+    const accessToken = await this.getAccessToken();
+    const idColumnLetter = columnNumberToA1(layout.idColumnNumber);
+    const range = `${escapeSheetName(config.sheetTabName)}!${idColumnLetter}${config.dataStartRow}:${idColumnLetter}`;
+    const response = await this.authorizedRequest(
+      `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          values: [[serializeSheetCell(rowId)]]
+        })
+      },
+      {
+        operation: `append row skeleton for ${config.projectSlug}/${config.tableSlug}`,
+        maxRetries: 0
+      }
+    );
+
+    const body = await this.parseJson<GoogleAppendResponse>(response);
+    return parseUpdatedRangeRowNumber(body.updates?.updatedRange);
+  }
+
   async writeRow(config: GoogleSheetTableConfig, rowNumber: number, headers: readonly string[], values: RowRecord): Promise<void> {
     const accessToken = await this.getAccessToken();
     const endColumn = columnNumberToA1(headers.length);
@@ -424,6 +498,47 @@ export class GoogleSheetsService {
     );
 
     await this.parseJson(response);
+  }
+
+  async writeRowPatch(
+    config: GoogleSheetTableConfig,
+    rowNumber: number,
+    values: Partial<RowRecord>
+  ): Promise<void> {
+    const layout = await this.readHeaderLayout(config);
+    const segments = buildColumnValueSegments(layout, values);
+    if (segments.length === 0) {
+      return;
+    }
+
+    const accessToken = await this.getAccessToken();
+    const response = await this.authorizedRequest(
+      `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values:batchUpdate`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          valueInputOption: 'RAW',
+          data: segments.map((segment) => {
+            const startColumn = columnNumberToA1(segment.startColumnNumber);
+            const endColumn = columnNumberToA1(segment.startColumnNumber + segment.values.length - 1);
+            return {
+              range: `${escapeSheetName(config.sheetTabName)}!${startColumn}${rowNumber}:${endColumn}${rowNumber}`,
+              values: [segment.values]
+            };
+          })
+        })
+      },
+      {
+        operation: `patch row for ${config.projectSlug}/${config.tableSlug}`,
+        maxRetries: 0
+      }
+    );
+
+    await this.parseJson<GoogleBatchValuesUpdateResponse>(response);
   }
 
   async deleteRow(config: GoogleSheetTableConfig, rowNumber: number): Promise<void> {

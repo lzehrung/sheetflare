@@ -157,6 +157,16 @@ export function SelectedProjectPanel({
                 {renderFieldError(tableFieldErrors.indexedFields)}
               </label>
               <label className="field">
+                <span>Read-only Fields</span>
+                <input
+                  value={createTableDraft.readOnlyFields}
+                  onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, readOnlyFields: event.target.value })}
+                  placeholder="Optional comma-separated columns"
+                  aria-invalid={tableFieldErrors.readOnlyFields ? 'true' : 'false'}
+                />
+                {renderFieldError(tableFieldErrors.readOnlyFields)}
+              </label>
+              <label className="field">
                 <span>Header Row</span>
                 <input
                   value={createTableDraft.headerRow}
@@ -233,6 +243,7 @@ export function SelectedProjectPanel({
                 const cache = cacheStateByTable[cacheKey] ?? null;
                 const cacheStatusError = cacheStatusErrorByTable[cacheKey] ?? null;
                 const cacheStatusLoading = cacheStatusLoadingByTable[cacheKey] ?? false;
+                const readOnlyFields = table.readOnlyFields ?? [];
                 return (
                   <article key={table.tableSlug} className="card" data-testid={`table-card-${table.tableSlug}`}>
                     <div className="cardTop">
@@ -250,6 +261,10 @@ export function SelectedProjectPanel({
                       <div>
                         <dt>Indexed</dt>
                         <dd>{table.indexedFields.join(', ')}</dd>
+                      </div>
+                      <div>
+                        <dt>Read-only</dt>
+                        <dd>{readOnlyFields.length > 0 ? readOnlyFields.join(', ') : 'none'}</dd>
                       </div>
                       <div>
                         <dt>Write Access</dt>

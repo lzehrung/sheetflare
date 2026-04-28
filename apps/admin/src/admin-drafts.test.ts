@@ -43,7 +43,8 @@ describe('validateCreateTableDraft', () => {
       ...initialCreateTableDraft,
       tableSlug: 'users',
       sheetTabName: 'Users',
-      sheetGid: '12'
+      sheetGid: '12',
+      readOnlyFields: 'derived,status_label'
     });
 
     expect(result.isValid).toBe(true);
@@ -52,6 +53,7 @@ describe('validateCreateTableDraft', () => {
         tableSlug: 'users',
         sheetTabName: 'Users',
         sheetGid: 12,
+        readOnlyFields: ['derived', 'status_label'],
         headerRow: 1,
         dataStartRow: 2,
         cacheTtlSeconds: 15
