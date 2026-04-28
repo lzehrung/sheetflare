@@ -148,6 +148,7 @@ For each project, add a table config such as:
 - `sheetTabName`: `Users`
 - `idColumn`: `_id`
 - `indexedFields`: `["name","status"]`
+- `readOnlyFields`: optional, for formula-derived or operator-managed columns
 - `cacheTtlSeconds`: `15` or `60` for staging
 
 Set `defaultAuthMode`:
@@ -167,6 +168,9 @@ The admin UI can now:
 - mint scoped API keys
 - inspect cache status
 - force reindex
+
+If a sheet contains formula-derived columns that the API must never overwrite, configure them in `readOnlyFields`.
+Those columns remain readable through the API, but create/update requests cannot target them.
 
 If you want a repeatable bootstrap instead of clicking through the admin UI, set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON` and run `npm run ops:bootstrap`.
 
@@ -188,6 +192,7 @@ $env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
           "sheetTabName": "Users",
           "idColumn": "_id",
           "indexedFields": ["name", "status"],
+          "readOnlyFields": ["status_label"],
           "cacheTtlSeconds": 15
         }
       ]
@@ -204,6 +209,7 @@ $env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
           "sheetTabName": "Users",
           "idColumn": "_id",
           "indexedFields": ["name", "status"],
+          "readOnlyFields": ["status_label"],
           "cacheTtlSeconds": 15
         }
       ]
