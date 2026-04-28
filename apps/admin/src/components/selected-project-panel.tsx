@@ -1,4 +1,4 @@
-import type { ProjectConfig, TableCacheStatus, TableConfig } from '@sheetflare/contracts';
+import type { ProjectConfig, SpreadsheetTab, TableCacheStatus, TableConfig } from '@sheetflare/contracts';
 import type { CreateTableDraft } from '../admin-drafts';
 import { CacheStatusSummary } from './cache-status-summary';
 
@@ -8,14 +8,39 @@ type ProjectDetailState =
   | { status: 'ready'; project: ProjectConfig; tables: TableConfig[] }
   | { status: 'error'; message: string };
 
+type SpreadsheetTabsState =
+  | { status: 'idle'; message: string }
+  | { status: 'loading' }
+  | { status: 'ready'; data: SpreadsheetTab[] }
+  | { status: 'error'; message: string };
+
+type TabInspectionState =
+  | { status: 'idle'; message: string }
+  | { status: 'loading'; tabName: string; headerRow: number }
+  | { status: 'ready'; data: { tab: SpreadsheetTab; headerRow: number; headers: string[] } }
+  | { status: 'error'; message: string; tabName: string; headerRow: number };
+
+type ProjectHealthSummary = {
+  healthy: number;
+  stale: number;
+  error: number;
+  loading: number;
+  pending: number;
+};
+
 type SelectedProjectPanelProps = {
   selectedProjectSlug: string | null;
   detailState: ProjectDetailState;
+  projectHealthSummary: ProjectHealthSummary | null;
   createTableDraft: CreateTableDraft;
   tableFieldErrors: Partial<Record<keyof CreateTableDraft | 'form', string>>;
   cacheStateByTable: Record<string, TableCacheStatus | null>;
   cacheStatusErrorByTable: Record<string, string | null>;
   cacheStatusLoadingByTable: Record<string, boolean>;
+  spreadsheetTabsState: SpreadsheetTabsState;
+  tabInspectionState: TabInspectionState;
+  tableSetupOpen: boolean;
+  onTableSetupOpenChange: (next: boolean) => void;
   onCreateTableDraftChange: (next: CreateTableDraft) => void;
   onCreateTable: () => void;
   onLoadCache: (tableSlug: string) => void;
@@ -31,14 +56,151 @@ function renderFieldError(message: string | undefined) {
   return message ? <p className="fieldMessage error">{message}</p> : null;
 }
 
+function parseCsv(value: string) {
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function readFieldRuleKeys(value: string) {
+  const normalized = value.trim();
+  if (!normalized) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(normalized) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return [];
+    }
+
+    return Object.keys(parsed);
+  } catch {
+    return [];
+  }
+}
+
+function renderValidationHints(draft: CreateTableDraft, tabInspectionState: TabInspectionState) {
+  if (tabInspectionState.status !== 'ready') {
+    return null;
+  }
+
+  const headers = new Set(tabInspectionState.data.headers);
+  const hints: string[] = [];
+  const idColumn = draft.idColumn.trim();
+  if (idColumn && !headers.has(idColumn)) {
+    hints.push(`ID column ${idColumn} is not present in the detected headers.`);
+  }
+
+  for (const field of parseCsv(draft.indexedFields)) {
+    if (!headers.has(field)) {
+      hints.push(`Indexed field ${field} is not present in the detected headers.`);
+    }
+  }
+
+  for (const field of parseCsv(draft.readOnlyFields)) {
+    if (!headers.has(field)) {
+      hints.push(`Read-only field ${field} is not present in the detected headers.`);
+    }
+  }
+
+  for (const field of readFieldRuleKeys(draft.fieldRulesJson)) {
+    if (!headers.has(field)) {
+      hints.push(`Field rule ${field} is not present in the detected headers.`);
+    }
+  }
+
+  if (hints.length === 0) {
+    return (
+      <p className="success compact">
+        Header row {tabInspectionState.data.headerRow} detected {tabInspectionState.data.headers.length} columns:
+        {' '}
+        <code>{tabInspectionState.data.headers.join(', ')}</code>
+      </p>
+    );
+  }
+
+  return (
+    <div className="inlineNotice warningNotice">
+      <p className="warningTitle">Check these fields before saving:</p>
+      <ul className="warningList">
+        {hints.map((hint) => (
+          <li key={hint}>{hint}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function renderSpreadsheetTabField(
+  draft: CreateTableDraft,
+  fieldError: string | undefined,
+  spreadsheetTabsState: SpreadsheetTabsState,
+  onChange: (next: CreateTableDraft) => void
+) {
+  if (spreadsheetTabsState.status === 'ready' && spreadsheetTabsState.data.length > 0) {
+    const selectedTab = spreadsheetTabsState.data.find((tab) => tab.title === draft.sheetTabName) ?? null;
+    return (
+      <label className="field">
+        <span>Sheet Tab</span>
+        <select
+          value={draft.sheetTabName}
+          onChange={(event) => {
+            const nextTabName = event.target.value;
+            const matchedTab = spreadsheetTabsState.data.find((tab) => tab.title === nextTabName) ?? null;
+            onChange({
+              ...draft,
+              sheetTabName: nextTabName,
+              sheetGid: matchedTab ? String(matchedTab.sheetGid) : draft.sheetGid
+            });
+          }}
+          aria-invalid={fieldError ? 'true' : 'false'}
+        >
+          <option value="">Select a tab</option>
+          {spreadsheetTabsState.data.map((tab) => (
+            <option key={tab.sheetGid} value={tab.title}>
+              {tab.title}
+            </option>
+          ))}
+        </select>
+        <p className="fieldMessage muted">
+          {selectedTab
+            ? `Using existing tab ${selectedTab.title} with sheet id ${selectedTab.sheetGid}.`
+            : `Choose from ${spreadsheetTabsState.data.length} discovered tabs.`}
+        </p>
+        {renderFieldError(fieldError)}
+      </label>
+    );
+  }
+
+  return (
+    <label className="field">
+      <span>Sheet Tab</span>
+      <input
+        value={draft.sheetTabName}
+        onChange={(event) => onChange({ ...draft, sheetTabName: event.target.value })}
+        aria-invalid={fieldError ? 'true' : 'false'}
+      />
+      <p className="fieldMessage muted">Use the existing tab name from Google Sheets, for example <code>Tasks</code>.</p>
+      {renderFieldError(fieldError)}
+    </label>
+  );
+}
+
 export function SelectedProjectPanel({
   selectedProjectSlug,
   detailState,
+  projectHealthSummary,
   createTableDraft,
   tableFieldErrors,
   cacheStateByTable,
   cacheStatusErrorByTable,
   cacheStatusLoadingByTable,
+  spreadsheetTabsState,
+  tabInspectionState,
+  tableSetupOpen,
+  onTableSetupOpenChange,
   onCreateTableDraftChange,
   onCreateTable,
   onLoadCache,
@@ -106,9 +268,26 @@ export function SelectedProjectPanel({
                 <dd>{detailState.project.googleCredentialRef}</dd>
               </div>
             </dl>
+            {projectHealthSummary ? (
+              <div className="healthSummary">
+                <span className="badge healthBadge">Healthy {projectHealthSummary.healthy}</span>
+                <span className="badge badgeMuted">Stale {projectHealthSummary.stale}</span>
+                <span className="badge badgeMuted">Errors {projectHealthSummary.error}</span>
+                {projectHealthSummary.loading > 0 ? (
+                  <span className="badge badgeMuted">Loading {projectHealthSummary.loading}</span>
+                ) : null}
+                {projectHealthSummary.pending > 0 ? (
+                  <span className="badge badgeMuted">Pending {projectHealthSummary.pending}</span>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
-          <details className="disclosureCard">
+          <details
+            className="disclosureCard"
+            open={tableSetupOpen}
+            onToggle={(event) => onTableSetupOpenChange((event.currentTarget as HTMLDetailsElement).open)}
+          >
             <summary className="disclosureSummary">
               <div>
                 <h3>Connect Existing Tab</h3>
@@ -118,6 +297,8 @@ export function SelectedProjectPanel({
             </summary>
             <div className="stack compactStack">
               {tableFieldErrors.form ? <p className="error">{tableFieldErrors.form}</p> : null}
+              {spreadsheetTabsState.status === 'loading' ? <p className="muted compact">Loading spreadsheet tabs...</p> : null}
+              {spreadsheetTabsState.status === 'error' ? <p className="error compact">{spreadsheetTabsState.message}</p> : null}
               <div className="formGrid">
                 <label className="field">
                   <span>Table Entity</span>
@@ -129,24 +310,21 @@ export function SelectedProjectPanel({
                   <p className="fieldMessage muted">This is the API resource name, for example <code>tasks</code>.</p>
                   {renderFieldError(tableFieldErrors.tableSlug)}
                 </label>
-                <label className="field">
-                  <span>Sheet Tab</span>
-                  <input
-                    value={createTableDraft.sheetTabName}
-                    onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, sheetTabName: event.target.value })}
-                    aria-invalid={tableFieldErrors.sheetTabName ? 'true' : 'false'}
-                  />
-                  <p className="fieldMessage muted">Use the existing tab name from Google Sheets, for example <code>Tasks</code>.</p>
-                  {renderFieldError(tableFieldErrors.sheetTabName)}
-                </label>
+                {renderSpreadsheetTabField(
+                  createTableDraft,
+                  tableFieldErrors.sheetTabName,
+                  spreadsheetTabsState,
+                  onCreateTableDraftChange
+                )}
                 <label className="field">
                   <span>Sheet GID</span>
                   <input
                     value={createTableDraft.sheetGid}
                     onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, sheetGid: event.target.value })}
-                    placeholder="Optional numeric sheet id"
+                    placeholder="Filled automatically when a tab is selected"
                     aria-invalid={tableFieldErrors.sheetGid ? 'true' : 'false'}
                   />
+                  <p className="fieldMessage muted">The numeric sheet id is discovered from the selected tab when available.</p>
                   {renderFieldError(tableFieldErrors.sheetGid)}
                 </label>
                 <label className="field">
@@ -163,6 +341,7 @@ export function SelectedProjectPanel({
                   <input
                     value={createTableDraft.indexedFields}
                     onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, indexedFields: event.target.value })}
+                    placeholder="Optional comma-separated columns"
                     aria-invalid={tableFieldErrors.indexedFields ? 'true' : 'false'}
                   />
                   {renderFieldError(tableFieldErrors.indexedFields)}
@@ -217,6 +396,15 @@ export function SelectedProjectPanel({
                   {renderFieldError(tableFieldErrors.cacheTtlSeconds)}
                 </label>
               </div>
+              {tabInspectionState.status === 'loading' ? (
+                <p className="muted compact">
+                  Reading header row {tabInspectionState.headerRow} from {tabInspectionState.tabName}...
+                </p>
+              ) : null}
+              {tabInspectionState.status === 'error' ? (
+                <p className="error compact">{tabInspectionState.message}</p>
+              ) : null}
+              {renderValidationHints(createTableDraft, tabInspectionState)}
               <div className="scopeGrid">
                 <label className="toggle">
                   <input
@@ -260,7 +448,14 @@ export function SelectedProjectPanel({
           </details>
 
           {detailState.tables.length === 0 ? (
-            <p className="muted">No tables configured yet. Open Create Table when you are ready to add one.</p>
+            <div className="emptyState">
+              <p className="muted">No tables configured yet. Connect an existing tab to expose it through the API.</p>
+              <div className="actions">
+                <button type="button" onClick={() => onTableSetupOpenChange(true)} disabled={busy}>
+                  Connect first tab
+                </button>
+              </div>
+            </div>
           ) : null}
           {detailState.tables.length > 0 ? (
             <div className="cards">

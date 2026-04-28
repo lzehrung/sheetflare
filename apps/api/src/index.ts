@@ -6,9 +6,12 @@ import {
   adminCreateApiKeyInputSchema,
   adminCreateApiKeyResultSchema,
   adminGetProjectResultSchema,
+  adminInspectSpreadsheetTabResultSchema,
   adminListApiKeysResultSchema,
   adminListProjectsResultSchema,
+  adminListSpreadsheetTabsResultSchema,
   adminProjectParamsSchema,
+  adminProjectSpreadsheetTabParamsSchema,
   adminProjectTableParamsSchema,
   apiKeyParamsSchema,
   createProjectInputSchema,
@@ -34,6 +37,8 @@ import {
   type AdminGetProjectResult,
   type AdminListApiKeysResult,
   type AdminListProjectsResult,
+  type AdminInspectSpreadsheetTabResult,
+  type AdminListSpreadsheetTabsResult,
   type ApiKeyPrincipal,
   type ApiScope,
   type ControlPlaneDoResponse,
@@ -169,6 +174,16 @@ const listApiKeysQuerySchema = z.object({
       in: 'query'
     },
     example: 'demo'
+  })
+});
+
+const inspectSpreadsheetTabQuerySchema = z.object({
+  headerRow: z.coerce.number().int().positive().optional().openapi({
+    param: {
+      name: 'headerRow',
+      in: 'query'
+    },
+    example: 1
   })
 });
 
@@ -329,6 +344,14 @@ function getRateLimitOperationKey(
 
   if (path.startsWith('/v1/admin/projects/') && path.endsWith('/tables') && normalizedMethod === 'POST') {
     return 'admin.tables.upsert';
+  }
+
+  if (path.startsWith('/v1/admin/projects/') && path.endsWith('/spreadsheet/tabs') && normalizedMethod === 'GET') {
+    return 'admin.spreadsheet.tabs.list';
+  }
+
+  if (/\/v1\/admin\/projects\/[^/]+\/spreadsheet\/tabs\/[^/]+$/.test(path) && normalizedMethod === 'GET') {
+    return 'admin.spreadsheet.tabs.inspect';
   }
 
   if (path.startsWith('/v1/admin/projects/') && path.endsWith('/cache') && normalizedMethod === 'GET') {
@@ -696,6 +719,44 @@ const adminCreateProjectRoute = createRoute({
     },
     400: badRequestResponse,
     401: unauthorizedResponse
+  }
+});
+
+const adminListSpreadsheetTabsRoute = createRoute({
+  method: 'get',
+  path: '/v1/admin/projects/{project}/spreadsheet/tabs',
+  tags: ['Projects'],
+  security: adminSecurity,
+  request: {
+    params: adminProjectParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'List spreadsheet tabs for a project',
+      content: jsonContent(adminListSpreadsheetTabsResultSchema)
+    },
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
+const adminInspectSpreadsheetTabRoute = createRoute({
+  method: 'get',
+  path: '/v1/admin/projects/{project}/spreadsheet/tabs/{tab}',
+  tags: ['Projects'],
+  security: adminSecurity,
+  request: {
+    params: adminProjectSpreadsheetTabParamsSchema,
+    query: inspectSpreadsheetTabQuerySchema
+  },
+  responses: {
+    200: {
+      description: 'Inspect one spreadsheet tab and read its header row',
+      content: jsonContent(adminInspectSpreadsheetTabResultSchema)
+    },
+    400: badRequestResponse,
+    401: unauthorizedResponse,
+    404: notFoundResponse
   }
 });
 
@@ -1144,6 +1205,39 @@ function createApp() {
     });
 
     return c.json((response as { type: 'project.create.result'; result: AdminGetProjectResult }).result, 201);
+  });
+
+  app.openapi(adminListSpreadsheetTabsRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    const { project } = parsePathParams(c, adminProjectParamsSchema);
+    assertProjectScope(auth, 'admin:projects', project);
+    const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
+      type: 'project.spreadsheet.tabs.list',
+      projectSlug: project
+    });
+
+    return c.json(
+      (response as { type: 'project.spreadsheet.tabs.list.result'; result: AdminListSpreadsheetTabsResult }).result
+    );
+  });
+
+  app.openapi(adminInspectSpreadsheetTabRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    const { project, tab } = parsePathParams(c, adminProjectSpreadsheetTabParamsSchema);
+    const { headerRow } = inspectSpreadsheetTabQuerySchema.parse({
+      headerRow: c.req.query('headerRow')
+    });
+    assertProjectScope(auth, 'admin:projects', project);
+    const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
+      type: 'project.spreadsheet.tab.inspect',
+      projectSlug: project,
+      tab,
+      ...(headerRow !== undefined ? { headerRow } : {})
+    });
+
+    return c.json(
+      (response as { type: 'project.spreadsheet.tab.inspect.result'; result: AdminInspectSpreadsheetTabResult }).result
+    );
   });
 
   app.openapi(adminListTablesRoute, async (c) => {

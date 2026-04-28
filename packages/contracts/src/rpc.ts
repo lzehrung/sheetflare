@@ -2,8 +2,10 @@ import type {
   AdminCreateApiKeyInput,
   AdminCreateApiKeyResult,
   AdminGetProjectResult,
+  AdminInspectSpreadsheetTabResult,
   AdminListApiKeysResult,
   AdminListProjectsResult,
+  AdminListSpreadsheetTabsResult,
   CreateProjectInput,
   CreateRowInput,
   CreateTableInput,
@@ -48,7 +50,9 @@ export type ProjectDoRequest =
   | { type: 'project.table.create'; projectSlug: string; input: CreateTableInput }
   | { type: 'project.table.list'; projectSlug: string }
   | { type: 'project.table.get'; projectSlug: string; tableSlug: string }
-  | { type: 'project.table.resolve'; projectSlug: string; tableSlug: string };
+  | { type: 'project.table.resolve'; projectSlug: string; tableSlug: string }
+  | { type: 'project.spreadsheet.tabs.list'; projectSlug: string }
+  | { type: 'project.spreadsheet.tab.inspect'; projectSlug: string; tab: string; headerRow?: number };
 
 export type ProjectDoResponse =
   | { type: 'project.get.result'; result: AdminGetProjectResult }
@@ -57,7 +61,9 @@ export type ProjectDoResponse =
   | { type: 'project.table.create.result'; result: UpsertTableResult }
   | { type: 'project.table.list.result'; result: { data: UpsertTableResult['data'][] } }
   | { type: 'project.table.get.result'; result: UpsertTableResult }
-  | { type: 'project.table.resolve.result'; result: { data: ResolvedProjectTableResult } };
+  | { type: 'project.table.resolve.result'; result: { data: ResolvedProjectTableResult } }
+  | { type: 'project.spreadsheet.tabs.list.result'; result: AdminListSpreadsheetTabsResult }
+  | { type: 'project.spreadsheet.tab.inspect.result'; result: AdminInspectSpreadsheetTabResult };
 
 export type ResolvedTableConfigSnapshot = TableConfig & {
   spreadsheetId: string;

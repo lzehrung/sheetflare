@@ -2,7 +2,9 @@ import type {
   AdminListApiKeysResult,
   AdminCreateApiKeyResult,
   AdminGetProjectResult,
+  AdminInspectSpreadsheetTabResult,
   AdminListProjectsResult,
+  AdminListSpreadsheetTabsResult,
   ApiKeyPrincipal,
   CreateProjectInput,
   CreateTableInput,
@@ -122,6 +124,26 @@ export function createProject(credential: string, input: CreateProjectInput) {
     method: 'POST',
     body: JSON.stringify(input)
   });
+}
+
+export function listSpreadsheetTabs(credential: string, projectSlug: string) {
+  return requestAdminJson<AdminListSpreadsheetTabsResult>(
+    credential,
+    `/v1/admin/projects/${encodeURIComponent(projectSlug)}/spreadsheet/tabs`
+  );
+}
+
+export function inspectSpreadsheetTab(
+  credential: string,
+  projectSlug: string,
+  tabName: string,
+  headerRow?: number
+) {
+  const query = headerRow !== undefined ? `?headerRow=${encodeURIComponent(String(headerRow))}` : '';
+  return requestAdminJson<AdminInspectSpreadsheetTabResult>(
+    credential,
+    `/v1/admin/projects/${encodeURIComponent(projectSlug)}/spreadsheet/tabs/${encodeURIComponent(tabName)}${query}`
+  );
 }
 
 export function createTable(credential: string, projectSlug: string, input: CreateTableInput) {

@@ -1,4 +1,6 @@
 import {
+  type AdminInspectSpreadsheetTabResult,
+  type AdminListSpreadsheetTabsResult,
   type AdminGetProjectResult,
   BadRequestError,
   type ControlPlaneDoResponse,
@@ -15,6 +17,7 @@ import {
   type TableConfig
 } from '@sheetflare/contracts';
 import { normalizeFieldRules } from '@sheetflare/domain';
+import { GoogleSheetsService } from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from '../types';
 import { doRpc } from '../rpc';
 import { defaultGoogleCredentialRef, resolveGoogleCredential } from '../google-credentials';
@@ -73,6 +76,8 @@ function normalizeFieldNames(values: readonly string[]) {
 }
 
 export class ProjectDO {
+  private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
+
   constructor(
     private readonly ctx: DurableObjectState,
     private readonly env: CloudflareEnv
@@ -190,6 +195,16 @@ export class ProjectDO {
             data: await this.resolveProjectTable(body.projectSlug, body.tableSlug)
           }
         };
+      case 'project.spreadsheet.tabs.list':
+        return {
+          type: 'project.spreadsheet.tabs.list.result',
+          result: await this.listSpreadsheetTabs(body.projectSlug)
+        };
+      case 'project.spreadsheet.tab.inspect':
+        return {
+          type: 'project.spreadsheet.tab.inspect.result',
+          result: await this.inspectSpreadsheetTab(body.projectSlug, body.tab, body.headerRow)
+        };
     }
   }
 
@@ -242,7 +257,7 @@ export class ProjectDO {
   }
 
   private async createTable(projectSlug: string, input: CreateTableInput): Promise<TableConfig> {
-    const project = await this.getProject(projectSlug);
+    const project = this.mapProject(this.requireProjectRow(projectSlug));
     const now = new Date().toISOString();
     const idColumn = normalizeOptionalFieldName(input.idColumn) ?? '_id';
     const indexedFields = this.buildIndexedFields(idColumn, normalizeFieldNames(input.indexedFields ?? []));
@@ -257,6 +272,15 @@ export class ProjectDO {
       dataStartRow,
       indexedFields,
       fieldRules
+    });
+    await this.validateTableConfigAgainstSpreadsheet(project, {
+      sheetTabName: input.sheetTabName,
+      idColumn,
+      indexedFields,
+      readOnlyFields,
+      fieldRules,
+      headerRow,
+      ...(input.sheetGid !== undefined ? { sheetGid: input.sheetGid } : {})
     });
 
     this.ctx.storage.sql.exec(
@@ -302,7 +326,7 @@ export class ProjectDO {
 
     this.ctx.storage.sql.exec(`UPDATE project SET updated_at = ? WHERE slug = ?`, now, projectSlug);
 
-    await this.syncRegistry(project.project.slug);
+    await this.syncRegistry(project.slug);
     return this.getTable(projectSlug, input.tableSlug);
   }
 
@@ -346,6 +370,54 @@ export class ProjectDO {
       .toArray() as TableRow[];
 
     return rows.map((row) => this.mapTable(row));
+  }
+
+  private async listSpreadsheetTabs(projectSlug: string): Promise<AdminListSpreadsheetTabsResult> {
+    const project = this.mapProject(this.requireProjectRow(projectSlug));
+    const sheets = this.getSheetsClient(project.googleCredentialRef);
+    return {
+      data: await sheets.listSheetTabs(project.spreadsheetId)
+    };
+  }
+
+  private async inspectSpreadsheetTab(
+    projectSlug: string,
+    tab: string,
+    headerRow: number | undefined
+  ): Promise<AdminInspectSpreadsheetTabResult> {
+    const project = this.mapProject(this.requireProjectRow(projectSlug));
+    const sheets = this.getSheetsClient(project.googleCredentialRef);
+    const normalizedTab = tab.trim();
+    const resolvedHeaderRow = headerRow ?? 1;
+
+    if (!normalizedTab) {
+      throw new BadRequestError('Spreadsheet tab name is required.');
+    }
+
+    if (!Number.isInteger(resolvedHeaderRow) || resolvedHeaderRow <= 0) {
+      throw new BadRequestError('headerRow must be a positive integer.', {
+        headerRow: resolvedHeaderRow
+      });
+    }
+
+    const tabs = await sheets.listSheetTabs(project.spreadsheetId);
+    const matchedTab = tabs.find((entry) => entry.title === normalizedTab);
+    if (!matchedTab) {
+      throw new NotFoundError(`Sheet tab ${normalizedTab} was not found in spreadsheet ${project.spreadsheetId}.`, {
+        sheetTabName: normalizedTab,
+        spreadsheetId: project.spreadsheetId
+      });
+    }
+
+    const headers = await sheets.readHeaderNames(project.spreadsheetId, matchedTab.title, resolvedHeaderRow);
+
+    return {
+      data: {
+        tab: matchedTab,
+        headerRow: resolvedHeaderRow,
+        headers
+      }
+    };
   }
 
   private selectOptionalRow<Row>(query: string, ...params: unknown[]): Row | null {
@@ -457,6 +529,77 @@ export class ProjectDO {
     }
   }
 
+  private async validateTableConfigAgainstSpreadsheet(
+    project: ProjectConfig,
+    config: {
+      sheetTabName: string;
+      sheetGid?: number;
+      idColumn: string;
+      indexedFields: string[];
+      readOnlyFields: string[];
+      fieldRules: TableConfig['fieldRules'];
+      headerRow: number;
+    }
+  ) {
+    const sheets = this.getSheetsClient(project.googleCredentialRef);
+    const tabs = await sheets.listSheetTabs(project.spreadsheetId);
+    const matchedTab = tabs.find((entry) => entry.title === config.sheetTabName);
+    if (!matchedTab) {
+      throw new BadRequestError(`Sheet tab ${config.sheetTabName} was not found in spreadsheet ${project.spreadsheetId}.`, {
+        sheetTabName: config.sheetTabName,
+        spreadsheetId: project.spreadsheetId
+      });
+    }
+
+    if (config.sheetGid !== undefined && config.sheetGid !== matchedTab.sheetGid) {
+      throw new BadRequestError(
+        `Sheet GID ${config.sheetGid} does not match tab ${config.sheetTabName} in spreadsheet ${project.spreadsheetId}.`,
+        {
+          sheetTabName: config.sheetTabName,
+          providedSheetGid: config.sheetGid,
+          actualSheetGid: matchedTab.sheetGid,
+          spreadsheetId: project.spreadsheetId
+        }
+      );
+    }
+
+    const headers = await sheets.readHeaderNames(project.spreadsheetId, matchedTab.title, config.headerRow);
+    const headerSet = new Set(headers);
+    if (!headerSet.has(config.idColumn)) {
+      throw new BadRequestError(`ID column ${config.idColumn} is not present in the detected sheet headers.`, {
+        idColumn: config.idColumn,
+        headers
+      });
+    }
+
+    for (const fieldName of config.indexedFields) {
+      if (!headerSet.has(fieldName)) {
+        throw new BadRequestError(`Indexed field ${fieldName} is not present in the detected sheet headers.`, {
+          field: fieldName,
+          headers
+        });
+      }
+    }
+
+    for (const fieldName of config.readOnlyFields) {
+      if (!headerSet.has(fieldName)) {
+        throw new BadRequestError(`Read-only field ${fieldName} is not present in the detected sheet headers.`, {
+          field: fieldName,
+          headers
+        });
+      }
+    }
+
+    for (const fieldName of Object.keys(config.fieldRules)) {
+      if (!headerSet.has(fieldName)) {
+        throw new BadRequestError(`Field rule ${fieldName} is not present in the detected sheet headers.`, {
+          field: fieldName,
+          headers
+        });
+      }
+    }
+  }
+
   private requireProjectRow(projectSlug: string): ProjectRow {
     const project = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, projectSlug);
 
@@ -465,5 +608,17 @@ export class ProjectDO {
     }
 
     return project;
+  }
+
+  private getSheetsClient(googleCredentialRef: string) {
+    const existing = this.sheetsByCredentialRef.get(googleCredentialRef);
+    if (existing) {
+      return existing;
+    }
+
+    const credential = resolveGoogleCredential(this.env, googleCredentialRef);
+    const service = new GoogleSheetsService(credential);
+    this.sheetsByCredentialRef.set(googleCredentialRef, service);
+    return service;
   }
 }

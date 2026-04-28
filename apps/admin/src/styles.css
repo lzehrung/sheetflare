@@ -320,10 +320,54 @@ body {
   margin: 0;
 }
 
+.healthSummary {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.healthBadge {
+  background: rgba(25, 91, 50, 0.12);
+  color: #195b32;
+}
+
 .inlineBadges {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.inlineNotice {
+  margin-top: 6px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+}
+
+.warningNotice {
+  background: rgba(216, 95, 56, 0.08);
+  color: #7b3018;
+}
+
+.warningTitle {
+  margin: 0;
+  font-weight: 700;
+}
+
+.warningList {
+  margin: 10px 0 0;
+  padding-left: 18px;
+}
+
+.warningList li + li {
+  margin-top: 6px;
+}
+
+.emptyState {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
 }
 
 .formGrid {

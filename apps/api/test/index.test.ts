@@ -180,7 +180,7 @@ function createEnv(options?: {
   });
 
   const project = new FakeDurableObjectNamespace(() => async (request) => {
-    const body = (await request.json()) as { type: string };
+    const body = (await request.json()) as { type: string; tab?: string; headerRow?: number };
     projectRequests.push(body.type);
     const table = {
       projectSlug: 'demo',
@@ -263,6 +263,40 @@ function createEnv(options?: {
               spreadsheetId: 'sheet-1',
               googleCredentialRef: 'default'
             }
+          }
+        }
+      });
+    }
+
+    if (body.type === 'project.spreadsheet.tabs.list') {
+      return Response.json({
+        type: 'project.spreadsheet.tabs.list.result',
+        result: {
+          data: [
+            {
+              title: 'Users',
+              sheetGid: 11
+            },
+            {
+              title: 'Archive',
+              sheetGid: 12
+            }
+          ]
+        }
+      });
+    }
+
+    if (body.type === 'project.spreadsheet.tab.inspect') {
+      return Response.json({
+        type: 'project.spreadsheet.tab.inspect.result',
+        result: {
+          data: {
+            tab: {
+              title: body.tab ?? 'Users',
+              sheetGid: 11
+            },
+            headerRow: body.headerRow ?? 1,
+            headers: ['_id', 'email', 'status']
           }
         }
       });
@@ -663,6 +697,88 @@ describe('api routes', () => {
     });
   });
 
+  it('lists spreadsheet tabs for an admin project request', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects/demo/spreadsheet/tabs',
+      {
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: [
+        {
+          title: 'Users',
+          sheetGid: 11
+        },
+        {
+          title: 'Archive',
+          sheetGid: 12
+        }
+      ]
+    });
+  });
+
+  it('inspects one spreadsheet tab header row for an admin project request', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects/demo/spreadsheet/tabs/Users?headerRow=3',
+      {
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: {
+        tab: {
+          title: 'Users',
+          sheetGid: 11
+        },
+        headerRow: 3,
+        headers: ['_id', 'email', 'status']
+      }
+    });
+  });
+
+  it('uses explicit rate-limit keys for spreadsheet discovery routes', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __rateLimitRequests: Array<{ name: string; key: string }> };
+
+    await app.request(
+      '/v1/admin/projects/demo/spreadsheet/tabs',
+      {
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    await app.request(
+      '/v1/admin/projects/demo/spreadsheet/tabs/Users?headerRow=3',
+      {
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(env.__rateLimitRequests).toEqual([
+      { name: 'rate-limit:admin:bootstrap-admin', key: 'admin.spreadsheet.tabs.list' },
+      { name: 'rate-limit:admin:bootstrap-admin', key: 'admin.spreadsheet.tabs.inspect' }
+    ]);
+  });
+
   it('rejects project-scoped key creation outside the caller project', async () => {
     const app = createApp();
     const response = await app.request(
@@ -974,6 +1090,8 @@ describe('api routes', () => {
     expect(document.openapi).toBe('3.0.0');
     expect(document.info.title).toBe('Sheetflare API');
     expect(document.paths['/v1/admin/projects']).toBeDefined();
+    expect(document.paths['/v1/admin/projects/{project}/spreadsheet/tabs']).toBeDefined();
+    expect(document.paths['/v1/admin/projects/{project}/spreadsheet/tabs/{tab}']).toBeDefined();
     expect(document.paths['/v1/projects/{project}/tables/{table}/rows']).toBeDefined();
     expect(document.paths['/v1/admin/projects/{project}/tables/{table}/cache']).toBeDefined();
     expect(document.paths['/v1/admin/projects/{project}/tables/{table}/refresh']).toBeDefined();

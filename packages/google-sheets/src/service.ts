@@ -42,6 +42,7 @@ type GoogleSpreadsheetMetadataResponse = {
     properties?: {
       sheetId?: number;
       title?: string;
+      sheetType?: string;
     };
   }>;
 };
@@ -58,6 +59,11 @@ export interface RowLookupResult {
 export interface TableSnapshot {
   headers: string[];
   rows: RowEnvelope[];
+}
+
+export interface SpreadsheetTabSummary {
+  title: string;
+  sheetGid: number;
 }
 
 export type RowReference = {
@@ -211,7 +217,7 @@ function parseUpdatedRangeRowNumber(updatedRange: string | undefined): number {
   return Number(match[1]);
 }
 
-function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: string): HeaderLayout {
+function extractHeaderEntries(headerRow: readonly string[] | undefined): HeaderLayoutEntry[] {
   const entries: HeaderLayoutEntry[] = [];
   const seenHeaders = new Set<string>();
 
@@ -238,6 +244,12 @@ function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: s
   if (entries.length === 0) {
     throw new NotFoundError('No headers found for the requested sheet range.');
   }
+
+  return entries;
+}
+
+function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: string): HeaderLayout {
+  const entries = extractHeaderEntries(headerRow);
 
   const idEntry = entries.find((entry) => entry.name === idColumn);
   if (!idEntry) {
@@ -317,6 +329,40 @@ export class GoogleSheetsService {
   async readHeaders(config: GoogleSheetTableConfig): Promise<string[]> {
     const layout = await this.readHeaderLayout(config);
     return layout.headers;
+  }
+
+  async readHeaderNames(spreadsheetId: string, sheetTabName: string, headerRow: number): Promise<string[]> {
+    const values = await this.readValues(
+      spreadsheetId,
+      `${escapeSheetName(sheetTabName)}!${headerRow}:${headerRow}`
+    );
+
+    return extractHeaderEntries(values[0]).map((entry) => entry.name);
+  }
+
+  async listSheetTabs(spreadsheetId: string): Promise<SpreadsheetTabSummary[]> {
+    const metadata = await this.readSpreadsheetMetadata(spreadsheetId);
+    return metadata.sheets
+      ?.map((sheet) => {
+        const rawTitle = sheet.properties?.title;
+        const sheetGid = sheet.properties?.sheetId;
+        const sheetType = sheet.properties?.sheetType;
+        if (
+          typeof rawTitle !== 'string'
+          || rawTitle.trim().length === 0
+          || sheetGid === undefined
+          || (sheetType !== undefined && sheetType !== 'GRID')
+        ) {
+          return null;
+        }
+
+        return {
+          title: rawTitle,
+          sheetGid
+        };
+      })
+      .filter((entry): entry is SpreadsheetTabSummary => entry !== null)
+      ?? [];
   }
 
   async readTableSnapshot(config: GoogleSheetTableConfig): Promise<TableSnapshot> {
@@ -596,28 +642,32 @@ export class GoogleSheetsService {
   }
 
   private async lookupSheetId(spreadsheetId: string, sheetTabName: string): Promise<number> {
-    const accessToken = await this.getAccessToken();
-    const response = await this.authorizedRequest(
-      `${this.sheetsApiBaseUrl}/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties`,
-      {
-        headers: {
-          authorization: `Bearer ${accessToken}`
-        }
-      },
-      {
-        operation: `lookup sheet id for ${sheetTabName}`,
-        maxRetries: defaultRetryCount
-      }
-    );
-
-    const body = await this.parseJson<GoogleSpreadsheetMetadataResponse>(response);
-    const match = body.sheets?.find((sheet) => sheet.properties?.title === sheetTabName)?.properties?.sheetId;
+    const metadata = await this.readSpreadsheetMetadata(spreadsheetId);
+    const match = metadata.sheets?.find((sheet) => sheet.properties?.title === sheetTabName)?.properties?.sheetId;
 
     if (match === undefined) {
       throw new NotFoundError(`Sheet tab ${sheetTabName} was not found in spreadsheet ${spreadsheetId}.`);
     }
 
     return match;
+  }
+
+  private async readSpreadsheetMetadata(spreadsheetId: string): Promise<GoogleSpreadsheetMetadataResponse> {
+    const accessToken = await this.getAccessToken();
+    const response = await this.authorizedRequest(
+      `${this.sheetsApiBaseUrl}/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties(sheetId,title,sheetType)`,
+      {
+        headers: {
+          authorization: `Bearer ${accessToken}`
+        }
+      },
+      {
+        operation: `read spreadsheet metadata for ${spreadsheetId}`,
+        maxRetries: defaultRetryCount
+      }
+    );
+
+    return this.parseJson<GoogleSpreadsheetMetadataResponse>(response);
   }
 
   private async getAccessToken(): Promise<string> {

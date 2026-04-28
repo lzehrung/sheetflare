@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { createApiKeyInputSchema, createApiKeyResultSchema, apiKeyPrincipalSchema } from './auth';
 import { defaultAuthModeSchema, fieldRulesSchema, maxIndexedFieldCount, projectConfigSchema, tableConfigSchema } from './project';
-import { apiKeyIdSchema, projectSlugSchema, rowIdSchema, spreadsheetIdSchema, tableSlugSchema } from './ids';
+import { apiKeyIdSchema, projectSlugSchema, rowIdSchema, sheetTabNameSchema, spreadsheetIdSchema, tableSlugSchema } from './ids';
 import { rowEnvelopeSchema, rowRecordSchema, tableCacheStatusSchema, tableSchemaSchema } from './table';
 
 export const createProjectInputSchema = z.object({
@@ -82,6 +82,23 @@ export const adminGetProjectResultSchema = z.object({
   tables: z.array(tableConfigSchema)
 });
 
+export const spreadsheetTabSchema = z.object({
+  title: sheetTabNameSchema,
+  sheetGid: z.number().int().nonnegative()
+});
+
+export const adminListSpreadsheetTabsResultSchema = z.object({
+  data: z.array(spreadsheetTabSchema)
+});
+
+export const adminInspectSpreadsheetTabResultSchema = z.object({
+  data: z.object({
+    tab: spreadsheetTabSchema,
+    headerRow: z.number().int().positive(),
+    headers: z.array(z.string().min(1))
+  })
+});
+
 export const upsertTableResultSchema = z.object({
   data: tableConfigSchema
 });
@@ -127,6 +144,11 @@ export const adminProjectTableParamsSchema = z.object({
   table: tableSlugSchema
 });
 
+export const adminProjectSpreadsheetTabParamsSchema = z.object({
+  project: projectSlugSchema,
+  tab: sheetTabNameSchema
+});
+
 export const rowParamsSchema = z.object({
   project: projectSlugSchema,
   table: tableSlugSchema,
@@ -144,6 +166,9 @@ export type UpdateRowInput = z.infer<typeof updateRowInputSchema>;
 export type ProjectSummary = z.infer<typeof projectSummarySchema>;
 export type AdminListProjectsResult = z.infer<typeof adminListProjectsResultSchema>;
 export type AdminGetProjectResult = z.infer<typeof adminGetProjectResultSchema>;
+export type SpreadsheetTab = z.infer<typeof spreadsheetTabSchema>;
+export type AdminListSpreadsheetTabsResult = z.infer<typeof adminListSpreadsheetTabsResultSchema>;
+export type AdminInspectSpreadsheetTabResult = z.infer<typeof adminInspectSpreadsheetTabResultSchema>;
 export type UpsertTableResult = z.infer<typeof upsertTableResultSchema>;
 export type GetRowResult = z.infer<typeof getRowResultSchema>;
 export type CreateRowResult = z.infer<typeof createRowResultSchema>;

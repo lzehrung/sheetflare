@@ -69,7 +69,7 @@ export const initialCreateTableDraft: CreateTableDraft = {
   sheetTabName: '',
   sheetGid: '',
   idColumn: '_id',
-  indexedFields: 'name,status',
+  indexedFields: '',
   readOnlyFields: '',
   fieldRulesJson: '',
   headerRow: '1',
