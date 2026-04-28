@@ -1,0 +1,144 @@
+import type { FieldRule, FieldRules, RowRecord } from '@sheetflare/contracts';
+
+export type ConstraintViolationCode = 'REQUIRED' | 'TYPE' | 'ENUM';
+
+export type ConstraintViolation = {
+  field: string;
+  code: ConstraintViolationCode;
+  message: string;
+};
+
+function isBlankValue(value: RowRecord[string] | undefined) {
+  return value === undefined || value === null || (typeof value === 'string' && value.length === 0);
+}
+
+export function normalizeFieldRule(rule: FieldRule | undefined): FieldRule | undefined {
+  if (!rule) {
+    return undefined;
+  }
+
+  return {
+    ...(rule.required !== undefined ? { required: rule.required } : {}),
+    ...(rule.type !== undefined ? { type: rule.type } : {}),
+    ...(rule.unique !== undefined ? { unique: rule.unique } : {}),
+    ...(rule.enum ? { enum: [...new Set(rule.enum.map((entry) => entry.trim()).filter(Boolean))] } : {}),
+    ...(rule.normalize ? { normalize: [...new Set(rule.normalize)] } : {})
+  };
+}
+
+function isIsoDateString(value: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00.000Z`));
+}
+
+function isIsoDateTimeString(value: string) {
+  return /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
+}
+
+function matchesConstrainedType(value: RowRecord[string] | undefined, expectedType: NonNullable<FieldRule['type']>) {
+  switch (expectedType) {
+    case 'string':
+      return typeof value === 'string';
+    case 'number':
+      return typeof value === 'number';
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'date':
+      return typeof value === 'string' && isIsoDateString(value);
+    case 'datetime':
+      return typeof value === 'string' && isIsoDateTimeString(value);
+  }
+}
+
+export function normalizeFieldRules(fieldRules: FieldRules | undefined): FieldRules {
+  if (!fieldRules) {
+    return {};
+  }
+
+  const normalized: FieldRules = {};
+  for (const [rawFieldName, rule] of Object.entries(fieldRules)) {
+    const fieldName = rawFieldName.trim();
+    if (!fieldName) {
+      continue;
+    }
+
+    const nextRule = normalizeFieldRule(rule);
+    if (!nextRule) {
+      continue;
+    }
+
+    normalized[fieldName] = nextRule;
+  }
+
+  return normalized;
+}
+
+export function normalizeFieldValue(value: RowRecord[string], rule: FieldRule | undefined): RowRecord[string] {
+  if (typeof value !== 'string' || !rule?.normalize || rule.normalize.length === 0) {
+    return value;
+  }
+
+  let normalized = value;
+  for (const operation of rule.normalize) {
+    if (operation === 'trim') {
+      normalized = normalized.trim();
+      continue;
+    }
+
+    if (operation === 'lowercase') {
+      normalized = normalized.toLowerCase();
+    }
+  }
+
+  return normalized;
+}
+
+export function applyFieldRuleNormalization(values: RowRecord, fieldRules: FieldRules | undefined): RowRecord {
+  const normalizedRules = normalizeFieldRules(fieldRules);
+  const normalizedValues: RowRecord = {};
+
+  for (const [fieldName, value] of Object.entries(values)) {
+    normalizedValues[fieldName] = normalizeFieldValue(value, normalizedRules[fieldName]);
+  }
+
+  return normalizedValues;
+}
+
+export function validateFieldRules(values: RowRecord, fieldRules: FieldRules | undefined): ConstraintViolation[] {
+  const normalizedRules = normalizeFieldRules(fieldRules);
+  const normalizedValues = applyFieldRuleNormalization(values, normalizedRules);
+  const violations: ConstraintViolation[] = [];
+
+  for (const [fieldName, rule] of Object.entries(normalizedRules)) {
+    const value = normalizedValues[fieldName];
+
+    if (rule.required && isBlankValue(value)) {
+      violations.push({
+        field: fieldName,
+        code: 'REQUIRED',
+        message: `${fieldName} is required.`
+      });
+      continue;
+    }
+
+    if (rule.type && !isBlankValue(value) && !matchesConstrainedType(value, rule.type)) {
+      violations.push({
+        field: fieldName,
+        code: 'TYPE',
+        message: `${fieldName} must be a ${rule.type}.`
+      });
+      continue;
+    }
+
+    if (rule.enum && !isBlankValue(value)) {
+      if (typeof value !== 'string' || !rule.enum.includes(value)) {
+        violations.push({
+          field: fieldName,
+          code: 'ENUM',
+          message: `${fieldName} must be one of: ${rule.enum.join(', ')}.`
+        });
+      }
+    }
+  }
+
+  return violations;
+}
