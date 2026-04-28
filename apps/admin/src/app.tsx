@@ -125,6 +125,7 @@ export function App() {
     message: null
   });
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [projectsExpanded, setProjectsExpanded] = useState(true);
   const [createProjectDraft, setCreateProjectDraft] = useState<CreateProjectDraft>(initialCreateProjectDraft);
   const [createTableDraft, setCreateTableDraft] = useState<CreateTableDraft>(initialCreateTableDraft);
   const [createKeyDraft, setCreateKeyDraft] = useState<CreateKeyDraft>(initialCreateKeyDraft);
@@ -648,7 +649,16 @@ export function App() {
     });
   }
 
+  function handleSelectProject(projectSlug: string) {
+    setSelectedProjectSlug(projectSlug);
+    setProjectsExpanded(false);
+  }
+
   const projectCount = state.status === 'ready' ? state.data.length : '...';
+  const selectedProjectSummary =
+    state.status === 'ready' && selectedProjectSlug
+      ? state.data.find((project) => project.slug === selectedProjectSlug) ?? null
+      : null;
 
   return (
     <main className="shell">
@@ -656,7 +666,7 @@ export function App() {
         <p className="eyebrow">Cloudflare Durable Objects + Google Sheets</p>
         <h1>Sheetflare Admin</h1>
         <p className="lede">
-          Browse projects first, then open the actions you need. The control plane stays explicit, but the noisy parts stay out of the way until you ask for them.
+          Choose a project, inspect its tables, and use the tools you need when you need them.
         </p>
       </section>
 
@@ -674,14 +684,26 @@ export function App() {
 
       <NoticeBanner tone={notice.tone} message={notice.message} />
 
-      <section className="workspaceGrid">
-        <section className="panel sidebarPanel">
+      <section className="workspaceStack">
+        <section className="panel projectPanel">
           <div className="panelHeader">
             <div>
               <h2>Projects</h2>
-              <p className="muted compact">Choose a spreadsheet-backed project to inspect its tables, cache state, and access controls.</p>
+              <p className="muted compact">
+                Choose a spreadsheet-backed project to inspect its tables, cache state, and access controls.
+              </p>
             </div>
             <div className="actions compactHeaderActions">
+              {selectedProjectSummary ? (
+                <button
+                  type="button"
+                  className="secondaryButton"
+                  onClick={() => setProjectsExpanded((current) => !current)}
+                  disabled={busyAction !== null}
+                >
+                  {projectsExpanded ? 'Collapse projects' : 'Show projects'}
+                </button>
+              ) : null}
               <button type="button" className="secondaryButton" onClick={() => void handleRefreshProjects()} disabled={!credential || busyAction !== null}>
                 Refresh projects
               </button>
@@ -700,11 +722,21 @@ export function App() {
           {state.status === 'ready' && state.data.length === 0 ? (
             <p className="muted">No projects yet. Open Project setup below to create the first one.</p>
           ) : null}
-          {state.status === 'ready' && state.data.length > 0 ? (
+          {state.status === 'ready' && selectedProjectSummary && !projectsExpanded ? (
+            <div className="projectPickerSummary">
+              <div>
+                <p className="sectionLabel">Current project</p>
+                <p className="projectPickerName">{selectedProjectSummary.name}</p>
+                <p className="muted compact">{selectedProjectSummary.slug}</p>
+              </div>
+              <span className="badge badgeMuted">{selectedProjectSummary.tableCount} tables</span>
+            </div>
+          ) : null}
+          {state.status === 'ready' && state.data.length > 0 && projectsExpanded ? (
             <ProjectCards
               projects={state.data}
               selectedProjectSlug={selectedProjectSlug}
-              onSelect={setSelectedProjectSlug}
+              onSelect={handleSelectProject}
             />
           ) : null}
         </section>
@@ -733,7 +765,7 @@ export function App() {
         <div className="panelHeader">
           <div>
             <h2>Actions</h2>
-            <p className="muted compact">Power-user setup and access management stay available here without dominating the main workspace.</p>
+            <p className="muted compact">Setup and access tools for changes that are less frequent.</p>
           </div>
         </div>
 

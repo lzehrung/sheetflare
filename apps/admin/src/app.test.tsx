@@ -360,7 +360,9 @@ describe('App', () => {
 
     fireEvent.click(screen.getByTestId('project-card-prod'));
     await waitFor(() => {
-      expect(screen.getByTestId('project-card-prod').getAttribute('aria-pressed')).toBe('true');
+      expect(screen.queryByTestId('project-card-prod')).toBeNull();
+      expect(screen.getByText('Current project')).toBeTruthy();
+      expect(screen.getByText('Prod')).toBeTruthy();
     });
 
     await waitFor(() => {
@@ -554,7 +556,8 @@ describe('App', () => {
 
     fireEvent.click(screen.getByTestId('project-card-prod'));
     await waitFor(() => {
-      expect(screen.getByTestId('project-card-prod').getAttribute('aria-pressed')).toBe('true');
+      expect(screen.queryByTestId('project-card-prod')).toBeNull();
+      expect(screen.getByText('Prod')).toBeTruthy();
     });
 
     await waitFor(() => {
@@ -647,7 +650,8 @@ describe('App', () => {
     await screen.findByText('Demo');
     fireEvent.click(screen.getByTestId('project-card-prod'));
     await waitFor(() => {
-      expect(screen.getByTestId('project-card-prod').getAttribute('aria-pressed')).toBe('true');
+      expect(screen.queryByTestId('project-card-prod')).toBeNull();
+      expect(screen.getByText('Prod')).toBeTruthy();
     });
 
     registryVersion = 'after-refresh';
@@ -655,7 +659,8 @@ describe('App', () => {
 
     await waitFor(() => {
       expect(screen.queryByTestId('project-card-prod')).toBeNull();
-      expect(screen.getByTestId('project-card-demo').getAttribute('aria-pressed')).toBe('true');
+      expect(screen.getByText('Current project')).toBeTruthy();
+      expect(screen.getByText('Demo')).toBeTruthy();
     });
   });
 
@@ -708,7 +713,7 @@ describe('App', () => {
     fireEvent.click(screen.getByText('Save and load'));
 
     await screen.findByText('Create Table');
-    const selectedProjectSection = screen.getByText('Selected Project');
+    const selectedProjectSection = screen.getByText('Project');
     const panel = selectedProjectSection.closest('section');
     expect(panel).not.toBeNull();
 
@@ -740,5 +745,74 @@ describe('App', () => {
     expect(scope.getByText('dataStartRow must be greater than headerRow.')).toBeTruthy();
     expect(scope.getByText('Cache TTL must be a non-negative integer.')).toBeTruthy();
     expect(scope.getByRole('button', { name: 'Save table' })).toHaveProperty('disabled', true);
+  });
+
+  it('collapses the project picker after selection and can expand it again', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: 0,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            },
+            {
+              slug: 'prod',
+              name: 'Prod',
+              spreadsheetId: 'sheet-2',
+              tableCount: 0,
+              updatedAt: '2026-04-27T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo' || url === '/v1/admin/projects?project=prod') {
+        const projectSlug = url.endsWith('prod') ? 'prod' : 'demo';
+        return createJsonResponse({
+          project: {
+            slug: projectSlug,
+            name: projectSlug === 'demo' ? 'Demo' : 'Prod',
+            spreadsheetId: projectSlug === 'demo' ? 'sheet-1' : 'sheet-2',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: []
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys?project=prod' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByTestId('project-card-demo');
+    fireEvent.click(screen.getByTestId('project-card-prod'));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('project-card-prod')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Show projects' })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show projects' }));
+    await screen.findByTestId('project-card-demo');
+    expect(screen.getByTestId('project-card-prod')).toBeTruthy();
   });
 });
