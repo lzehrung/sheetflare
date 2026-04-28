@@ -62,7 +62,20 @@ Do not deploy if any of these fail.
 
 ## Deploy
 
-From the API workspace:
+Preferred local staging deploy commands from repo root:
+
+```powershell
+npm run deploy:staging:api
+npm run deploy:staging:admin
+```
+
+Or deploy both in sequence:
+
+```powershell
+npm run deploy:staging
+```
+
+Equivalent explicit commands if you need to run them manually:
 
 ```powershell
 npm --workspace @sheetflare/api run build
