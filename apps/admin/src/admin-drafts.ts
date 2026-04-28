@@ -23,6 +23,7 @@ export type CreateTableDraft = {
   sheetGid: string;
   idColumn: string;
   indexedFields: string;
+  readOnlyFields: string;
   headerRow: string;
   dataStartRow: string;
   cacheTtlSeconds: string;
@@ -67,6 +68,7 @@ export const initialCreateTableDraft: CreateTableDraft = {
   sheetGid: '',
   idColumn: '_id',
   indexedFields: 'name,status',
+  readOnlyFields: '',
   headerRow: '1',
   dataStartRow: '2',
   cacheTtlSeconds: '15',
@@ -216,6 +218,10 @@ export function validateCreateTableDraft(
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
+  const readOnlyFields = draft.readOnlyFields
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 
   if (tableSlug.length === 0) {
     fieldErrors.tableSlug = 'Table slug is required.';
@@ -274,6 +280,7 @@ export function validateCreateTableDraft(
     ...(parsedSheetGid !== undefined ? { sheetGid: parsedSheetGid } : {}),
     idColumn,
     indexedFields,
+    readOnlyFields,
     headerRow: headerRow.value ?? undefined,
     dataStartRow: dataStartRow.value ?? undefined,
     cacheTtlSeconds: cacheTtlSeconds.value ?? undefined,

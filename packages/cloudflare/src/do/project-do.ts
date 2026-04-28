@@ -35,6 +35,7 @@ type TableRow = {
   sheet_gid: number | null;
   id_column: string;
   indexed_fields: string;
+  read_only_fields: string;
   header_row: number;
   data_start_row: number;
   read_enabled: number;
@@ -98,6 +99,7 @@ export class ProjectDO {
         sheet_gid INTEGER,
         id_column TEXT NOT NULL,
         indexed_fields TEXT NOT NULL,
+        read_only_fields TEXT NOT NULL DEFAULT '[]',
         header_row INTEGER NOT NULL,
         data_start_row INTEGER NOT NULL,
         read_enabled INTEGER NOT NULL,
@@ -110,6 +112,14 @@ export class ProjectDO {
         PRIMARY KEY (project_slug, table_slug)
       )
     `);
+
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE tables ADD COLUMN read_only_fields TEXT NOT NULL DEFAULT '[]'`);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('duplicate column name')) {
+        throw error;
+      }
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -225,6 +235,7 @@ export class ProjectDO {
     const now = new Date().toISOString();
     const idColumn = normalizeOptionalFieldName(input.idColumn) ?? '_id';
     const indexedFields = this.buildIndexedFields(idColumn, normalizeFieldNames(input.indexedFields ?? []));
+    const readOnlyFields = normalizeFieldNames(input.readOnlyFields ?? []);
     const headerRow = input.headerRow ?? 1;
     const dataStartRow = input.dataStartRow ?? 2;
 
@@ -237,14 +248,15 @@ export class ProjectDO {
     this.ctx.storage.sql.exec(
       `
       INSERT INTO tables (
-        project_slug, table_slug, sheet_tab_name, sheet_gid, id_column, indexed_fields, header_row, data_start_row,
+        project_slug, table_slug, sheet_tab_name, sheet_gid, id_column, indexed_fields, read_only_fields, header_row, data_start_row,
         read_enabled, create_enabled, update_enabled, delete_enabled, cache_ttl_seconds, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(project_slug, table_slug) DO UPDATE SET
         sheet_tab_name = excluded.sheet_tab_name,
         sheet_gid = excluded.sheet_gid,
         id_column = excluded.id_column,
         indexed_fields = excluded.indexed_fields,
+        read_only_fields = excluded.read_only_fields,
         header_row = excluded.header_row,
         data_start_row = excluded.data_start_row,
         read_enabled = excluded.read_enabled,
@@ -260,6 +272,7 @@ export class ProjectDO {
       input.sheetGid ?? null,
       idColumn,
       JSON.stringify(indexedFields),
+      JSON.stringify(readOnlyFields),
       headerRow,
       dataStartRow,
       (input.readEnabled ?? true) ? 1 : 0,
@@ -369,6 +382,7 @@ export class ProjectDO {
       sheetGid: row.sheet_gid ?? undefined,
       idColumn: row.id_column,
       indexedFields: JSON.parse(row.indexed_fields) as string[],
+      readOnlyFields: JSON.parse(row.read_only_fields) as string[],
       headerRow: row.header_row,
       dataStartRow: row.data_start_row,
       readEnabled: Boolean(row.read_enabled),

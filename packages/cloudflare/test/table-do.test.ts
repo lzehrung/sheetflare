@@ -75,6 +75,37 @@ function createSheetsFetch(sheet: SheetState) {
           });
     }
 
+    if (url.includes('/values:batchUpdate')) {
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        data?: Array<{ range?: string; values?: string[][] }>;
+      };
+
+      for (const update of body.data ?? []) {
+        const range = update.range ? decodeURIComponent(update.range) : null;
+        const values = update.values?.[0] ?? [];
+        if (!range) {
+          continue;
+        }
+
+        sheet.requestedRanges.push(range);
+
+        const match = range.match(/^'Users'!([A-Z]+)(\d+):([A-Z]+)\d+$/);
+        if (!match) {
+          throw new Error(`Unhandled batch value range: ${range}`);
+        }
+
+        const startColumnIndex = columnLettersToIndex(match[1]);
+        const rowIndex = Number(match[2]) - 1;
+        const row = sheet.rows[rowIndex] ?? [];
+        for (let index = 0; index < values.length; index += 1) {
+          row[startColumnIndex + index] = String(values[index] ?? '');
+        }
+        sheet.rows[rowIndex] = row;
+      }
+
+      return Response.json({});
+    }
+
     if (url.includes(':batchUpdate')) {
       const body = JSON.parse(String(init?.body ?? '{}')) as {
         requests?: Array<{ deleteDimension?: { range?: { startIndex?: number; endIndex?: number } } }>;
@@ -102,11 +133,25 @@ function createSheetsFetch(sheet: SheetState) {
 
     if (init?.method === 'POST' && url.includes(':append')) {
       const body = JSON.parse(String(init.body)) as { values: string[][] };
-      sheet.rows.push(body.values[0] ?? []);
+      const row = sheet.rows.length === 0 ? [] : [...(sheet.rows[sheet.rows.length] ?? [])];
+      const appendValues = body.values[0] ?? [];
+      const appendRange = range.match(/^'Users'!([A-Z]+)\d+:\1$/);
+      if (!appendRange) {
+        sheet.rows.push(appendValues);
+      } else {
+        const columnIndex = columnLettersToIndex(appendRange[1]);
+        for (let index = 0; index < appendValues.length; index += 1) {
+          row[columnIndex + index] = appendValues[index] ?? '';
+        }
+        sheet.rows.push(row);
+      }
       const rowNumber = sheet.rows.length;
+      const updatedRange = appendRange
+        ? `'Users'!${appendRange[1]}${rowNumber}:${appendRange[1]}${rowNumber}`
+        : `'Users'!A${rowNumber}:B${rowNumber}`;
       return Response.json({
         updates: {
-          updatedRange: `'Users'!A${rowNumber}:B${rowNumber}`
+          updatedRange
         }
       });
     }
@@ -300,7 +345,8 @@ describe('TableDO', () => {
           tableSlug: 'users',
           sheetTabName: 'Users',
           idColumn: ' _id ',
-          indexedFields: [' status ', 'status', '  ']
+          indexedFields: [' status ', 'status', '  '],
+          readOnlyFields: [' derived ', 'derived', '  ']
         }
       }
     );
@@ -310,7 +356,8 @@ describe('TableDO', () => {
       result: {
         data: {
           idColumn: '_id',
-          indexedFields: ['_id', 'status']
+          indexedFields: ['_id', 'status'],
+          readOnlyFields: ['derived']
         }
       }
     });
@@ -418,6 +465,146 @@ describe('TableDO', () => {
       ['row-1', 'Ada Lovelace']
     ]);
     expect(sheet.requestedRanges).not.toContain("'Users'");
+  });
+
+  it('rejects create writes that target read-only columns', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name', 'derived']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          readOnlyFields: ['derived']
+        }
+      }
+    );
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.row.create',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          input: {
+            values: {
+              name: 'Ada',
+              derived: 'manual'
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Write payload contains read-only columns.'
+    });
+  });
+
+  it('preserves read-only columns during sparse updates', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name', 'derived', 'status'],
+        ['row-1', 'Ada', 'Ada (derived)', 'active']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          readOnlyFields: ['derived'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    sheet.requestedRanges = [];
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.update',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-1',
+        input: {
+          values: {
+            name: 'Ada Lovelace',
+            status: 'inactive'
+          }
+        }
+      }
+    );
+
+    expect(response).toMatchObject({
+      type: 'table.row.update.result',
+      result: {
+        data: {
+          values: {
+            _id: 'row-1',
+            name: 'Ada Lovelace',
+            derived: 'Ada (derived)',
+            status: 'inactive'
+          }
+        }
+      }
+    });
+    expect(sheet.rows[1]).toEqual(['row-1', 'Ada Lovelace', 'Ada (derived)', 'inactive']);
+    expect(sheet.requestedRanges).toContain("'Users'!B2:B2");
+    expect(sheet.requestedRanges).toContain("'Users'!D2:D2");
+    expect(sheet.requestedRanges).not.toContain("'Users'!C2:C2");
   });
 
   it('rejects create-row requests when the managed id already exists', async () => {
@@ -532,7 +719,7 @@ describe('TableDO', () => {
         data: {
           id: '42',
           values: {
-            _id: '42',
+            _id: 42,
             name: 'Ada'
           }
         }
@@ -1356,6 +1543,9 @@ describe('TableDO', () => {
   });
 
   it('rebuilds the cache when refresh-if-stale is called after ttl expiry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-26T12:00:00.000Z'));
+
     const sheet: SheetState = {
       rows: [
         ['_id', 'name'],
@@ -1407,6 +1597,7 @@ describe('TableDO', () => {
       ['row-1', 'Ada'],
       ['row-2', 'Grace']
     ];
+    vi.setSystemTime(new Date('2026-04-26T12:00:01.000Z'));
 
     const response = await doRpc<TableDoResponse>(
       env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
@@ -1430,6 +1621,8 @@ describe('TableDO', () => {
       type: 'table.cache.refresh.result';
       result: { cache: { lastSyncCompletedAt: string | null } };
     }).result.cache.lastSyncCompletedAt).not.toBeNull();
+
+    vi.useRealTimers();
   });
 
   it('fails hard when duplicate managed IDs are detected upstream', async () => {

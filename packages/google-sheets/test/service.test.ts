@@ -688,4 +688,138 @@ describe('GoogleSheetsService.writeRow', () => {
     expect(requestedUrls.some((url) => url.includes('valueInputOption=RAW'))).toBe(true);
     expect(requestedUrls.every((url) => !url.includes('valueInputOption=USER_ENTERED'))).toBe(true);
   });
+
+  it('patches only the provided writable column segments and preserves gaps', async () => {
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input, init) => {
+        const url = decodeURIComponent(String(input));
+        const method = init?.method ?? 'GET';
+        requests.push({
+          method,
+          url,
+          body:
+            init?.body && typeof init.body === 'string' && init.body.trim().startsWith('{')
+              ? JSON.parse(init.body)
+              : null
+        });
+
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes("/values/'Users'!1:1")) {
+          return Response.json({
+            values: [['_id', 'name', 'derived', 'status']]
+          });
+        }
+
+        if (url.includes('/values:batchUpdate')) {
+          return Response.json({});
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    await service.writeRowPatch({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      readOnlyFields: ['derived'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    }, 4, {
+      name: 'Ada',
+      status: 'active'
+    });
+
+    const batchUpdate = requests.find((request) => request.url.includes('/values:batchUpdate'));
+    expect(batchUpdate).toBeTruthy();
+    expect(batchUpdate?.body).toEqual({
+      valueInputOption: 'RAW',
+      data: [
+        {
+          range: "'Users'!B4:B4",
+          values: [['Ada']]
+        },
+        {
+          range: "'Users'!D4:D4",
+          values: [['active']]
+        }
+      ]
+    });
+  });
+
+  it('appends a row skeleton through the managed id column when writable columns are sparse', async () => {
+    const requestedUrls: string[] = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = decodeURIComponent(String(input));
+        requestedUrls.push(url);
+
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes("/values/'Users'!1:1")) {
+          return Response.json({
+            values: [['name', '_id', 'derived', 'status']]
+          });
+        }
+
+        if (url.includes(':append')) {
+          return Response.json({
+            updates: {
+              updatedRange: "'Users'!B5:B5"
+            }
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    const rowNumber = await service.appendRowSkeleton({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      readOnlyFields: ['derived'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    }, 'row-5');
+
+    expect(rowNumber).toBe(5);
+    expect(requestedUrls.some((url) => url.includes("/values/'Users'!B2:B:append"))).toBe(true);
+  });
 });
