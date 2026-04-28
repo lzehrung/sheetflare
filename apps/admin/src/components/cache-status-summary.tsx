@@ -20,12 +20,12 @@ export function CacheStatusSummary({ cache }: CacheStatusSummaryProps) {
         <dd>{cache.stale ? 'Stale' : 'Fresh'} / TTL {cache.cacheTtlSeconds}s</dd>
       </div>
       <div>
-        <dt>Last Sync Started</dt>
-        <dd>{formatTimestamp(cache.lastSyncStartedAt)}</dd>
-      </div>
-      <div>
         <dt>Last Sync Completed</dt>
         <dd>{formatTimestamp(cache.lastSyncCompletedAt)}</dd>
+      </div>
+      <div>
+        <dt>Last Sync Started</dt>
+        <dd>{formatTimestamp(cache.lastSyncStartedAt)}</dd>
       </div>
       {cache.lastSyncError ? (
         <div>

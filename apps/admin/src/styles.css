@@ -67,6 +67,18 @@ body {
   backdrop-filter: blur(12px);
 }
 
+.workspaceGrid {
+  display: grid;
+  grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.sidebarPanel,
+.mainPanel {
+  margin-top: 16px;
+}
+
 .authPanel {
   display: grid;
   gap: 16px;
@@ -182,6 +194,10 @@ body {
   gap: 24px;
 }
 
+.controlPanel {
+  margin-top: 16px;
+}
+
 .stack {
   display: grid;
   gap: 14px;
@@ -214,6 +230,43 @@ body {
   outline: 2px solid rgba(216, 95, 56, 0.4);
 }
 
+.projectList {
+  display: grid;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.projectListItem {
+  display: block;
+  width: 100%;
+  padding: 18px;
+  text-align: left;
+  appearance: none;
+  cursor: pointer;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.58);
+  transition: border-color 140ms ease, transform 140ms ease, background 140ms ease;
+}
+
+.projectListItem:hover {
+  transform: translateY(-1px);
+  border-color: rgba(216, 95, 56, 0.28);
+}
+
+.projectListItemSelected {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(216, 95, 56, 0.38);
+  outline: 2px solid rgba(216, 95, 56, 0.22);
+}
+
+.projectListTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
 .scopeGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -222,6 +275,76 @@ body {
 
 .tableForm {
   padding-bottom: 20px;
+}
+
+.projectOverview {
+  padding: 20px 22px;
+  border-radius: 24px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.projectOverviewHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.projectOverviewHeader h3 {
+  margin: 0;
+}
+
+.inlineBadges {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.fieldSpanFull {
+  grid-column: 1 / -1;
+}
+
+.disclosureCard {
+  padding: 18px;
+  border-radius: 22px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.subtleDisclosure {
+  background: rgba(255, 255, 255, 0.44);
+}
+
+.compactDisclosure {
+  margin-top: 16px;
+}
+
+.disclosureSummary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.disclosureSummary::-webkit-details-marker {
+  display: none;
+}
+
+.disclosureSummary h3 {
+  margin: 0;
+}
+
+.disclosureCard[open] > .disclosureSummary {
+  margin-bottom: 16px;
 }
 
 .success {
@@ -271,6 +394,10 @@ body {
   margin: 18px 0 0;
 }
 
+.compactFacts {
+  margin-top: 14px;
+}
+
 .factsGrid {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
@@ -318,12 +445,24 @@ body {
   }
 
   .panelHeader,
-  .cardTop {
+  .cardTop,
+  .projectListTop,
+  .projectOverviewHeader,
+  .disclosureSummary {
     align-items: flex-start;
     flex-direction: column;
   }
 
+  .workspaceGrid,
   .splitPanel {
     grid-template-columns: 1fr;
+  }
+
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .fieldSpanFull {
+    grid-column: auto;
   }
 }

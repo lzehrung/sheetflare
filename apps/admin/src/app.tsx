@@ -656,7 +656,7 @@ export function App() {
         <p className="eyebrow">Cloudflare Durable Objects + Google Sheets</p>
         <h1>Sheetflare Admin</h1>
         <p className="lede">
-          A starter control plane for treating spreadsheet tabs like lightweight JSON tables.
+          Browse projects first, then open the actions you need. The control plane stays explicit, but the noisy parts stay out of the way until you ask for them.
         </p>
       </section>
 
@@ -672,82 +672,115 @@ export function App() {
         busy={busyAction !== null}
       />
 
-      <section className="panel">
+      <NoticeBanner tone={notice.tone} message={notice.message} />
+
+      <section className="workspaceGrid">
+        <section className="panel sidebarPanel">
+          <div className="panelHeader">
+            <div>
+              <h2>Projects</h2>
+              <p className="muted compact">Choose a spreadsheet-backed project to inspect its tables, cache state, and access controls.</p>
+            </div>
+            <div className="actions compactHeaderActions">
+              <button type="button" className="secondaryButton" onClick={() => void handleRefreshProjects()} disabled={!credential || busyAction !== null}>
+                Refresh projects
+              </button>
+              <span className="badge">{projectCount}</span>
+            </div>
+          </div>
+
+          {state.status === 'idle' ? <p className="muted">{state.message}</p> : null}
+          {state.status === 'loading' ? <p className="muted">Loading project registry...</p> : null}
+          {state.status === 'error' ? (
+            <p className="error">
+              {state.message}
+              {state.unauthorized ? ' Update the stored credential and try again.' : ''}
+            </p>
+          ) : null}
+          {state.status === 'ready' && state.data.length === 0 ? (
+            <p className="muted">No projects yet. Open Project setup below to create the first one.</p>
+          ) : null}
+          {state.status === 'ready' && state.data.length > 0 ? (
+            <ProjectCards
+              projects={state.data}
+              selectedProjectSlug={selectedProjectSlug}
+              onSelect={setSelectedProjectSlug}
+            />
+          ) : null}
+        </section>
+
+        <SelectedProjectPanel
+          selectedProjectSlug={selectedProjectSlug}
+          detailState={projectDetailState}
+          createTableDraft={createTableDraft}
+          tableFieldErrors={createTableValidation.fieldErrors}
+          cacheStateByTable={cacheStateByTable}
+          cacheStatusErrorByTable={cacheStatusErrorByTable}
+          cacheStatusLoadingByTable={cacheStatusLoadingByTable}
+          onCreateTableDraftChange={setCreateTableDraft}
+          onCreateTable={() => void handleCreateTable()}
+          onLoadCache={(tableSlug) => void handleLoadCache(tableSlug)}
+          onRefreshIfStale={(tableSlug) => void handleRefreshIfStale(tableSlug)}
+          onReindex={(tableSlug) => void handleReindex(tableSlug)}
+          onRefresh={() => void handleRefreshSelectedProject()}
+          busy={busyAction !== null}
+          createTableDisabled={!credential || !selectedProjectSlug || busyAction !== null || !createTableValidation.isValid}
+          getTableCacheKey={getTableCacheKey}
+        />
+      </section>
+
+      <section className="panel controlPanel">
         <div className="panelHeader">
-          <h2>Projects</h2>
-          <div className="actions compactHeaderActions">
-            <button type="button" className="secondaryButton" onClick={() => void handleRefreshProjects()} disabled={!credential || busyAction !== null}>
-              Refresh projects
-            </button>
-            <span className="badge">{projectCount}</span>
+          <div>
+            <h2>Actions</h2>
+            <p className="muted compact">Power-user setup and access management stay available here without dominating the main workspace.</p>
           </div>
         </div>
 
-        <NoticeBanner tone={notice.tone} message={notice.message} />
+        <div className="stack">
+          <details className="disclosureCard">
+            <summary className="disclosureSummary">
+              <div>
+                <h3>Project setup</h3>
+                <p className="muted compact">Create a new project and point it at a spreadsheet.</p>
+              </div>
+              <span className="badge badgeMuted">On demand</span>
+            </summary>
+            <CreateProjectForm
+              draft={createProjectDraft}
+              fieldErrors={createProjectValidation.fieldErrors}
+              onChange={setCreateProjectDraft}
+              onSubmit={() => void handleCreateProject()}
+              submitDisabled={!credential || busyAction !== null || !createProjectValidation.isValid}
+            />
+          </details>
 
-        {state.status === 'idle' ? <p className="muted">{state.message}</p> : null}
-        {state.status === 'loading' ? <p className="muted">Loading project registry...</p> : null}
-        {state.status === 'error' ? (
-          <p className="error">
-            {state.message}
-            {state.unauthorized ? ' Update the stored credential and try again.' : ''}
-          </p>
-        ) : null}
-        {state.status === 'ready' && state.data.length === 0 ? (
-          <p className="muted">No projects yet. Use the form below to create the first project.</p>
-        ) : null}
-        {state.status === 'ready' && state.data.length > 0 ? (
-          <ProjectCards
-            projects={state.data}
-            selectedProjectSlug={selectedProjectSlug}
-            onSelect={setSelectedProjectSlug}
-          />
-        ) : null}
+          <details className="disclosureCard">
+            <summary className="disclosureSummary">
+              <div>
+                <h3>Access keys</h3>
+                <p className="muted compact">Create scoped keys, review global keys, and revoke old credentials.</p>
+              </div>
+              <span className="badge badgeMuted">Power tools</span>
+            </summary>
+            <ApiKeyPanel
+              selectedProjectSlug={selectedProjectSlug}
+              draft={createKeyDraft}
+              fieldErrors={createKeyValidation.fieldErrors}
+              onChange={setCreateKeyDraft}
+              onSubmit={() => void handleCreateKey()}
+              submitDisabled={!credential || busyAction !== null || !createKeyValidation.isValid}
+              createdKey={createdKey}
+              projectKeysState={projectKeysState}
+              globalKeysState={globalKeysState}
+              busy={busyAction !== null}
+              onRevoke={(apiKeyId) => void handleRevokeKey(apiKeyId)}
+              onRefreshProjectKeys={() => void handleRefreshProjectKeys()}
+              onRefreshGlobalKeys={() => void handleRefreshGlobalKeys()}
+            />
+          </details>
+        </div>
       </section>
-
-      <section className="panel splitPanel">
-        <CreateProjectForm
-          draft={createProjectDraft}
-          fieldErrors={createProjectValidation.fieldErrors}
-          onChange={setCreateProjectDraft}
-          onSubmit={() => void handleCreateProject()}
-          submitDisabled={!credential || busyAction !== null || !createProjectValidation.isValid}
-        />
-        <ApiKeyPanel
-          selectedProjectSlug={selectedProjectSlug}
-          draft={createKeyDraft}
-          fieldErrors={createKeyValidation.fieldErrors}
-          onChange={setCreateKeyDraft}
-          onSubmit={() => void handleCreateKey()}
-          submitDisabled={!credential || busyAction !== null || !createKeyValidation.isValid}
-          createdKey={createdKey}
-          projectKeysState={projectKeysState}
-          globalKeysState={globalKeysState}
-          busy={busyAction !== null}
-          onRevoke={(apiKeyId) => void handleRevokeKey(apiKeyId)}
-          onRefreshProjectKeys={() => void handleRefreshProjectKeys()}
-          onRefreshGlobalKeys={() => void handleRefreshGlobalKeys()}
-        />
-      </section>
-
-      <SelectedProjectPanel
-        selectedProjectSlug={selectedProjectSlug}
-        detailState={projectDetailState}
-        createTableDraft={createTableDraft}
-        tableFieldErrors={createTableValidation.fieldErrors}
-        cacheStateByTable={cacheStateByTable}
-        cacheStatusErrorByTable={cacheStatusErrorByTable}
-        cacheStatusLoadingByTable={cacheStatusLoadingByTable}
-        onCreateTableDraftChange={setCreateTableDraft}
-        onCreateTable={() => void handleCreateTable()}
-        onLoadCache={(tableSlug) => void handleLoadCache(tableSlug)}
-        onRefreshIfStale={(tableSlug) => void handleRefreshIfStale(tableSlug)}
-        onReindex={(tableSlug) => void handleReindex(tableSlug)}
-        onRefresh={() => void handleRefreshSelectedProject()}
-        busy={busyAction !== null}
-        createTableDisabled={!credential || !selectedProjectSlug || busyAction !== null || !createTableValidation.isValid}
-        getTableCacheKey={getTableCacheKey}
-      />
     </main>
   );
 }

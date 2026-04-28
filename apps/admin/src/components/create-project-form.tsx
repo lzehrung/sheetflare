@@ -20,12 +20,9 @@ export function CreateProjectForm({
   submitDisabled
 }: CreateProjectFormProps) {
   return (
-    <div>
-      <div className="panelHeader">
-        <h2>Create Project</h2>
-      </div>
-      <div className="stack">
-        {fieldErrors.form ? <p className="error">{fieldErrors.form}</p> : null}
+    <div className="stack compactStack">
+      {fieldErrors.form ? <p className="error">{fieldErrors.form}</p> : null}
+      <div className="formGrid twoColumnForm">
         <label className="field">
           <span>Slug</span>
           <input
@@ -44,7 +41,7 @@ export function CreateProjectForm({
           />
           {renderFieldError(fieldErrors.name)}
         </label>
-        <label className="field">
+        <label className="field fieldSpanFull">
           <span>Spreadsheet ID</span>
           <input
             value={draft.spreadsheetId}
@@ -78,11 +75,11 @@ export function CreateProjectForm({
             <option value="public-read">public-read</option>
           </select>
         </label>
-        <div className="actions">
-          <button type="button" onClick={onSubmit} disabled={submitDisabled}>
-            Save project
-          </button>
-        </div>
+      </div>
+      <div className="actions">
+        <button type="button" onClick={onSubmit} disabled={submitDisabled}>
+          Save project
+        </button>
       </div>
     </div>
   );
