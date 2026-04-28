@@ -67,15 +67,9 @@ body {
   backdrop-filter: blur(12px);
 }
 
-.workspaceGrid {
-  display: grid;
-  grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
-}
-
-.sidebarPanel,
-.mainPanel {
+.workspaceStack,
+.mainPanel,
+.projectPanel {
   margin-top: 16px;
 }
 
@@ -239,6 +233,7 @@ body {
 .projectListItem {
   display: block;
   width: 100%;
+  min-width: 0;
   padding: 18px;
   text-align: left;
   appearance: none;
@@ -265,6 +260,24 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+}
+
+.projectPickerSummary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 20px;
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.projectPickerName {
+  margin: 4px 0 0;
+  font-family: "IBM Plex Serif", Georgia, serif;
+  font-size: 1.3rem;
 }
 
 .scopeGrid {
@@ -447,15 +460,11 @@ body {
   .panelHeader,
   .cardTop,
   .projectListTop,
+  .projectPickerSummary,
   .projectOverviewHeader,
   .disclosureSummary {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .workspaceGrid,
-  .splitPanel {
-    grid-template-columns: 1fr;
   }
 
   .formGrid {

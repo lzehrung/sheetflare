@@ -58,7 +58,7 @@ export function SelectedProjectPanel({
     <section className="panel mainPanel">
       <div className="panelHeader">
         <div>
-          <h2>Selected Project</h2>
+          <h2>Project</h2>
           <p className="muted compact">{selectedProjectSlug ?? 'No project selected'}</p>
         </div>
         <div className="actions compactHeaderActions">
@@ -82,9 +82,7 @@ export function SelectedProjectPanel({
             <div className="projectOverviewHeader">
               <div>
                 <h3>{detailState.project.name}</h3>
-                <p className="muted compact">
-                  Inspect table health first. Expand setup drawers only when you need to change structure.
-                </p>
+                <p className="muted compact">Review table status, cache state, and table settings.</p>
               </div>
               <div className="inlineBadges">
                 <span className="badge">{detailState.tables.length} tables</span>
@@ -114,9 +112,7 @@ export function SelectedProjectPanel({
             <summary className="disclosureSummary">
               <div>
                 <h3>Create Table</h3>
-                <p className="muted compact">
-                  Add a new tab mapping and keep advanced options tucked into one form.
-                </p>
+                <p className="muted compact">Add a new tab mapping for this spreadsheet.</p>
               </div>
               <span className="badge badgeMuted">Optional</span>
             </summary>
