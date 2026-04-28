@@ -13,7 +13,14 @@ describe('parseBootstrapConfig', () => {
             {
               tableSlug: 'users',
               sheetTabName: 'Users',
-              indexedFields: ['name']
+              indexedFields: ['name'],
+              fieldRules: {
+                email: {
+                  required: true,
+                  unique: true,
+                  normalize: ['trim', 'lowercase']
+                }
+              }
             }
           ]
         }
@@ -34,7 +41,14 @@ describe('parseBootstrapConfig', () => {
             {
               tableSlug: 'users',
               sheetTabName: 'Users',
-              indexedFields: ['name']
+              indexedFields: ['name'],
+              fieldRules: {
+                email: {
+                  required: true,
+                  unique: true,
+                  normalize: ['trim', 'lowercase']
+                }
+              }
             }
           ]
         }

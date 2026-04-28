@@ -54,8 +54,9 @@ When you are onboarding a spreadsheet for the first time, the minimal operator f
 1. Share the spreadsheet with the configured Sheetflare service-account email as an `Editor`.
 2. Confirm the source tab has a stable `_id` column with unique non-blank values.
 3. Decide whether any columns must stay sheet-managed, for example formula or operator-owned columns, and list them in `readOnlyFields`.
-4. Set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON`.
-5. Run `npm run ops:bootstrap`.
+4. Decide whether the API should enforce `fieldRules` such as required, unique, enum, normalize, or type checks.
+5. Set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON`.
+6. Run `npm run ops:bootstrap`.
 
 Example:
 
@@ -76,6 +77,16 @@ $env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
           "idColumn": "_id",
           "indexedFields": ["name", "status"],
           "readOnlyFields": ["status_label"],
+          "fieldRules": {
+            "email": {
+              "required": true,
+              "unique": true,
+              "normalize": ["trim", "lowercase"]
+            },
+            "status": {
+              "enum": ["pending", "active"]
+            }
+          },
           "cacheTtlSeconds": 15
         }
       ]
@@ -106,6 +117,14 @@ For a public anonymous read surface, create a separate project with `defaultAuth
 - a column is driven by a sheet formula
 - a column is maintained manually in Sheets
 - the API should expose the value but must never overwrite it
+
+`fieldRules` are the right tool when:
+
+- a value must be present on API writes
+- a field should only allow a fixed set of string values
+- a field such as `email` must stay unique
+- a value should be normalized before write, for example trimmed/lowercased email
+- a field should reject non-numeric, non-boolean, or non-ISO date inputs
 
 ## Check Cache Status
 

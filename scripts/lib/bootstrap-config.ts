@@ -7,6 +7,7 @@ type BootstrapTable = {
   sheetGid?: number | undefined;
   idColumn?: string | undefined;
   indexedFields?: string[] | undefined;
+  fieldRules?: Record<string, unknown> | undefined;
   headerRow?: number | undefined;
   dataStartRow?: number | undefined;
   readEnabled?: boolean | undefined;
