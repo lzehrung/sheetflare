@@ -355,7 +355,8 @@ describe('App', () => {
     fireEvent.click(screen.getByText('Save and load'));
 
     await screen.findByTestId('table-card-users');
-    await screen.findByText('ready / fresh / 3 rows');
+    const initialStatuses = await screen.findAllByText('ready / fresh / 3 rows');
+    expect(initialStatuses.length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByTestId('project-card-prod'));
     await waitFor(() => {
@@ -363,8 +364,8 @@ describe('App', () => {
     });
 
     await waitFor(() => {
-      expect(screen.queryByText('ready / fresh / 3 rows')).toBeNull();
-      expect(screen.getByText('ready / fresh / 1 rows')).toBeTruthy();
+      expect(screen.queryAllByText('ready / fresh / 3 rows')).toHaveLength(0);
+      expect(screen.getAllByText('ready / fresh / 1 rows').length).toBeGreaterThan(0);
     });
   });
 
@@ -465,13 +466,15 @@ describe('App', () => {
     });
     fireEvent.click(screen.getByText('Save and load'));
 
-    await screen.findByText('ready / ttl-expired / 0 rows');
+    const staleStatuses = await screen.findAllByText('ready / ttl-expired / 0 rows');
+    expect(staleStatuses.length).toBeGreaterThan(0);
     const spreadsheetLink = screen.getByRole('link', { name: 'Open in Google Sheets' });
     expect(spreadsheetLink.getAttribute('href')).toBe('https://docs.google.com/spreadsheets/d/sheet-1/edit');
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh if stale' }));
     await screen.findByText('Refreshing cache for demo/users if stale complete.');
-    await screen.findByText('ready / fresh / 3 rows');
+    const refreshedStatuses = await screen.findAllByText('ready / fresh / 3 rows');
+    expect(refreshedStatuses.length).toBeGreaterThan(0);
   });
 
   it('clears the revealed key when the selected project changes', async () => {

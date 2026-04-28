@@ -55,7 +55,7 @@ export function SelectedProjectPanel({
       : null;
 
   return (
-    <section className="panel">
+    <section className="panel mainPanel">
       <div className="panelHeader">
         <div>
           <h2>Selected Project</h2>
@@ -78,121 +78,135 @@ export function SelectedProjectPanel({
       {detailState.status === 'error' ? <p className="error">{detailState.message}</p> : null}
       {detailState.status === 'ready' ? (
         <>
-          <dl className="facts factsGrid">
-            <div>
-              <dt>Name</dt>
-              <dd>{detailState.project.name}</dd>
+          <div className="projectOverview">
+            <div className="projectOverviewHeader">
+              <div>
+                <h3>{detailState.project.name}</h3>
+                <p className="muted compact">
+                  Inspect table health first. Expand setup drawers only when you need to change structure.
+                </p>
+              </div>
+              <div className="inlineBadges">
+                <span className="badge">{detailState.tables.length} tables</span>
+                <span className="badge badgeMuted">{detailState.project.defaultAuthMode}</span>
+              </div>
             </div>
-            <div>
-              <dt>Spreadsheet</dt>
-              <dd>
-                <span>{detailState.project.spreadsheetId}</span>{' '}
-                {spreadsheetUrl ? (
-                  <a href={spreadsheetUrl} target="_blank" rel="noreferrer">
-                    Open in Google Sheets
-                  </a>
-                ) : null}
-              </dd>
-            </div>
-            <div>
-              <dt>Default Auth</dt>
-              <dd>{detailState.project.defaultAuthMode}</dd>
-            </div>
-            <div>
-              <dt>Google Credential Ref</dt>
-              <dd>{detailState.project.googleCredentialRef}</dd>
-            </div>
-          </dl>
+            <dl className="facts factsGrid compactFacts">
+              <div>
+                <dt>Spreadsheet</dt>
+                <dd>
+                  <span>{detailState.project.spreadsheetId}</span>{' '}
+                  {spreadsheetUrl ? (
+                    <a href={spreadsheetUrl} target="_blank" rel="noreferrer">
+                      Open in Google Sheets
+                    </a>
+                  ) : null}
+                </dd>
+              </div>
+              <div>
+                <dt>Google Credential Ref</dt>
+                <dd>{detailState.project.googleCredentialRef}</dd>
+              </div>
+            </dl>
+          </div>
 
-          <div className="tableForm">
-            <div className="panelHeader">
-              <h3>Create Table</h3>
-            </div>
+          <details className="disclosureCard">
+            <summary className="disclosureSummary">
+              <div>
+                <h3>Create Table</h3>
+                <p className="muted compact">
+                  Add a new tab mapping and keep advanced options tucked into one form.
+                </p>
+              </div>
+              <span className="badge badgeMuted">Optional</span>
+            </summary>
             <div className="stack compactStack">
               {tableFieldErrors.form ? <p className="error">{tableFieldErrors.form}</p> : null}
-              <label className="field">
-                <span>Table Slug</span>
-                <input
-                  value={createTableDraft.tableSlug}
-                  onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, tableSlug: event.target.value })}
-                  aria-invalid={tableFieldErrors.tableSlug ? 'true' : 'false'}
-                />
-                {renderFieldError(tableFieldErrors.tableSlug)}
-              </label>
-              <label className="field">
-                <span>Sheet Tab</span>
-                <input
-                  value={createTableDraft.sheetTabName}
-                  onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, sheetTabName: event.target.value })}
-                  aria-invalid={tableFieldErrors.sheetTabName ? 'true' : 'false'}
-                />
-                {renderFieldError(tableFieldErrors.sheetTabName)}
-              </label>
-              <label className="field">
-                <span>Sheet GID</span>
-                <input
-                  value={createTableDraft.sheetGid}
-                  onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, sheetGid: event.target.value })}
-                  placeholder="Optional numeric sheet id"
-                  aria-invalid={tableFieldErrors.sheetGid ? 'true' : 'false'}
-                />
-                {renderFieldError(tableFieldErrors.sheetGid)}
-              </label>
-              <label className="field">
-                <span>ID Column</span>
-                <input
-                  value={createTableDraft.idColumn}
-                  onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, idColumn: event.target.value })}
-                  aria-invalid={tableFieldErrors.idColumn ? 'true' : 'false'}
-                />
-                {renderFieldError(tableFieldErrors.idColumn)}
-              </label>
-              <label className="field">
-                <span>Indexed Fields</span>
-                <input
-                  value={createTableDraft.indexedFields}
-                  onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, indexedFields: event.target.value })}
-                  aria-invalid={tableFieldErrors.indexedFields ? 'true' : 'false'}
-                />
-                {renderFieldError(tableFieldErrors.indexedFields)}
-              </label>
-              <label className="field">
-                <span>Read-only Fields</span>
-                <input
-                  value={createTableDraft.readOnlyFields}
-                  onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, readOnlyFields: event.target.value })}
-                  placeholder="Optional comma-separated columns"
-                  aria-invalid={tableFieldErrors.readOnlyFields ? 'true' : 'false'}
-                />
-                {renderFieldError(tableFieldErrors.readOnlyFields)}
-              </label>
-              <label className="field">
-                <span>Header Row</span>
-                <input
-                  value={createTableDraft.headerRow}
-                  onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, headerRow: event.target.value })}
-                  aria-invalid={tableFieldErrors.headerRow ? 'true' : 'false'}
-                />
-                {renderFieldError(tableFieldErrors.headerRow)}
-              </label>
-              <label className="field">
-                <span>Data Start Row</span>
-                <input
-                  value={createTableDraft.dataStartRow}
-                  onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, dataStartRow: event.target.value })}
-                  aria-invalid={tableFieldErrors.dataStartRow ? 'true' : 'false'}
-                />
-                {renderFieldError(tableFieldErrors.dataStartRow)}
-              </label>
-              <label className="field">
-                <span>Cache TTL Seconds</span>
-                <input
-                  value={createTableDraft.cacheTtlSeconds}
-                  onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, cacheTtlSeconds: event.target.value })}
-                  aria-invalid={tableFieldErrors.cacheTtlSeconds ? 'true' : 'false'}
-                />
-                {renderFieldError(tableFieldErrors.cacheTtlSeconds)}
-              </label>
+              <div className="formGrid">
+                <label className="field">
+                  <span>Table Slug</span>
+                  <input
+                    value={createTableDraft.tableSlug}
+                    onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, tableSlug: event.target.value })}
+                    aria-invalid={tableFieldErrors.tableSlug ? 'true' : 'false'}
+                  />
+                  {renderFieldError(tableFieldErrors.tableSlug)}
+                </label>
+                <label className="field">
+                  <span>Sheet Tab</span>
+                  <input
+                    value={createTableDraft.sheetTabName}
+                    onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, sheetTabName: event.target.value })}
+                    aria-invalid={tableFieldErrors.sheetTabName ? 'true' : 'false'}
+                  />
+                  {renderFieldError(tableFieldErrors.sheetTabName)}
+                </label>
+                <label className="field">
+                  <span>Sheet GID</span>
+                  <input
+                    value={createTableDraft.sheetGid}
+                    onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, sheetGid: event.target.value })}
+                    placeholder="Optional numeric sheet id"
+                    aria-invalid={tableFieldErrors.sheetGid ? 'true' : 'false'}
+                  />
+                  {renderFieldError(tableFieldErrors.sheetGid)}
+                </label>
+                <label className="field">
+                  <span>ID Column</span>
+                  <input
+                    value={createTableDraft.idColumn}
+                    onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, idColumn: event.target.value })}
+                    aria-invalid={tableFieldErrors.idColumn ? 'true' : 'false'}
+                  />
+                  {renderFieldError(tableFieldErrors.idColumn)}
+                </label>
+                <label className="field fieldSpanFull">
+                  <span>Indexed Fields</span>
+                  <input
+                    value={createTableDraft.indexedFields}
+                    onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, indexedFields: event.target.value })}
+                    aria-invalid={tableFieldErrors.indexedFields ? 'true' : 'false'}
+                  />
+                  {renderFieldError(tableFieldErrors.indexedFields)}
+                </label>
+                <label className="field fieldSpanFull">
+                  <span>Read-only Fields</span>
+                  <input
+                    value={createTableDraft.readOnlyFields}
+                    onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, readOnlyFields: event.target.value })}
+                    placeholder="Optional comma-separated columns"
+                    aria-invalid={tableFieldErrors.readOnlyFields ? 'true' : 'false'}
+                  />
+                  {renderFieldError(tableFieldErrors.readOnlyFields)}
+                </label>
+                <label className="field">
+                  <span>Header Row</span>
+                  <input
+                    value={createTableDraft.headerRow}
+                    onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, headerRow: event.target.value })}
+                    aria-invalid={tableFieldErrors.headerRow ? 'true' : 'false'}
+                  />
+                  {renderFieldError(tableFieldErrors.headerRow)}
+                </label>
+                <label className="field">
+                  <span>Data Start Row</span>
+                  <input
+                    value={createTableDraft.dataStartRow}
+                    onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, dataStartRow: event.target.value })}
+                    aria-invalid={tableFieldErrors.dataStartRow ? 'true' : 'false'}
+                  />
+                  {renderFieldError(tableFieldErrors.dataStartRow)}
+                </label>
+                <label className="field">
+                  <span>Cache TTL Seconds</span>
+                  <input
+                    value={createTableDraft.cacheTtlSeconds}
+                    onChange={(event) => onCreateTableDraftChange({ ...createTableDraft, cacheTtlSeconds: event.target.value })}
+                    aria-invalid={tableFieldErrors.cacheTtlSeconds ? 'true' : 'false'}
+                  />
+                  {renderFieldError(tableFieldErrors.cacheTtlSeconds)}
+                </label>
+              </div>
               <div className="scopeGrid">
                 <label className="toggle">
                   <input
@@ -233,9 +247,11 @@ export function SelectedProjectPanel({
                 </button>
               </div>
             </div>
-          </div>
+          </details>
 
-          {detailState.tables.length === 0 ? <p className="muted">No tables configured yet.</p> : null}
+          {detailState.tables.length === 0 ? (
+            <p className="muted">No tables configured yet. Open Create Table when you are ready to add one.</p>
+          ) : null}
           {detailState.tables.length > 0 ? (
             <div className="cards">
               {detailState.tables.map((table) => {
@@ -244,6 +260,7 @@ export function SelectedProjectPanel({
                 const cacheStatusError = cacheStatusErrorByTable[cacheKey] ?? null;
                 const cacheStatusLoading = cacheStatusLoadingByTable[cacheKey] ?? false;
                 const readOnlyFields = table.readOnlyFields ?? [];
+
                 return (
                   <article key={table.tableSlug} className="card" data-testid={`table-card-${table.tableSlug}`}>
                     <div className="cardTop">
@@ -251,15 +268,19 @@ export function SelectedProjectPanel({
                         <p className="slug">{table.tableSlug}</p>
                         <h3>{table.sheetTabName}</h3>
                       </div>
-                      <span className="badge">{table.cacheTtlSeconds}s TTL</span>
+                      <div className="inlineBadges">
+                        <span className="badge">{table.cacheTtlSeconds}s TTL</span>
+                        <span className={`badge${cache?.stale ? ' badgeMuted' : ''}`}>{cache ? cache.status : 'pending'}</span>
+                      </div>
                     </div>
-                    <dl className="facts">
+
+                    <dl className="facts compactFacts">
                       <div>
                         <dt>ID Column</dt>
                         <dd>{table.idColumn}</dd>
                       </div>
                       <div>
-                        <dt>Indexed</dt>
+                        <dt>Indexes</dt>
                         <dd>{table.indexedFields.join(', ')}</dd>
                       </div>
                       <div>
@@ -290,8 +311,28 @@ export function SelectedProjectPanel({
                           <dd>Cache status not loaded yet.</dd>
                         </div>
                       ) : null}
-                      {cache ? <CacheStatusSummary cache={cache} /> : null}
+                      {cache ? (
+                        <div>
+                          <dt>Cache Summary</dt>
+                          <dd>{cache.status} / {cache.staleReason} / {cache.rowCount} rows</dd>
+                        </div>
+                      ) : null}
                     </dl>
+
+                    {cache ? (
+                      <details className="disclosureCard subtleDisclosure compactDisclosure">
+                        <summary className="disclosureSummary">
+                          <div>
+                            <h3>Diagnostics</h3>
+                            <p className="muted compact">Timestamps, freshness, and last sync error.</p>
+                          </div>
+                        </summary>
+                        <dl className="facts compactFacts">
+                          <CacheStatusSummary cache={cache} />
+                        </dl>
+                      </details>
+                    ) : null}
+
                     <div className="actions compactActions">
                       <button type="button" onClick={() => onLoadCache(table.tableSlug)} disabled={busy}>
                         Get cache status
