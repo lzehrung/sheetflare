@@ -4,6 +4,8 @@ This guide defines the expected deployment and verification flow for Sheetflare.
 
 Use [google-service-accounts.md](./google-service-accounts.md) for the exact recommended Google credential model, secret layout, and rotation workflow.
 
+If you are maintaining this repository's shared staging workflows, use [contributor-staging.md](./contributor-staging.md) for the exact GitHub secret names and project-specific staging asset names.
+
 ## Required Environment
 
 Set these on the Worker:
@@ -23,6 +25,27 @@ Recommendations:
 - use one dedicated Google service account per environment unless you have a real reason to isolate further
 - start with conservative rate limits and raise only after observing real traffic
 - keep `TABLE_MAX_FULL_SCAN_ROWS` at the safe default until you have benchmark evidence for a higher value
+
+## GitHub Actions Deployment
+
+If you deploy through GitHub Actions with Wrangler, the workflow needs:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+
+For this repo's current deploy flows, the smallest useful Cloudflare account token is:
+
+- `Workers Scripts Write` for `wrangler deploy` and `wrangler secret put`
+- `Pages Write` for `wrangler pages deploy` and `wrangler pages secret put`
+
+Keep that token scoped to the single target Cloudflare account.
+
+`CLOUDFLARE_ACCOUNT_ID` is an account identifier rather than secret material, but many teams still store it as a GitHub secret for workflow simplicity. A repository variable also works if you update the workflow to read from `vars` instead of `secrets`.
+
+In this repository's staging workflows, the additional repo-specific secrets are:
+
+- Worker staging deploy: `SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY`, `SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN`
+- Admin staging deploy: `SHEETFLARE_STAGING_ADMIN_UI_USERNAME`, `SHEETFLARE_STAGING_ADMIN_UI_PASSWORD`
 
 ## Pre-Deploy Checklist
 

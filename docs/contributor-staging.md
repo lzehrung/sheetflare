@@ -105,8 +105,26 @@ The repo includes a separate on-demand admin deploy workflow:
 
 Required GitHub repository secrets for the admin workflow:
 
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
 - `SHEETFLARE_STAGING_ADMIN_UI_USERNAME`
 - `SHEETFLARE_STAGING_ADMIN_UI_PASSWORD`
+
+Across both workflows, the full unique secret set is:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+- `SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY`
+- `SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN`
+- `SHEETFLARE_STAGING_ADMIN_UI_USERNAME`
+- `SHEETFLARE_STAGING_ADMIN_UI_PASSWORD`
+
+Use the smallest Cloudflare account token that satisfies the workflows:
+
+- `Workers Scripts Write`
+- `Pages Write`
+
+The generic token-scope guidance lives in [deploy.md](./deploy.md). This guide is the source of truth for the exact secret names used by this repository's staging workflows.
 
 ## What Does Not Belong In Consumer Docs
 
