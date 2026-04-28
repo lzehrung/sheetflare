@@ -625,6 +625,109 @@ describe('GoogleSheetsService.readAllRows', () => {
   });
 });
 
+describe('GoogleSheetsService.listSheetTabs', () => {
+  it('lists spreadsheet tabs with titles and gids', async () => {
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes('?fields=sheets.properties(sheetId,title,sheetType)')) {
+          return Response.json({
+            sheets: [
+              {
+                properties: {
+                  title: ' Users ',
+                  sheetId: 11,
+                  sheetType: 'GRID'
+                }
+              },
+              {
+                properties: {
+                  title: 'Archive',
+                  sheetId: 12,
+                  sheetType: 'GRID'
+                }
+              },
+              {
+                properties: {
+                  title: '',
+                  sheetId: 13,
+                  sheetType: 'GRID'
+                }
+              },
+              {
+                properties: {
+                  title: 'Chart 1',
+                  sheetId: 14,
+                  sheetType: 'OBJECT'
+                }
+              },
+              {
+                properties: {
+                  title: 'Missing id'
+                }
+              }
+            ]
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    await expect(service.listSheetTabs('sheet-1')).resolves.toEqual([
+      {
+        title: ' Users ',
+        sheetGid: 11
+      },
+      {
+        title: 'Archive',
+        sheetGid: 12
+      }
+    ]);
+  });
+});
+
+describe('GoogleSheetsService.readHeaderNames', () => {
+  it('reads header names without requiring the managed id column', async () => {
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = decodeURIComponent(String(input));
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes("/values/'Users'!3:3")) {
+          return Response.json({
+            values: [['Email', 'Status', 'Derived']]
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    await expect(service.readHeaderNames('sheet-1', 'Users', 3)).resolves.toEqual([
+      'Email',
+      'Status',
+      'Derived'
+    ]);
+  });
+});
+
 describe('GoogleSheetsService.writeRow', () => {
   it('sends raw values to Sheets so the API preserves literal cell contents', async () => {
     const requestedUrls: string[] = [];

@@ -75,6 +75,20 @@ function createSheetsFetch(sheet: SheetState) {
           });
     }
 
+    if (url.includes('?fields=sheets.properties(sheetId,title,sheetType)')) {
+      return Response.json({
+        sheets: [
+          {
+            properties: {
+              title: 'Users',
+              sheetId: 1,
+              sheetType: 'GRID'
+            }
+          }
+        ]
+      });
+    }
+
     if (url.includes('/values:batchUpdate')) {
       const body = JSON.parse(String(init?.body ?? '{}')) as {
         data?: Array<{ range?: string; values?: string[][] }>;
@@ -208,6 +222,13 @@ function createTestEnv(overrides?: Partial<CloudflareEnv>) {
 describe('TableDO', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.stubGlobal('fetch', createSheetsFetch({
+      rows: [
+        ['_id', 'name', 'email', 'status', 'derived', 'score', 'dueDate'],
+        ['row-1', 'Ada', 'ada@example.com', 'active', 'computed', '5', '2026-04-26']
+      ],
+      requestedRanges: []
+    }));
   });
 
   it('defaults project credentials to the shared default ref when omitted', async () => {
@@ -247,6 +268,126 @@ describe('TableDO', () => {
     ).rejects.toMatchObject({
       name: 'NotFoundError',
       message: 'Google credential "missing" was not found.'
+    });
+  });
+
+  it('rejects table creation when the configured tab fields do not exist in the detected headers', async () => {
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await expect(
+      doRpc<ProjectDoResponse>(
+        env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+        {
+          type: 'project.table.create',
+          projectSlug: 'demo',
+          input: {
+            tableSlug: 'users',
+            sheetTabName: 'Users',
+            idColumn: '_id',
+            indexedFields: ['email', 'missing'],
+            headerRow: 1,
+            dataStartRow: 2,
+            readEnabled: true,
+            createEnabled: true,
+            updateEnabled: true,
+            deleteEnabled: true,
+            cacheTtlSeconds: 15
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Indexed field missing is not present in the detected sheet headers.'
+    });
+  });
+
+  it('rejects table creation when the provided sheet gid does not match the discovered tab', async () => {
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await expect(
+      doRpc<ProjectDoResponse>(
+        env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+        {
+          type: 'project.table.create',
+          projectSlug: 'demo',
+          input: {
+            tableSlug: 'users',
+            sheetTabName: 'Users',
+            sheetGid: 999,
+            idColumn: '_id',
+            indexedFields: ['name'],
+            headerRow: 1,
+            dataStartRow: 2,
+            readEnabled: true,
+            createEnabled: true,
+            updateEnabled: true,
+            deleteEnabled: true,
+            cacheTtlSeconds: 15
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Sheet GID 999 does not match tab Users in spreadsheet sheet-1.'
+    });
+  });
+
+  it('inspects spreadsheet tabs through ProjectDO using live sheet metadata', async () => {
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    const response = await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.spreadsheet.tab.inspect',
+        projectSlug: 'demo',
+        tab: 'Users',
+        headerRow: 1
+      }
+    );
+
+    expect((response as { type: 'project.spreadsheet.tab.inspect.result'; result: { data: { tab: { title: string; sheetGid: number }; headers: string[] } } }).result.data).toEqual({
+      tab: {
+        title: 'Users',
+        sheetGid: 1
+      },
+      headerRow: 1,
+      headers: ['_id', 'name', 'email', 'status', 'derived', 'score', 'dueDate']
     });
   });
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { adminCredentialHeaderName } from './auth';
-import { listApiKeys, listProjects, refreshTableCache, revokeApiKey } from './api';
+import { inspectSpreadsheetTab, listApiKeys, listProjects, listSpreadsheetTabs, refreshTableCache, revokeApiKey } from './api';
 
 describe('admin api helpers', () => {
   afterEach(() => {
@@ -116,6 +116,72 @@ describe('admin api helpers', () => {
       '/v1/admin/projects/demo/tables/users/refresh',
       expect.objectContaining({
         method: 'POST',
+        headers: {
+          [adminCredentialHeaderName]: 'secret'
+        }
+      })
+    );
+  });
+
+  it('lists spreadsheet tabs through the admin api', async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        data: [
+          {
+            title: 'Users',
+            sheetGid: 11
+          }
+        ]
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(listSpreadsheetTabs('secret', 'demo')).resolves.toEqual({
+      data: [
+        {
+          title: 'Users',
+          sheetGid: 11
+        }
+      ]
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/v1/admin/projects/demo/spreadsheet/tabs',
+      expect.objectContaining({
+        headers: {
+          [adminCredentialHeaderName]: 'secret'
+        }
+      })
+    );
+  });
+
+  it('inspects a spreadsheet tab header row through the admin api', async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        data: {
+          tab: {
+            title: 'Users',
+            sheetGid: 11
+          },
+          headerRow: 3,
+          headers: ['_id', 'email', 'status']
+        }
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(inspectSpreadsheetTab('secret', 'demo', 'Users', 3)).resolves.toEqual({
+      data: {
+        tab: {
+          title: 'Users',
+          sheetGid: 11
+        },
+        headerRow: 3,
+        headers: ['_id', 'email', 'status']
+      }
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/v1/admin/projects/demo/spreadsheet/tabs/Users?headerRow=3',
+      expect.objectContaining({
         headers: {
           [adminCredentialHeaderName]: 'secret'
         }

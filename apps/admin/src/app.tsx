@@ -1,5 +1,13 @@
 import { useEffect, useState } from 'react';
-import type { ApiKeyPrincipal, ProjectConfig, ProjectSummary, TableCacheStatus, TableConfig } from '@sheetflare/contracts';
+import type {
+  AdminInspectSpreadsheetTabResult,
+  ApiKeyPrincipal,
+  ProjectConfig,
+  ProjectSummary,
+  SpreadsheetTab,
+  TableCacheStatus,
+  TableConfig
+} from '@sheetflare/contracts';
 import {
   initialCreateKeyDraft,
   initialCreateProjectDraft,
@@ -17,8 +25,10 @@ import {
   createTable,
   getCacheStatus,
   getProject,
+  inspectSpreadsheetTab,
   listApiKeys,
   listProjects,
+  listSpreadsheetTabs,
   refreshTableCache,
   revokeApiKey,
   reindexTable
@@ -69,6 +79,17 @@ type NoticeState =
 type CacheStateByTable = Record<string, TableCacheStatus | null>;
 type CacheStatusErrorByTable = Record<string, string | null>;
 type CacheStatusLoadingByTable = Record<string, boolean>;
+type SpreadsheetTabsState =
+  | { status: 'idle'; message: string }
+  | { status: 'loading' }
+  | { status: 'ready'; data: SpreadsheetTab[] }
+  | { status: 'error'; message: string };
+
+type TabInspectionState =
+  | { status: 'idle'; message: string }
+  | { status: 'loading'; tabName: string; headerRow: number }
+  | { status: 'ready'; data: AdminInspectSpreadsheetTabResult['data'] }
+  | { status: 'error'; message: string; tabName: string; headerRow: number };
 
 function getInitialCredential() {
   if (typeof window === 'undefined') {
@@ -88,6 +109,64 @@ function getSelectedProjectSlug(projects: ProjectSummary[], currentProjectSlug: 
 
 function getTableCacheKey(projectSlug: string, tableSlug: string) {
   return `${projectSlug}:${tableSlug}`;
+}
+
+function slugifyTableEntity(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-');
+}
+
+function countTableHealth(
+  projectSlug: string,
+  tables: TableConfig[],
+  cacheStateByTable: CacheStateByTable,
+  cacheStatusErrorByTable: CacheStatusErrorByTable,
+  cacheStatusLoadingByTable: CacheStatusLoadingByTable
+) {
+  return tables.reduce(
+    (summary, table) => {
+      const cacheKey = getTableCacheKey(projectSlug, table.tableSlug);
+      if (cacheStatusLoadingByTable[cacheKey]) {
+        summary.loading += 1;
+        return summary;
+      }
+
+      if (cacheStatusErrorByTable[cacheKey]) {
+        summary.error += 1;
+        return summary;
+      }
+
+      const cache = cacheStateByTable[cacheKey];
+      if (!cache) {
+        summary.pending += 1;
+        return summary;
+      }
+
+      if (cache.status === 'error') {
+        summary.error += 1;
+        return summary;
+      }
+
+      if (cache.stale) {
+        summary.stale += 1;
+        return summary;
+      }
+
+      summary.healthy += 1;
+      return summary;
+    },
+    {
+      healthy: 0,
+      stale: 0,
+      error: 0,
+      loading: 0,
+      pending: 0
+    }
+  );
 }
 
 export function App() {
@@ -119,6 +198,14 @@ export function App() {
   const [cacheStateByTable, setCacheStateByTable] = useState<CacheStateByTable>({});
   const [cacheStatusErrorByTable, setCacheStatusErrorByTable] = useState<CacheStatusErrorByTable>({});
   const [cacheStatusLoadingByTable, setCacheStatusLoadingByTable] = useState<CacheStatusLoadingByTable>({});
+  const [spreadsheetTabsState, setSpreadsheetTabsState] = useState<SpreadsheetTabsState>({
+    status: 'idle',
+    message: 'Open table setup to load spreadsheet tabs.'
+  });
+  const [tabInspectionState, setTabInspectionState] = useState<TabInspectionState>({
+    status: 'idle',
+    message: 'Choose a sheet tab to preview its headers.'
+  });
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeState>({
     tone: 'idle',
@@ -126,6 +213,9 @@ export function App() {
   });
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
+  const [projectSetupOpen, setProjectSetupOpen] = useState(false);
+  const [tableSetupOpen, setTableSetupOpen] = useState(false);
+  const [accessKeysOpen, setAccessKeysOpen] = useState(false);
   const [createProjectDraft, setCreateProjectDraft] = useState<CreateProjectDraft>(initialCreateProjectDraft);
   const [createTableDraft, setCreateTableDraft] = useState<CreateTableDraft>(initialCreateTableDraft);
   const [createKeyDraft, setCreateKeyDraft] = useState<CreateKeyDraft>(initialCreateKeyDraft);
@@ -214,6 +304,109 @@ export function App() {
       cancelled = true;
     };
   }, [credential, selectedProjectSlug]);
+
+  useEffect(() => {
+    if (!credential || !selectedProjectSlug || projectDetailState.status !== 'ready' || !tableSetupOpen) {
+      setSpreadsheetTabsState({
+        status: 'idle',
+        message: !selectedProjectSlug ? 'Select a project to load spreadsheet tabs.' : 'Open table setup to load spreadsheet tabs.'
+      });
+      return;
+    }
+
+    let cancelled = false;
+    setSpreadsheetTabsState({ status: 'loading' });
+
+    void (async () => {
+      try {
+        const result = await listSpreadsheetTabs(credential, selectedProjectSlug);
+        if (!cancelled) {
+          setSpreadsheetTabsState({
+            status: 'ready',
+            data: result.data
+          });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setSpreadsheetTabsState({
+            status: 'error',
+            message: error instanceof Error ? error.message : 'Unknown error'
+          });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [credential, selectedProjectSlug, projectDetailState.status, tableSetupOpen]);
+
+  useEffect(() => {
+    if (!credential || !selectedProjectSlug || !tableSetupOpen) {
+      setTabInspectionState({
+        status: 'idle',
+        message: 'Choose a sheet tab to preview its headers.'
+      });
+      return;
+    }
+
+    const tabName = createTableDraft.sheetTabName.trim();
+    const headerRow = Number.parseInt(createTableDraft.headerRow.trim(), 10);
+    if (!tabName || !Number.isInteger(headerRow) || headerRow <= 0) {
+      setTabInspectionState({
+        status: 'idle',
+        message: 'Choose a sheet tab to preview its headers.'
+      });
+      return;
+    }
+
+    let cancelled = false;
+    setTabInspectionState({
+      status: 'loading',
+      tabName,
+      headerRow
+    });
+
+    void (async () => {
+      try {
+        const result = await inspectSpreadsheetTab(credential, selectedProjectSlug, tabName, headerRow);
+        if (cancelled) {
+          return;
+        }
+
+        setTabInspectionState({
+          status: 'ready',
+          data: result.data
+        });
+        setCreateTableDraft((current) => {
+          const nextSheetGid = String(result.data.tab.sheetGid);
+          const nextTableSlug = current.tableSlug.trim().length === 0 ? slugifyTableEntity(result.data.tab.title) : current.tableSlug;
+          if (current.sheetGid === nextSheetGid && current.tableSlug === nextTableSlug) {
+            return current;
+          }
+
+          return {
+            ...current,
+            sheetGid: nextSheetGid,
+            tableSlug: nextTableSlug
+          };
+        });
+      } catch (error) {
+        if (!cancelled) {
+          setTabInspectionState({
+            status: 'error',
+            message: error instanceof Error ? error.message : 'Unknown error',
+            tabName,
+            headerRow
+          });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [credential, selectedProjectSlug, createTableDraft.sheetTabName, createTableDraft.headerRow, tableSetupOpen]);
 
   useEffect(() => {
     if (!credential) {
@@ -353,6 +546,18 @@ export function App() {
       cancelled = true;
     };
   }, [credential, projectDetailState]);
+
+  useEffect(() => {
+    if (state.status === 'ready' && state.data.length === 0) {
+      setProjectSetupOpen(true);
+    }
+  }, [state]);
+
+  useEffect(() => {
+    if (projectDetailState.status === 'ready' && projectDetailState.tables.length === 0) {
+      setTableSetupOpen(true);
+    }
+  }, [projectDetailState]);
 
   async function refreshProjects(credentialValue: string) {
     const body = await listProjects(credentialValue);
@@ -497,6 +702,14 @@ export function App() {
     setCacheStateByTable({});
     setCacheStatusErrorByTable({});
     setCacheStatusLoadingByTable({});
+    setSpreadsheetTabsState({
+      status: 'idle',
+      message: 'Select a project to load spreadsheet tabs.'
+    });
+    setTabInspectionState({
+      status: 'idle',
+      message: 'Choose a sheet tab to preview its headers.'
+    });
     setCreatedKey(null);
     setDraftCredential('');
     setRememberCredential(false);
@@ -517,6 +730,9 @@ export function App() {
       tone: 'idle',
       message: null
     });
+    setProjectSetupOpen(false);
+    setTableSetupOpen(false);
+    setAccessKeysOpen(false);
   }
 
   async function handleCreateProject() {
@@ -526,6 +742,7 @@ export function App() {
     await runAction(`Saving project ${input.slug}`, async () => {
       await createProject(credential, input);
       setCreateProjectDraft(initialCreateProjectDraft);
+      setProjectSetupOpen(false);
       await refreshProjects(credential);
       setSelectedProjectSlug(input.slug);
     });
@@ -538,6 +755,8 @@ export function App() {
     await runAction(`Saving table ${selectedProjectSlug}/${input.tableSlug}`, async () => {
       await createTable(credential, selectedProjectSlug, input);
       setCreateTableDraft(initialCreateTableDraft);
+      setTableSetupOpen(false);
+      await refreshProjects(credential);
       await refreshProjectDetail(credential, selectedProjectSlug);
     });
   }
@@ -659,6 +878,16 @@ export function App() {
     state.status === 'ready' && selectedProjectSlug
       ? state.data.find((project) => project.slug === selectedProjectSlug) ?? null
       : null;
+  const projectHealthSummary =
+    projectDetailState.status === 'ready'
+      ? countTableHealth(
+          projectDetailState.project.slug,
+          projectDetailState.tables,
+          cacheStateByTable,
+          cacheStatusErrorByTable,
+          cacheStatusLoadingByTable
+        )
+      : null;
 
   return (
     <main className="shell">
@@ -720,7 +949,18 @@ export function App() {
             </p>
           ) : null}
           {state.status === 'ready' && state.data.length === 0 ? (
-            <p className="muted">No projects yet. Open Project setup below to create the first one.</p>
+            <div className="emptyState">
+              <p className="muted">No projects yet. Add a project to connect your first spreadsheet.</p>
+              <div className="actions">
+                <button
+                  type="button"
+                  onClick={() => setProjectSetupOpen(true)}
+                  disabled={!credential || busyAction !== null}
+                >
+                  Add project
+                </button>
+              </div>
+            </div>
           ) : null}
           {state.status === 'ready' && selectedProjectSummary && !projectsExpanded ? (
             <div className="projectPickerSummary">
@@ -744,11 +984,16 @@ export function App() {
         <SelectedProjectPanel
           selectedProjectSlug={selectedProjectSlug}
           detailState={projectDetailState}
+          projectHealthSummary={projectHealthSummary}
           createTableDraft={createTableDraft}
           tableFieldErrors={createTableValidation.fieldErrors}
           cacheStateByTable={cacheStateByTable}
           cacheStatusErrorByTable={cacheStatusErrorByTable}
           cacheStatusLoadingByTable={cacheStatusLoadingByTable}
+          spreadsheetTabsState={spreadsheetTabsState}
+          tabInspectionState={tabInspectionState}
+          tableSetupOpen={tableSetupOpen}
+          onTableSetupOpenChange={setTableSetupOpen}
           onCreateTableDraftChange={setCreateTableDraft}
           onCreateTable={() => void handleCreateTable()}
           onLoadCache={(tableSlug) => void handleLoadCache(tableSlug)}
@@ -770,7 +1015,7 @@ export function App() {
         </div>
 
         <div className="stack">
-          <details className="disclosureCard">
+          <details className="disclosureCard" open={projectSetupOpen} onToggle={(event) => setProjectSetupOpen((event.currentTarget as HTMLDetailsElement).open)}>
             <summary className="disclosureSummary">
               <div>
                 <h3>Project setup</h3>
@@ -787,7 +1032,7 @@ export function App() {
             />
           </details>
 
-          <details className="disclosureCard">
+          <details className="disclosureCard" open={accessKeysOpen} onToggle={(event) => setAccessKeysOpen((event.currentTarget as HTMLDetailsElement).open)}>
             <summary className="disclosureSummary">
               <div>
                 <h3>Access keys</h3>

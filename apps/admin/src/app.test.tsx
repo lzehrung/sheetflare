@@ -815,4 +815,226 @@ describe('App', () => {
     await screen.findByTestId('project-card-demo');
     expect(screen.getByTestId('project-card-prod')).toBeTruthy();
   });
+
+  it('refreshes the project registry after creating a table so project counts stay current', async () => {
+    let projectRegistryCalls = 0;
+
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        projectRegistryCalls += 1;
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: projectRegistryCalls > 1 ? 1 : 0,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: projectRegistryCalls > 1
+            ? [
+                {
+                  projectSlug: 'demo',
+                  tableSlug: 'users',
+                  sheetTabName: 'Users',
+                  sheetGid: 11,
+                  idColumn: '_id',
+                  indexedFields: ['_id'],
+                  readOnlyFields: [],
+                  fieldRules: {},
+                  headerRow: 1,
+                  dataStartRow: 2,
+                  readEnabled: true,
+                  createEnabled: true,
+                  updateEnabled: true,
+                  deleteEnabled: true,
+                  cacheTtlSeconds: 15,
+                  createdAt: '2026-04-26T00:00:00.000Z',
+                  updatedAt: '2026-04-26T00:00:00.000Z'
+                }
+              ]
+            : []
+        });
+      }
+
+      if (url === '/v1/admin/projects/demo/spreadsheet/tabs') {
+        return createJsonResponse({
+          data: [
+            {
+              title: 'Users',
+              sheetGid: 11
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects/demo/spreadsheet/tabs/Users?headerRow=1') {
+        return createJsonResponse({
+          data: {
+            tab: {
+              title: 'Users',
+              sheetGid: 11
+            },
+            headerRow: 1,
+            headers: ['_id', 'name']
+          }
+        });
+      }
+
+      if (url === '/v1/admin/projects/demo/tables' && method === 'POST') {
+        return createJsonResponse({
+          data: {
+            projectSlug: 'demo',
+            tableSlug: 'users',
+            sheetTabName: 'Users',
+            sheetGid: 11,
+            idColumn: '_id',
+            indexedFields: ['_id'],
+            readOnlyFields: [],
+            fieldRules: {},
+            headerRow: 1,
+            dataStartRow: 2,
+            readEnabled: true,
+            createEnabled: true,
+            updateEnabled: true,
+            deleteEnabled: true,
+            cacheTtlSeconds: 15,
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          }
+        }, 201);
+      }
+
+      if (url === '/v1/admin/projects/demo/tables/users/cache') {
+        return createJsonResponse({
+          data: {
+            status: 'ready',
+            cacheTtlSeconds: 15,
+            stale: false,
+            staleReason: 'fresh',
+            rowCount: 0,
+            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
+            lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
+            lastSyncError: null
+          }
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Connect first tab' }));
+    fireEvent.change(await screen.findByRole('combobox', { name: /Sheet Tab/ }), {
+      target: { value: 'Users' }
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: /Table Entity/ }), {
+      target: { value: 'users' }
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Indexed Fields' }), {
+      target: { value: '' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save table' }));
+
+    await screen.findByText('Saving table demo/users complete.');
+    expect(screen.getAllByText('1 tables').length).toBeGreaterThan(0);
+  });
+
+  it('loads spreadsheet tabs only after table setup is opened', async () => {
+    let spreadsheetTabsCalls = 0;
+
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: 0,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: []
+        });
+      }
+
+      if (url === '/v1/admin/projects/demo/spreadsheet/tabs') {
+        spreadsheetTabsCalls += 1;
+        return createJsonResponse({
+          data: [
+            {
+              title: 'Users',
+              sheetGid: 11
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByRole('button', { name: 'Connect first tab' });
+    expect(spreadsheetTabsCalls).toBe(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect first tab' }));
+    await screen.findByRole('combobox', { name: /Sheet Tab/ });
+    expect(spreadsheetTabsCalls).toBe(1);
+  });
 });
