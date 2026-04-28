@@ -53,8 +53,9 @@ When you are onboarding a spreadsheet for the first time, the minimal operator f
 
 1. Share the spreadsheet with the configured Sheetflare service-account email as an `Editor`.
 2. Confirm the source tab has a stable `_id` column with unique non-blank values.
-3. Set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON`.
-4. Run `npm run ops:bootstrap`.
+3. Decide whether any columns must stay sheet-managed, for example formula or operator-owned columns, and list them in `readOnlyFields`.
+4. Set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON`.
+5. Run `npm run ops:bootstrap`.
 
 Example:
 
@@ -74,6 +75,7 @@ $env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
           "sheetTabName": "Users",
           "idColumn": "_id",
           "indexedFields": ["name", "status"],
+          "readOnlyFields": ["status_label"],
           "cacheTtlSeconds": 15
         }
       ]
@@ -98,6 +100,12 @@ npm run ops:bootstrap
 ```
 
 For a public anonymous read surface, create a separate project with `defaultAuthMode` set to `"public-read"` rather than widening the private project's auth model.
+
+`readOnlyFields` is the right tool when:
+
+- a column is driven by a sheet formula
+- a column is maintained manually in Sheets
+- the API should expose the value but must never overwrite it
 
 ## Check Cache Status
 

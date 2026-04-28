@@ -79,10 +79,12 @@ Bootstrap and deployment steps are documented in [docs/quickstart.md](./docs/qui
 
 - Managed tables require a stable ID column.
 - Header rows must not contain duplicate non-empty column names.
+- Table config can mark specific columns as read-only with `readOnlyFields`.
 - The gateway treats row numbers as a cache only.
 - Row creation rejects duplicate managed IDs.
 - Updates and deletes re-resolve rows by ID before mutating the sheet, which keeps the system correct when rows are re-ordered manually in Google Sheets.
 - Mutation lookup uses a narrow scan of the managed ID column plus targeted row reads instead of rescanning full row payloads, which reduces write-path cost on larger sheets while preserving correctness.
+- Read-only columns are never targeted by API writes, which lets a sheet expose formula-derived or operator-managed values without API updates flattening them.
 
 ## Cache And Sync
 
@@ -161,6 +163,7 @@ Performance notes:
   - refresh project and key views explicitly
   - inspect cache status
   - force reindex
+- Table creation now supports `readOnlyFields` for columns that should stay sheet-managed.
 - Credential persistence is opt-in. You can use the UI in session-only mode or explicitly remember the credential in the browser.
 - Paste either the bootstrap admin token or a scoped admin API key into the auth panel.
 
