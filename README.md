@@ -9,6 +9,7 @@ Start with [docs/quickstart.md](./docs/quickstart.md).
 Operational docs live in [docs/operator-runbook.md](./docs/operator-runbook.md) and [docs/deploy.md](./docs/deploy.md).
 Google credential setup guidance lives in [docs/google-service-accounts.md](./docs/google-service-accounts.md).
 Production evidence workflows live in [docs/benchmarking.md](./docs/benchmarking.md) and [docs/observability.md](./docs/observability.md).
+Repo-owned staging workflow details live in [docs/contributor-staging.md](./docs/contributor-staging.md).
 
 ## Workspaces
 
@@ -48,7 +49,7 @@ For the normal setup flow:
 
 1. Follow [docs/quickstart.md](./docs/quickstart.md).
 2. Use [docs/google-service-accounts.md](./docs/google-service-accounts.md) to provision the right Google credential model.
-3. Use [docs/deploy.md](./docs/deploy.md) for staging or production deployment details.
+3. Use [docs/deploy.md](./docs/deploy.md) for staging or production deployment details, including CI secret layout and Cloudflare token scopes.
 4. Use [docs/operator-runbook.md](./docs/operator-runbook.md) for day-2 operations and failure handling.
 
 ## API Docs
