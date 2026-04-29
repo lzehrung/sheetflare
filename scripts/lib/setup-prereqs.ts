@@ -27,6 +27,10 @@ type SetupPrereqDependencies = {
   moduleResolver?: (specifier: string) => void;
 };
 
+type SetupPrereqOptions = {
+  includeWranglerAuth?: boolean;
+};
+
 async function defaultCommandRunner(command: string, args: string[]) {
   try {
     const result = await execFileAsync(command, args, {
@@ -66,6 +70,33 @@ function defaultModuleResolver(specifier: string) {
 }
 
 export async function checkSetupPrereqs(dependencies: SetupPrereqDependencies = {}) {
+  return checkSetupPrereqsWithOptions({ includeWranglerAuth: true }, dependencies);
+}
+
+export async function checkWranglerAuthPrereq(dependencies: SetupPrereqDependencies = {}) {
+  const commandRunner = dependencies.commandRunner ?? defaultCommandRunner;
+  const wranglerResult = await commandRunner(getCommandName('npx'), ['wrangler', 'whoami']);
+  if (wranglerResult.code === 0) {
+    return {
+      name: 'Wrangler auth',
+      status: 'ready',
+      summary: 'Wrangler authentication is available for deploy steps.',
+      remediation: null
+    } satisfies SetupPrereqResult;
+  }
+
+  return {
+    name: 'Wrangler auth',
+    status: 'blocked',
+    summary: 'Wrangler is not authenticated on this machine.',
+    remediation: 'Run npx wrangler login before applying secrets or deploying.'
+  } satisfies SetupPrereqResult;
+}
+
+export async function checkSetupPrereqsWithOptions(
+  options: SetupPrereqOptions = {},
+  dependencies: SetupPrereqDependencies = {}
+) {
   const commandRunner = dependencies.commandRunner ?? defaultCommandRunner;
   const pathExists = dependencies.pathExists ?? defaultPathExists;
   const moduleResolver = dependencies.moduleResolver ?? defaultModuleResolver;
@@ -100,21 +131,8 @@ export async function checkSetupPrereqs(dependencies: SetupPrereqDependencies = 
     });
   }
 
-  const wranglerResult = await commandRunner(getCommandName('npx'), ['wrangler', 'whoami']);
-  if (wranglerResult.code === 0) {
-    results.push({
-      name: 'Wrangler auth',
-      status: 'ready',
-      summary: 'Wrangler authentication is available for deploy steps.',
-      remediation: null
-    });
-  } else {
-    results.push({
-      name: 'Wrangler auth',
-      status: 'blocked',
-      summary: 'Wrangler is not authenticated on this machine.',
-      remediation: 'Run npx wrangler login before applying secrets or deploying.'
-    });
+  if (options.includeWranglerAuth ?? true) {
+    results.push(await checkWranglerAuthPrereq({ commandRunner }));
   }
 
   return results;
