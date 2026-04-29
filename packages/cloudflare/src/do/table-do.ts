@@ -86,6 +86,19 @@ function assertWritableFields(
   }
 }
 
+function assertManagedIdFieldIsNotWritten(
+  values: Partial<RowRecord>,
+  idColumn: string
+) {
+  if (!Object.prototype.hasOwnProperty.call(values, idColumn)) {
+    return;
+  }
+
+  throw new BadRequestError(`Write payload cannot update managed row id column ${idColumn}.`, {
+    idColumn
+  });
+}
+
 function normalizePartialRowValues(input: Partial<RowRecord>): RowRecord {
   const normalized: RowRecord = {};
 
@@ -530,7 +543,7 @@ export class TableDO {
     this.upsertRowIndex(rowId, rowNumber);
     this.upsertCachedRow(liveRow);
     this.upsertCachedCells(config, liveRow);
-    this.refreshSchemaMeta(headers);
+    this.invalidateSchemaMeta();
     this.markCacheFreshAfterMutation(config, headers);
 
     return {
@@ -549,16 +562,15 @@ export class TableDO {
     const headers = await this.getHeaders(config, {
       bypassCache: true
     });
-    assertWritableFields(patch, config.readOnlyFields);
+    const normalizedPatch = normalizePartialRowValues(patch);
+    assertManagedIdFieldIsNotWritten(normalizedPatch, config.idColumn);
+    assertWritableFields(normalizedPatch, config.readOnlyFields);
     const existingRow = await this.resolveRowById(config, rowId);
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
 
-    const patchValues = Object.fromEntries(
-      Object.entries(patch).filter((entry): entry is [string, RowRecord[string]] => entry[1] !== undefined)
-    );
-    const { values, ignoredKeys } = pickKnownColumns(normalizePartialRowValues(patchValues), headers);
+    const { values, ignoredKeys } = pickKnownColumns(normalizedPatch, headers);
     assertKnownWriteColumns(ignoredKeys, headers);
     const normalizedCandidate = applyFieldRuleNormalization(normalizeRowValues({
       ...existingRow.values,
@@ -579,7 +591,7 @@ export class TableDO {
     this.upsertRowIndex(rowId, existingRow.rowNumber);
     this.upsertCachedRow(liveRow);
     this.upsertCachedCells(config, liveRow);
-    this.refreshSchemaMeta(headers);
+    this.invalidateSchemaMeta();
     this.markCacheFreshAfterMutation(config, headers);
 
     return {
@@ -608,7 +620,7 @@ export class TableDO {
     this.deleteRowIndex(rowId);
     this.deleteCachedRow(rowId);
     await this.refreshCachedRowNumbersAfterDelete(config, headers, cachedHeaders);
-    this.refreshSchemaMeta(headers);
+    this.invalidateSchemaMeta();
     this.markCacheFreshAfterMutation(config, headers);
 
     return {
@@ -1118,8 +1130,8 @@ export class TableDO {
     });
   }
 
-  private refreshSchemaMeta(headers: string[]) {
-    this.setMeta('schema', JSON.stringify(inferTableSchema(headers, this.listCachedRows())));
+  private invalidateSchemaMeta() {
+    this.deleteMeta('schema');
   }
 
   private countCachedRows(kind: 'live' | 'staging' = 'live') {
