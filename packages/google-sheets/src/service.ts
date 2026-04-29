@@ -11,8 +11,11 @@ import {
 import { parseManagedRowId } from '@sheetflare/domain';
 
 const googleSheetsScope = 'https://www.googleapis.com/auth/spreadsheets';
+const googleDriveMetadataScope = 'https://www.googleapis.com/auth/drive.metadata.readonly';
+const googleApiScopes = `${googleSheetsScope} ${googleDriveMetadataScope}`;
 const defaultOauthTokenUrl = 'https://oauth2.googleapis.com/token';
 const defaultSheetsApiBaseUrl = 'https://sheets.googleapis.com/v4/spreadsheets';
+const defaultDriveApiBaseUrl = 'https://www.googleapis.com/drive/v3';
 const defaultRequestTimeoutMs = 15_000;
 const defaultRetryCount = 2;
 
@@ -45,6 +48,13 @@ type GoogleSpreadsheetMetadataResponse = {
       sheetType?: string;
     };
   }>;
+};
+
+type GoogleDriveChannelResponse = {
+  id?: string;
+  resourceId?: string;
+  resourceUri?: string;
+  expiration?: string;
 };
 
 export type GoogleSheetTableConfig = TableConfig & {
@@ -88,8 +98,22 @@ export interface GoogleServiceAccountConfig {
   fetch?: FetchLike;
   oauthTokenUrl?: string;
   sheetsApiBaseUrl?: string;
+  driveApiBaseUrl?: string;
   now?: () => number;
   delay?: (ms: number) => Promise<void>;
+}
+
+export interface GoogleDriveWatchRequest {
+  webhookUrl: string;
+  token: string;
+  expirationMs?: number | null;
+}
+
+export interface GoogleDriveWatch {
+  channelId: string;
+  resourceId: string;
+  resourceUri: string | null;
+  expirationAt: string | null;
 }
 
 export function serializeSheetCell(value: RowRecord[string]): string | number | boolean {
@@ -310,6 +334,7 @@ export class GoogleSheetsService {
   private readonly fetchImpl: FetchLike;
   private readonly oauthTokenUrl: string;
   private readonly sheetsApiBaseUrl: string;
+  private readonly driveApiBaseUrl: string;
   private readonly now: () => number;
   private readonly delay: (ms: number) => Promise<void>;
   private tokenCache: { value: string; expiresAtMs: number } | null = null;
@@ -318,6 +343,7 @@ export class GoogleSheetsService {
     this.fetchImpl = config.fetch ?? ((input, init) => fetch(input, init));
     this.oauthTokenUrl = config.oauthTokenUrl ?? defaultOauthTokenUrl;
     this.sheetsApiBaseUrl = config.sheetsApiBaseUrl ?? defaultSheetsApiBaseUrl;
+    this.driveApiBaseUrl = config.driveApiBaseUrl ?? defaultDriveApiBaseUrl;
     this.now = config.now ?? Date.now;
     this.delay = config.delay ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
@@ -637,6 +663,70 @@ export class GoogleSheetsService {
     await this.parseJson(response);
   }
 
+  async watchSpreadsheetFile(spreadsheetId: string, request: GoogleDriveWatchRequest): Promise<GoogleDriveWatch> {
+    const accessToken = await this.getAccessToken();
+    const channelId = crypto.randomUUID();
+    const response = await this.authorizedRequest(
+      `${this.driveApiBaseUrl}/files/${encodeURIComponent(spreadsheetId)}/watch?supportsAllDrives=true`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          id: channelId,
+          type: 'web_hook',
+          address: request.webhookUrl,
+          token: request.token,
+          ...(request.expirationMs ? { expiration: String(request.expirationMs) } : {})
+        })
+      },
+      {
+        operation: `watch spreadsheet file ${spreadsheetId}`,
+        maxRetries: 0
+      }
+    );
+
+    const body = await this.parseJson<GoogleDriveChannelResponse>(response);
+    if (!body.id || !body.resourceId) {
+      throw new ServiceUnavailableError('Google Drive watch response did not include a channel id and resource id.', {
+        spreadsheetId
+      });
+    }
+
+    return {
+      channelId: body.id,
+      resourceId: body.resourceId,
+      resourceUri: body.resourceUri ?? null,
+      expirationAt: body.expiration ? new Date(Number(body.expiration)).toISOString() : null
+    };
+  }
+
+  async stopDriveChannel(channelId: string, resourceId: string): Promise<void> {
+    const accessToken = await this.getAccessToken();
+    const response = await this.authorizedRequest(
+      `${this.driveApiBaseUrl}/channels/stop`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          id: channelId,
+          resourceId
+        })
+      },
+      {
+        operation: `stop drive channel ${channelId}`,
+        maxRetries: 0
+      }
+    );
+
+    await this.parseJson(response);
+  }
+
   private async readValues(spreadsheetId: string, range: string): Promise<string[][]> {
     const accessToken = await this.getAccessToken();
     const response = await this.authorizedRequest(
@@ -726,7 +816,7 @@ export class GoogleSheetsService {
     const payload = base64UrlEncode(
       JSON.stringify({
         iss: this.config.clientEmail,
-        scope: googleSheetsScope,
+        scope: googleApiScopes,
         aud: this.oauthTokenUrl,
         exp: expiresAt,
         iat: issuedAt

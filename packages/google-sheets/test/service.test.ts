@@ -790,6 +790,111 @@ describe('GoogleSheetsService.readHeaderNames', () => {
   });
 });
 
+describe('GoogleSheetsService Drive watch lifecycle', () => {
+  it('registers a Drive webhook watch for a spreadsheet file', async () => {
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input, init) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        requests.push({
+          method,
+          url,
+          body:
+            init?.body && typeof init.body === 'string' && init.body.trim().startsWith('{')
+              ? JSON.parse(init.body)
+              : null
+        });
+
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes('/drive/v3/files/sheet-1/watch')) {
+          return Response.json({
+            id: 'channel-1',
+            resourceId: 'resource-1',
+            resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+            expiration: String(Date.parse('2026-05-01T00:00:00.000Z'))
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    const watch = await service.watchSpreadsheetFile('sheet-1', {
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      token: 'secret-token',
+      expirationMs: Date.parse('2026-05-01T00:00:00.000Z')
+    });
+
+    expect(watch).toEqual({
+      channelId: 'channel-1',
+      resourceId: 'resource-1',
+      resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+      expirationAt: '2026-05-01T00:00:00.000Z'
+    });
+    expect(requests.find((request) => request.url.includes('/drive/v3/files/sheet-1/watch'))).toMatchObject({
+      method: 'POST',
+      body: {
+        type: 'web_hook',
+        address: 'https://sheetflare.example/v1/system/google/drive/notifications',
+        token: 'secret-token',
+        expiration: String(Date.parse('2026-05-01T00:00:00.000Z'))
+      }
+    });
+  });
+
+  it('stops an existing Drive webhook channel cleanly', async () => {
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input, init) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        requests.push({
+          method,
+          url,
+          body:
+            init?.body && typeof init.body === 'string' && init.body.trim().startsWith('{')
+              ? JSON.parse(init.body)
+              : null
+        });
+
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.endsWith('/drive/v3/channels/stop')) {
+          return Response.json({});
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    await service.stopDriveChannel('channel-1', 'resource-1');
+
+    expect(requests.find((request) => request.url.endsWith('/drive/v3/channels/stop'))).toMatchObject({
+      method: 'POST',
+      body: {
+        id: 'channel-1',
+        resourceId: 'resource-1'
+      }
+    });
+  });
+});
+
 describe('GoogleSheetsService.writeRow', () => {
   it('sends raw values to Sheets so the API preserves literal cell contents', async () => {
     const requestedUrls: string[] = [];

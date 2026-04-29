@@ -325,6 +325,12 @@ describe('App', () => {
               status: 'ok',
               issueCount: 0,
               issues: []
+            },
+            externalChange: {
+              pending: false,
+              lastChangedAt: null,
+              debounceUntil: null,
+              lastAutoReindexAt: null
             }
           }
         });
@@ -345,6 +351,12 @@ describe('App', () => {
               status: 'ok',
               issueCount: 0,
               issues: []
+            },
+            externalChange: {
+              pending: false,
+              lastChangedAt: null,
+              debounceUntil: null,
+              lastAutoReindexAt: null
             }
           }
         });
@@ -455,6 +467,12 @@ describe('App', () => {
                   message: 'email must be unique.'
                 }
               ]
+            },
+            externalChange: {
+              pending: false,
+              lastChangedAt: null,
+              debounceUntil: null,
+              lastAutoReindexAt: null
             }
           }
         });
@@ -477,6 +495,12 @@ describe('App', () => {
               status: 'ok',
               issueCount: 0,
               issues: []
+            },
+            externalChange: {
+              pending: false,
+              lastChangedAt: null,
+              debounceUntil: null,
+              lastAutoReindexAt: null
             }
           }
         });
@@ -967,6 +991,12 @@ describe('App', () => {
               status: 'ok',
               issueCount: 0,
               issues: []
+            },
+            externalChange: {
+              pending: false,
+              lastChangedAt: null,
+              debounceUntil: null,
+              lastAutoReindexAt: null
             }
           }
         });

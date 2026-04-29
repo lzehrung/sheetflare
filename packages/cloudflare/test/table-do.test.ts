@@ -3370,6 +3370,340 @@ describe('TableDO', () => {
     vi.useRealTimers();
   });
 
+  it('surfaces pending external sheet changes without forcing cached point reads to reindex immediately', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.external-change.record',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        changedAt: '2026-04-29T12:00:00.000Z',
+        debounceUntil: '2026-04-29T12:00:30.000Z'
+      }
+    );
+
+    const cacheStatus = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect((cacheStatus as {
+      type: 'table.cache.get.result';
+      result: {
+        data: {
+          staleReason: string;
+          externalChange: {
+            pending: boolean;
+            lastChangedAt: string | null;
+            debounceUntil: string | null;
+            lastAutoReindexAt: string | null;
+          };
+        };
+      };
+    }).result.data).toMatchObject({
+      staleReason: 'external-change',
+      externalChange: {
+        pending: true,
+        lastChangedAt: '2026-04-29T12:00:00.000Z',
+        debounceUntil: '2026-04-29T12:00:30.000Z',
+        lastAutoReindexAt: null
+      }
+    });
+
+    sheet.requestedRanges = [];
+
+    const rowResponse = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.get',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-1'
+      }
+    );
+
+    expect((rowResponse as {
+      type: 'table.row.get.result';
+      result: { data: { id: string; values: { name: string } } };
+    }).result.data).toMatchObject({
+      id: 'row-1',
+      values: {
+        name: 'Ada'
+      }
+    });
+    expect(sheet.requestedRanges).toEqual([]);
+  });
+
+  it('forces a full sync before mutations when an external sheet change is pending', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    sheet.rows = [
+      ['_id', 'status'],
+      ['row-1', 'review']
+    ];
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.external-change.record',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        changedAt: '2026-04-29T12:05:00.000Z',
+        debounceUntil: '2026-04-29T12:05:30.000Z'
+      }
+    );
+
+    sheet.requestedRanges = [];
+
+    const updateResponse = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.update',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-1',
+        input: {
+          values: {
+            status: 'approved'
+          }
+        }
+      }
+    );
+
+    expect((updateResponse as {
+      type: 'table.row.update.result';
+      result: { data: { values: { status: string } } };
+    }).result.data.values.status).toBe('approved');
+    expect(sheet.requestedRanges).toContain("'Users'!A1:B");
+
+    const cacheStatus = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect((cacheStatus as {
+      type: 'table.cache.get.result';
+      result: { data: { staleReason: string; externalChange: { pending: boolean } } };
+    }).result.data).toMatchObject({
+      staleReason: 'fresh',
+      externalChange: {
+        pending: false
+      }
+    });
+  });
+
+  it('records the last automatic external-change reindex time after a Drive-triggered sync', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T12:10:00.000Z'));
+
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.external-change.record',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        changedAt: '2026-04-29T12:11:00.000Z',
+        debounceUntil: '2026-04-29T12:11:30.000Z'
+      }
+    );
+
+    vi.setSystemTime(new Date('2026-04-29T12:12:00.000Z'));
+    sheet.rows = [
+      ['_id', 'status'],
+      ['row-1', 'active']
+    ];
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.reindex',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        requestContext: {
+          requestId: 'req-auto',
+          route: '/system/google/drive/notifications',
+          principal: 'system:drive-watch',
+          syncSource: 'external-change'
+        }
+      }
+    );
+
+    const cacheStatus = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect((cacheStatus as {
+      type: 'table.cache.get.result';
+      result: {
+        data: {
+          staleReason: string;
+          externalChange: {
+            pending: boolean;
+            lastChangedAt: string | null;
+            debounceUntil: string | null;
+            lastAutoReindexAt: string | null;
+          };
+        };
+      };
+    }).result.data).toMatchObject({
+      staleReason: 'fresh',
+      externalChange: {
+        pending: false,
+        lastChangedAt: '2026-04-29T12:11:00.000Z',
+        debounceUntil: null,
+        lastAutoReindexAt: '2026-04-29T12:12:00.000Z'
+      }
+    });
+
+    vi.useRealTimers();
+  });
+
   it('builds schema metadata from the full cached dataset instead of a 100-row sample', async () => {
     const rows = Array.from({ length: 101 }, (_, index) =>
       index === 100

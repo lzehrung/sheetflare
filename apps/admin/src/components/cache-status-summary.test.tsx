@@ -19,6 +19,12 @@ function createCacheStatus(overrides?: Partial<TableCacheStatus>): TableCacheSta
       issueCount: 0,
       issues: []
     },
+    externalChange: {
+      pending: false,
+      lastChangedAt: null,
+      debounceUntil: null,
+      lastAutoReindexAt: null
+    },
     ...overrides
   };
 }
