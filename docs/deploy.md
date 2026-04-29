@@ -18,6 +18,7 @@ npm run setup
 The setup command can:
 
 - write `sheetflare.setup.json`
+- keep local reusable secret state in `.sheetflare.setup.local.json`
 - apply Worker secrets
 - deploy the API Worker
 - deploy the admin UI
@@ -27,10 +28,13 @@ The setup command can:
 For reruns from an existing setup config:
 
 ```powershell
+npm run setup -- --apply-secrets
 npm run setup -- --deploy
 npm run setup -- --bootstrap
 npm run setup -- --smoke
 ```
+
+`.sheetflare.setup.local.json` is secret material. It is gitignored and intended to stay local to the operator machine.
 
 Use the rest of this document when:
 
@@ -108,21 +112,21 @@ Or deploy both in sequence:
 npm run deploy
 ```
 
-Equivalent explicit command for the API Worker if you need to run it manually:
+Equivalent explicit command for the API Worker if you need to run it manually outside setup:
 
 ```powershell
 npm --workspace @sheetflare/api run build
 npx wrangler deploy --config apps/api/wrangler.jsonc
 ```
 
-If you manage secrets through Wrangler, set them before deploy:
+If you need to manage secrets through Wrangler manually instead of `npm run setup -- --apply-secrets`, set them before deploy:
 
 ```powershell
 npx wrangler secret put ADMIN_BEARER_TOKEN --config apps/api/wrangler.jsonc
 npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
 ```
 
-Set non-secret vars in `apps/api/wrangler.jsonc` or via your deployment system.
+Prefer your deployment system or setup flow for non-secret vars. Editing the checked repo defaults is only the manual fallback path.
 
 Google credential notes:
 

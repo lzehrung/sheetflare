@@ -51,8 +51,10 @@ async function readServiceAccountFile(path: string) {
 }
 
 export async function collectSetupSecrets(options: {
-  prompter: SetupPrompter;
+  prompter: SetupPrompter | null;
   includeAdminUiSecrets: boolean;
+  defaultAdminUiUsername?: string | null;
+  defaultAdminUiPassword?: string | null;
 }) : Promise<SetupSecrets> {
   const envGoogleClientEmail = readEnvValue('GOOGLE_CLIENT_EMAIL');
   const envGooglePrivateKey = process.env.GOOGLE_PRIVATE_KEY;
@@ -63,7 +65,17 @@ export async function collectSetupSecrets(options: {
   if (envGoogleClientEmail && envGooglePrivateKey && envGooglePrivateKey.trim().length > 0) {
     googleClientEmail = envGoogleClientEmail;
     googlePrivateKey = envGooglePrivateKey;
+  } else if (readEnvValue('GOOGLE_APPLICATION_CREDENTIALS')) {
+    const credentials = await readServiceAccountFile(readEnvValue('GOOGLE_APPLICATION_CREDENTIALS')!);
+    googleClientEmail = credentials.client_email.trim();
+    googlePrivateKey = credentials.private_key;
   } else {
+    if (!options.prompter) {
+      throw new ScriptError(
+        'Applying secrets without a TTY requires GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY, or GOOGLE_APPLICATION_CREDENTIALS pointing at a service-account JSON file.'
+      );
+    }
+
     let credentials: ServiceAccountCredentials | null = null;
     while (!credentials) {
       const defaultPath = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
@@ -94,18 +106,27 @@ export async function collectSetupSecrets(options: {
     };
   }
 
-  const adminUiUsername = await options.prompter.text({
-    message: 'Admin UI site username',
-    defaultValue: readEnvValue('ADMIN_UI_USERNAME') ?? 'admin',
-    validate: (value) => value.trim().length > 0 ? null : 'Admin UI username must not be blank.'
-  });
-  const adminUiPasswordInput = await options.prompter.text({
-    message: 'Admin UI site password (leave blank to generate)',
-    defaultValue: readEnvValue('ADMIN_UI_PASSWORD') ?? ''
-  });
-  const adminUiPassword = adminUiPasswordInput.trim().length > 0
-    ? adminUiPasswordInput
-    : generateSecretToken(24);
+  const defaultAdminUiUsername = readEnvValue('ADMIN_UI_USERNAME')
+    ?? options.defaultAdminUiUsername?.trim()
+    ?? 'admin';
+  const defaultAdminUiPassword = readEnvValue('ADMIN_UI_PASSWORD')
+    ?? options.defaultAdminUiPassword?.trim()
+    ?? null;
+
+  const adminUiUsername = options.prompter
+    ? await options.prompter.text({
+        message: 'Admin UI site username',
+        defaultValue: defaultAdminUiUsername,
+        validate: (value) => value.trim().length > 0 ? null : 'Admin UI username must not be blank.'
+      })
+    : defaultAdminUiUsername;
+  const adminUiPasswordInput = options.prompter
+    ? await options.prompter.text({
+        message: 'Admin UI site password (leave blank to generate)',
+        ...(defaultAdminUiPassword ? { defaultValue: defaultAdminUiPassword } : {})
+      })
+    : defaultAdminUiPassword ?? '';
+  const adminUiPassword = adminUiPasswordInput.trim().length > 0 ? adminUiPasswordInput : generateSecretToken(24);
 
   return {
     googleClientEmail,

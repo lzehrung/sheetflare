@@ -77,9 +77,12 @@ Setup writes a checked non-secret config file at repo root:
 sheetflare.setup.json
 ```
 
+Setup also writes `.sheetflare.setup.local.json` beside it. That local state file stores deployment URLs and generated credentials so reruns can stay noninteractive. It is secret material, it is gitignored, and it should stay on the operator machine only.
+
 The generated config is reusable. Common reruns:
 
 ```powershell
+npm run setup -- --apply-secrets
 npm run setup -- --deploy
 npm run setup -- --bootstrap
 npm run setup -- --smoke
@@ -140,6 +143,7 @@ If you do not want setup to perform one or more actions immediately, it is safe 
 You can then rerun only the needed step:
 
 ```powershell
+npm run setup -- --apply-secrets
 npm run setup -- --deploy
 npm run setup -- --bootstrap
 npm run setup -- --smoke
