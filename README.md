@@ -10,6 +10,7 @@ Operational docs live in [docs/operator-runbook.md](./docs/operator-runbook.md) 
 Google credential setup guidance lives in [docs/google-service-accounts.md](./docs/google-service-accounts.md).
 Production evidence workflows live in [docs/benchmarking.md](./docs/benchmarking.md) and [docs/observability.md](./docs/observability.md).
 Repo-owned staging workflow details live in [docs/contributor-staging.md](./docs/contributor-staging.md).
+Project policies live in [LICENSE](./LICENSE), [SECURITY.md](./SECURITY.md), [CONTRIBUTING.md](./CONTRIBUTING.md), and [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).
 
 ## Workspaces
 
