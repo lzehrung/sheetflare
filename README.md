@@ -75,7 +75,7 @@ When the API worker is running:
 - `GET /docs` serves the interactive API reference UI.
 
 The docs reflect the actual HTTP surface, including auth requirements, path params, query params, and request/response bodies for the supported endpoints.
-Admin project and table POST routes create by default. Replacing an existing config requires an explicit `?upsert=true`.
+Admin project and table POST routes create by default. Replacing an existing config requires an explicit `?upsert=true` and returns `200` instead of `201`.
 
 ## Auth Model
 
@@ -195,6 +195,7 @@ Performance notes:
 - Non-timeout transport failures are reported distinctly from actual request timeouts.
 - Rate limits are bucketed by route family and operation key, for example `admin.projects.list`, `rows.list`, and `admin.cache.reindex`, so hot endpoints do not starve unrelated calls from the same principal.
 - Rate-limit principals are derived only from verified credentials; unverified API-key-shaped strings fall back to the anonymous/IP bucket.
+- Request logs now include the applied rate-limit principal, route family, operation key, and limit/remaining/reset fields so `429` analysis lines up with the actual bucket selection.
 - `npm run build`, `npm run typecheck`, and `npm test` all pass from the repo root.
 
 ## Local End-To-End Checks

@@ -15,6 +15,12 @@ Emitted by the route layer:
 - `durationMs`
 - `requestId`
 - `principal`
+- `rateLimitPrincipal`
+- `rateLimitRouteFamily`
+- `rateLimitOperationKey`
+- `rateLimitLimit`
+- `rateLimitRemaining`
+- `rateLimitResetAt`
 
 ### Request failure
 
@@ -25,6 +31,9 @@ Emitted by the route layer:
 - `path`
 - `requestId`
 - `principal`
+- `rateLimitPrincipal`
+- `rateLimitRouteFamily`
+- `rateLimitOperationKey`
 - `errorName`
 - `errorMessage`
 

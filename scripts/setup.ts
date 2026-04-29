@@ -35,7 +35,8 @@ type SetupExecutionSummary = {
 async function readConfigFile(path: string) {
   const text = await readFile(path, 'utf8');
   try {
-    return JSON.parse(text) as unknown;
+    const parsed: unknown = JSON.parse(text);
+    return parsed;
   } catch {
     throw new ScriptError(`Setup config ${path} must contain valid JSON.`);
   }

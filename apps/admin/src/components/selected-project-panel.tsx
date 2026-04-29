@@ -70,7 +70,7 @@ function readFieldRuleKeys(value: string) {
   }
 
   try {
-    const parsed = JSON.parse(normalized) as unknown;
+    const parsed: unknown = JSON.parse(normalized);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return [];
     }

@@ -171,9 +171,7 @@ export class ProjectDO {
       case 'project.table.create':
         return {
           type: 'project.table.create.result',
-          result: {
-            data: await this.createTable(body.projectSlug, body.input, body.allowExisting ?? false)
-          }
+          result: await this.createTable(body.projectSlug, body.input, body.allowExisting ?? false)
         };
       case 'project.table.list':
         return {
@@ -209,14 +207,17 @@ export class ProjectDO {
     }
   }
 
-  private async createProject(input: CreateProjectInput, allowExisting: boolean): Promise<AdminGetProjectResult> {
+  private async createProject(
+    input: CreateProjectInput,
+    allowExisting: boolean
+  ): Promise<{ data: AdminGetProjectResult; created: boolean }> {
     const now = new Date().toISOString();
     const googleCredentialRef = normalizeOptionalFieldName(input.googleCredentialRef) ?? defaultGoogleCredentialRef;
 
     resolveGoogleCredential(this.env, googleCredentialRef);
+    const existing = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, input.slug);
 
     if (!allowExisting) {
-      const existing = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, input.slug);
       if (existing) {
         throw new ConflictError(`Project ${input.slug} already exists.`, {
           projectSlug: input.slug
@@ -246,7 +247,10 @@ export class ProjectDO {
     );
 
     await this.syncRegistry(input.slug);
-    return this.getProject(input.slug);
+    return {
+      data: await this.getProject(input.slug),
+      created: existing === null
+    };
   }
 
   private async getProject(projectSlug: string): Promise<AdminGetProjectResult> {
@@ -266,7 +270,11 @@ export class ProjectDO {
     };
   }
 
-  private async createTable(projectSlug: string, input: CreateTableInput, allowExisting: boolean): Promise<TableConfig> {
+  private async createTable(
+    projectSlug: string,
+    input: CreateTableInput,
+    allowExisting: boolean
+  ): Promise<{ data: TableConfig; created: boolean }> {
     const project = this.mapProject(this.requireProjectRow(projectSlug));
     const now = new Date().toISOString();
     const idColumn = normalizeOptionalFieldName(input.idColumn) ?? '_id';
@@ -275,6 +283,11 @@ export class ProjectDO {
     const fieldRules = normalizeFieldRules(input.fieldRules);
     const headerRow = input.headerRow ?? 1;
     const dataStartRow = input.dataStartRow ?? 2;
+    const existing = this.selectOptionalRow<TableRow>(
+      `SELECT * FROM tables WHERE project_slug = ? AND table_slug = ?`,
+      projectSlug,
+      input.tableSlug
+    );
 
     this.validateTableConfig({
       idColumn,
@@ -284,11 +297,6 @@ export class ProjectDO {
       fieldRules
     });
     if (!allowExisting) {
-      const existing = this.selectOptionalRow<TableRow>(
-        `SELECT * FROM tables WHERE project_slug = ? AND table_slug = ?`,
-        projectSlug,
-        input.tableSlug
-      );
       if (existing) {
         throw new ConflictError(`Table ${projectSlug}/${input.tableSlug} already exists.`, {
           projectSlug,
@@ -350,7 +358,10 @@ export class ProjectDO {
     this.ctx.storage.sql.exec(`UPDATE project SET updated_at = ? WHERE slug = ?`, now, projectSlug);
 
     await this.syncRegistry(project.slug);
-    return this.getTable(projectSlug, input.tableSlug);
+    return {
+      data: await this.getTable(projectSlug, input.tableSlug),
+      created: existing === null
+    };
   }
 
   private async getTable(projectSlug: string, tableSlug: string): Promise<TableConfig> {

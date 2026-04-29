@@ -34,7 +34,7 @@ function readEnvValue(name: string) {
 async function readServiceAccountFile(path: string) {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+    parsed = JSON.parse(await readFile(path, 'utf8'));
   } catch {
     throw new ScriptError(`Service-account JSON file ${path} could not be read as valid JSON.`);
   }

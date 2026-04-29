@@ -225,16 +225,19 @@ function createEnv(options?: {
       return Response.json({
         type: 'project.create.result',
         result: {
-          project: {
-            slug: body.input?.slug ?? 'demo',
-            name: 'Demo',
-            spreadsheetId: 'sheet-1',
-            googleCredentialRef: 'default',
-            createdAt: '2026-04-26T00:00:00.000Z',
-            updatedAt: '2026-04-26T00:00:00.000Z',
-            defaultAuthMode: options?.defaultAuthMode ?? 'private'
-          },
-          tables: [table]
+          created: !(body.allowExisting === true && body.input?.slug === 'demo'),
+          data: {
+            project: {
+              slug: body.input?.slug ?? 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
+              createdAt: '2026-04-26T00:00:00.000Z',
+              updatedAt: '2026-04-26T00:00:00.000Z',
+              defaultAuthMode: options?.defaultAuthMode ?? 'private'
+            },
+            tables: [table]
+          }
         }
       });
     }
@@ -359,6 +362,7 @@ function createEnv(options?: {
       return Response.json({
         type: 'project.table.create.result',
         result: {
+          created: !(body.allowExisting === true && body.input?.tableSlug === 'users'),
           data: table
         }
       });
@@ -591,7 +595,34 @@ describe('api routes', () => {
       createEnv()
     );
 
-    expect(response.status).toBe(201);
+    expect(response.status).toBe(200);
+  });
+
+  it('returns 200 for explicit table upserts that replace existing config', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects/demo/tables?upsert=true',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: expect.objectContaining({
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      })
+    });
   });
 
   it('reports internal readiness separately from liveness', async () => {
@@ -630,7 +661,7 @@ describe('api routes', () => {
   });
 
   it('creates rows against the table durable object', async () => {
-    vi.spyOn(console, 'info').mockImplementation(() => {});
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     const app = createApp();
     const response = await app.request(
       '/v1/projects/demo/tables/users/rows',
@@ -663,6 +694,8 @@ describe('api routes', () => {
     expect(response.headers.get('x-request-id')).toBeTruthy();
     expect(response.headers.get('x-ratelimit-limit')).toBe('300');
     expect(response.headers.get('x-ratelimit-remaining')).toBe('299');
+    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitOperationKey":"rows.create"'));
+    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitPrincipal":"api-key:project-key"'));
   });
 
   it('rejects protected row creation without credentials', async () => {
@@ -743,6 +776,7 @@ describe('api routes', () => {
   });
 
   it('returns 429 when the edge rate limit is exceeded', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const app = createApp();
     const response = await app.request(
       '/v1/admin/projects',
@@ -762,12 +796,15 @@ describe('api routes', () => {
         details: {
           principal: 'bootstrap-admin',
           routeFamily: 'admin',
+          operationKey: 'admin.projects.list',
           maxRequests: 300,
           windowSeconds: 60,
           resetAt: '2026-04-26T00:01:00.000Z'
         }
       }
     });
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitOperationKey":"admin.projects.list"'));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitPrincipal":"bootstrap-admin"'));
   });
 
   it('creates api keys through bootstrap admin auth', async () => {

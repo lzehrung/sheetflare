@@ -39,7 +39,7 @@ export async function readSetupLocalState(configPath: string) {
   const path = getSetupLocalStatePath(configPath);
   try {
     const text = await readFile(path, 'utf8');
-    const parsed = JSON.parse(text) as unknown;
+    const parsed: unknown = JSON.parse(text);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
       throw new ScriptError(`Setup local state ${path} must contain a JSON object.`);
     }

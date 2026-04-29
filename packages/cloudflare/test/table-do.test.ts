@@ -246,7 +246,10 @@ describe('TableDO', () => {
       }
     );
 
-    expect((response as { type: 'project.create.result'; result: { project: { googleCredentialRef: string } } }).result.project.googleCredentialRef).toBe('default');
+    expect((response as {
+      type: 'project.create.result';
+      result: { data: { project: { googleCredentialRef: string } }; created: boolean };
+    }).result.data.project.googleCredentialRef).toBe('default');
   });
 
   it('rejects duplicate project creation unless allowExisting is set', async () => {
@@ -310,9 +313,17 @@ describe('TableDO', () => {
       }
     );
 
-    expect((response as { type: 'project.create.result'; result: { project: { name: string; spreadsheetId: string } } }).result.project).toMatchObject({
-      name: 'Demo Updated',
-      spreadsheetId: 'sheet-2'
+    expect((response as {
+      type: 'project.create.result';
+      result: { data: { project: { name: string; spreadsheetId: string } }; created: boolean };
+    }).result).toMatchObject({
+      created: false,
+      data: {
+        project: {
+          name: 'Demo Updated',
+          spreadsheetId: 'sheet-2'
+        }
+      }
     });
   });
 
