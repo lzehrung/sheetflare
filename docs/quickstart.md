@@ -43,98 +43,66 @@ You will need:
 - service-account client email
 - service-account private key
 
-## 3. Configure the Worker
-
-Verify Wrangler auth first:
-
-```powershell
-npx wrangler whoami
-```
-
-If needed:
-
-```powershell
-npx wrangler login
-```
-
-Set these on the Worker:
-
-- `GOOGLE_CLIENT_EMAIL`
-- `GOOGLE_PRIVATE_KEY`
-- `ADMIN_BEARER_TOKEN`
-- `RATE_LIMIT_MAX_REQUESTS`
-- `RATE_LIMIT_WINDOW_SECONDS`
-- `TABLE_MAX_FULL_SCAN_ROWS`
-
-Optional:
-
-- `GOOGLE_CREDENTIALS_JSON`
-
-If you use one shared credential for the whole gateway, set `GOOGLE_CLIENT_EMAIL` and `GOOGLE_PRIVATE_KEY`.
-
-If you need multiple named credentials in one deployment, set `GOOGLE_CREDENTIALS_JSON` as a secret and then set each project's `googleCredentialRef` to the matching key.
-
-Set secrets:
-
-```powershell
-npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
-npx wrangler secret put ADMIN_BEARER_TOKEN --config apps/api/wrangler.jsonc
-```
-
-Set non-secret variables in `apps/api/wrangler.jsonc` or your deploy system.
-
-## 4. Verify the repo before deploy
+## 3. Install and run setup
 
 From repo root:
 
 ```powershell
 npm install
-npm run lint
-npm test
-npm run typecheck
-npm run build
+npm run setup
 ```
 
-## 5. Deploy
+The setup flow will:
+
+- check Wrangler auth and repo prerequisites
+- prompt for the spreadsheet URL or ID
+- prompt for the first private project and table mapping
+- write `sheetflare.setup.json`
+- optionally apply Worker secrets
+- optionally deploy the API Worker
+- optionally deploy the admin UI
+- optionally bootstrap the first project, tables, and keys
+- optionally run the smoke suite
+
+The simplest happy path is:
+
+- share the sheet with the Google service-account email first
+- point setup at the service-account JSON file when prompted
+- let setup generate the bootstrap admin token
+- let setup create the initial admin, read, and mutation keys
+
+Setup writes a checked non-secret config file at repo root:
 
 ```powershell
-npx wrangler deploy --config apps/api/wrangler.jsonc
+sheetflare.setup.json
 ```
 
-Save the deployed base URL, for example:
+The generated config is reusable. Common reruns:
 
 ```powershell
-$env:SHEETFLARE_BASE_URL = "https://your-worker.example.workers.dev"
+npm run setup -- --deploy
+npm run setup -- --bootstrap
+npm run setup -- --smoke
 ```
 
-## 6. Bootstrap admin access
+## 4. What setup still expects from you
 
-Set the bootstrap token locally:
+Setup does not automate:
 
-```powershell
-$env:SHEETFLARE_ADMIN_CREDENTIAL = "<ADMIN_BEARER_TOKEN>"
-```
+- creating the Google service account itself
+- enabling the Google Sheets API in GCP
+- sharing the spreadsheet with the service-account email
+- creating new sheet tabs for you
+- custom Worker or Pages naming beyond the checked public defaults
+- advanced multi-credential topologies using `GOOGLE_CREDENTIALS_JSON`
 
-Create a scoped admin key:
+For those details, use:
 
-```powershell
-npm run ops:create-admin-key
-```
+- [google-service-accounts.md](./google-service-accounts.md)
+- [deploy.md](./deploy.md)
+- [operator-runbook.md](./operator-runbook.md)
 
-Keep the returned API key. Prefer it for routine admin use. Treat the bootstrap token as break-glass only.
-
-Optional faster path:
-
-- set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON`
-- run `npm run ops:bootstrap`
-
-That script can create projects, tables, and initial API keys in one pass.
-
-## 7. Create a first private project and table
-
-Use the admin UI, the admin API, or `npm run ops:bootstrap` to create:
-
-- one private project
+## 5. The first table shape setup expects
 
 Add a table config such as:
 
@@ -153,14 +121,6 @@ Set `googleCredentialRef`:
 - leave it blank or use `default` if the Worker uses one shared Google credential
 - set it explicitly if the project should use a named credential from `GOOGLE_CREDENTIALS_JSON`
 
-The admin UI can now:
-
-- create projects
-- create tables
-- mint scoped API keys
-- inspect cache status
-- force reindex
-
 If a sheet contains formula-derived columns that the API must never overwrite, configure them in `readOnlyFields`.
 Those columns remain readable through the API, but create/update requests cannot target them.
 
@@ -173,7 +133,19 @@ Typical uses:
 - normalized fields such as trimmed/lowercased email addresses
 - typed fields such as numeric scores or ISO dates
 
-If you want a repeatable bootstrap instead of clicking through the admin UI, set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON` and run `npm run ops:bootstrap`.
+## 6. Manual fallback paths
+
+If you do not want setup to perform one or more actions immediately, it is safe to stop after `sheetflare.setup.json` has been written.
+
+You can then rerun only the needed step:
+
+```powershell
+npm run setup -- --deploy
+npm run setup -- --bootstrap
+npm run setup -- --smoke
+```
+
+If you want a completely manual bootstrap path instead of using setup, set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON` and run `npm run ops:bootstrap`.
 
 Template:
 
@@ -235,14 +207,7 @@ $env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
 npm run ops:bootstrap
 ```
 
-## 8. Create the keys needed for smoke testing
-
-You need:
-
-- a private read key with `table:read`
-- a mutation key with `table:create`, `table:update`, and `table:delete`
-
-They may be the same key if that is simpler for an initial deployment.
+## 7. Optional public-read coverage
 
 If you also want to exercise anonymous `public-read` behavior, create a second project with:
 
@@ -252,7 +217,7 @@ If you also want to exercise anonymous `public-read` behavior, create a second p
 
 The bundled smoke suite always checks the private path. It adds anonymous `public-read` coverage only when `SHEETFLARE_PUBLIC_PROJECT` and `SHEETFLARE_PUBLIC_TABLE` are set.
 
-## 9. Run the smoke suite
+## 8. Manual smoke inputs
 
 Set the smoke-test environment:
 
@@ -300,7 +265,7 @@ When `SHEETFLARE_PUBLIC_PROJECT` and `SHEETFLARE_PUBLIC_TABLE` are set, it also 
 - public-read anonymous access
 - public-read anonymous write rejection
 
-## 10. Inspect cache health
+## 9. Inspect cache health
 
 ```powershell
 $env:SHEETFLARE_PROJECT = "demo"
@@ -314,7 +279,7 @@ Healthy output should show:
 - `staleReason: "fresh"` after healthy activity or reindex
 - `lastSyncError: null`
 
-## 11. Useful operator commands
+## 10. Useful operator commands
 
 Create admin key:
 
@@ -347,7 +312,7 @@ $env:SHEETFLARE_LOAD_REPORT_PATH = "reports/load-$(Get-Date -Format yyyyMMdd-HHm
 npm run load
 ```
 
-## 12. If setup fails
+## 11. If setup fails
 
 Check these first:
 

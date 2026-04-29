@@ -42,7 +42,7 @@ Each item below has:
 ### 1. Real staging deployment validation
 
 Status:
-- in progress on 2026-04-27: `scripts/smoke-staging.ts` can now emit markdown and JSON report artifacts, but a real staged passing report is still required
+- in progress on 2026-04-27: `scripts/smoke-run.ts` can now emit markdown and JSON report artifacts, but a real staged passing report is still required
 
 Goal:
 - prove the deployed Cloudflare Worker + Durable Objects + Google Sheets integration behaves the same as the local harnessed tests
@@ -103,7 +103,7 @@ Proof required:
 ### 3. Add load and churn testing
 
 Status:
-- in progress on 2026-04-27: `scripts/load-staging.ts` exists, but a real benchmark report against staging is still required
+- in progress on 2026-04-27: `scripts/load-run.ts` exists, but a real benchmark report against staging is still required
 
 Goal:
 - prove the design holds under realistic sustained use

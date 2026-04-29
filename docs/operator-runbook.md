@@ -17,6 +17,16 @@ It assumes:
 
 ## Bootstrap Setup
 
+Preferred first-run path:
+
+```powershell
+npm run setup
+```
+
+That command can write `sheetflare.setup.json`, deploy, bootstrap, and smoke-check the first project.
+
+Manual fallback:
+
 1. Set the base URL:
 
 ```powershell
@@ -289,11 +299,14 @@ The smoke script verifies:
 - admin route access
 - private-table anonymous rejection
 - private-table keyed reads
-- public-read anonymous access
-- public-read anonymous write rejection
 - cache status `staleReason`
 - create/get/update/delete on a smoke row
 - admin reindex
+
+When `SHEETFLARE_PUBLIC_PROJECT` and `SHEETFLARE_PUBLIC_TABLE` are set, it also verifies:
+
+- public-read anonymous access
+- public-read anonymous write rejection
 
 If you are validating for broader external use, also run:
 

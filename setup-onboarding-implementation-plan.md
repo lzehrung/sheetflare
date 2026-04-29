@@ -1,5 +1,9 @@
 # Setup Onboarding Implementation Plan
 
+Status:
+
+- implemented on 2026-04-29
+
 This plan defines how Sheetflare should move from a docs-first setup flow to a real guided onboarding flow that is simple, explicit, and safe.
 
 The target is not "hide all complexity."

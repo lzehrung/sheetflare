@@ -6,6 +6,39 @@ Use [google-service-accounts.md](./google-service-accounts.md) for the exact rec
 
 If you are maintaining this repository's shared staging workflows, use [contributor-staging.md](./contributor-staging.md) for the exact GitHub secret names and project-specific staging asset names.
 
+## Preferred Path
+
+For a normal first deployment, start with:
+
+```powershell
+npm install
+npm run setup
+```
+
+The setup command can:
+
+- write `sheetflare.setup.json`
+- apply Worker secrets
+- deploy the API Worker
+- deploy the admin UI
+- bootstrap the first project and keys
+- run smoke validation
+
+For reruns from an existing setup config:
+
+```powershell
+npm run setup -- --deploy
+npm run setup -- --bootstrap
+npm run setup -- --smoke
+```
+
+Use the rest of this document when:
+
+- you want the manual fallback path
+- you are wiring CI
+- you need exact Cloudflare token scopes
+- you are debugging a failed deploy outside the setup flow
+
 ## Required Environment
 
 Set these on the Worker:
@@ -142,7 +175,7 @@ $env:SHEETFLARE_CACHE_HEALTH_TABLES_JSON = '[{"project":"demo","table":"users"}]
 npm run ops:cache:health
 ```
 
-## Required Staging Smoke Variables
+## Required Smoke Variables
 
 The smoke suite expects:
 
