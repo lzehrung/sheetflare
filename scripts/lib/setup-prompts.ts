@@ -69,12 +69,23 @@ function titleCaseSlug(slug: string) {
     .join(' ');
 }
 
+function selectDefaultSmokeField(options: {
+  idColumn: string;
+  indexedFields: string[];
+}) {
+  return options.indexedFields.find((fieldName) => fieldName.trim() !== '' && fieldName.trim() !== options.idColumn.trim());
+}
+
 export function buildSetupConfigFromAnswers(answers: SetupAnswers): SetupConfig {
   const privateProjectSlug = normalizeProjectSlug(answers.privateProjectSlug);
   const privateTableSlug = normalizeTableSlug(answers.privateTableSlug);
+  const idColumn = answers.idColumn.trim();
   const smokeFieldName = answers.smokeFieldName.trim();
   if (smokeFieldName.length === 0) {
     throw new ScriptError('Smoke field name must not be blank.');
+  }
+  if (smokeFieldName === idColumn) {
+    throw new ScriptError('Smoke field name must not use the managed ID column.');
   }
 
   const spreadsheetId = normalizeSpreadsheetId(answers.spreadsheetIdOrUrl);
@@ -89,7 +100,7 @@ export function buildSetupConfigFromAnswers(answers: SetupAnswers): SetupConfig 
           {
             tableSlug: privateTableSlug,
             sheetTabName: answers.privateSheetTabName.trim(),
-            idColumn: answers.idColumn.trim(),
+            idColumn,
             ...(indexedFields.length > 0 ? { indexedFields } : {}),
             cacheTtlSeconds: answers.cacheTtlSeconds
           }
@@ -112,7 +123,7 @@ export function buildSetupConfigFromAnswers(answers: SetupAnswers): SetupConfig 
         {
           tableSlug: privateTableSlug,
           sheetTabName: answers.privateSheetTabName.trim(),
-          idColumn: answers.idColumn.trim(),
+          idColumn,
           ...(indexedFields.length > 0 ? { indexedFields } : {}),
           cacheTtlSeconds: answers.cacheTtlSeconds
         }
@@ -211,11 +222,24 @@ export async function promptForSetup(prompter: SetupPrompter): Promise<SetupProm
       }
     }
   });
-  const defaultSmokeField = splitCommaSeparatedList(indexedFieldsRaw)[0] ?? 'name';
+  const indexedFields = splitCommaSeparatedList(indexedFieldsRaw);
+  const defaultSmokeField = selectDefaultSmokeField({
+    idColumn,
+    indexedFields
+  });
   const smokeFieldName = await prompter.text({
-    message: 'Writable field to use for smoke checks',
-    defaultValue: defaultSmokeField,
-    validate: (value) => value.trim().length > 0 ? null : 'Smoke field name must not be blank.'
+    message: 'Writable sheet column to use for smoke create/update checks',
+    ...(defaultSmokeField ? { defaultValue: defaultSmokeField } : {}),
+    validate: (value) => {
+      const trimmed = value.trim();
+      if (trimmed.length === 0) {
+        return 'Smoke field name must not be blank.';
+      }
+      if (trimmed === idColumn.trim()) {
+        return 'Smoke field name must not use the managed ID column.';
+      }
+      return null;
+    }
   });
   const smokeCreateValue = await prompter.text({
     message: 'Smoke create value',
@@ -261,7 +285,7 @@ export async function promptForSetup(prompter: SetupPrompter): Promise<SetupProm
     privateTableSlug,
     privateSheetTabName,
     idColumn,
-    indexedFields: splitCommaSeparatedList(indexedFieldsRaw),
+    indexedFields,
     cacheTtlSeconds: parsePositiveInteger(cacheTtlRaw, 'Cache TTL'),
     smokeFieldName,
     smokeCreateValue,

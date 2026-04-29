@@ -108,4 +108,25 @@ describe('buildSetupConfigFromAnswers', () => {
       publicReadProjectName: null
     })).toThrow('Smoke field name must not be blank.');
   });
+
+  it('rejects using the managed id column for smoke writes', () => {
+    expect(() => buildSetupConfigFromAnswers({
+      profile: 'local',
+      deployAdmin: true,
+      spreadsheetIdOrUrl: 'sheet-1',
+      privateProjectSlug: 'demo',
+      privateProjectName: 'Demo',
+      privateTableSlug: 'users',
+      privateSheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['email'],
+      cacheTtlSeconds: 60,
+      smokeFieldName: '_id',
+      smokeCreateValue: 'Smoke Row',
+      smokeUpdateValue: 'Smoke Row Updated',
+      addPublicReadProject: false,
+      publicReadProjectSlug: null,
+      publicReadProjectName: null
+    })).toThrow('Smoke field name must not use the managed ID column.');
+  });
 });
