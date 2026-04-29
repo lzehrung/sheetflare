@@ -7,6 +7,8 @@ import {
   adminCreateApiKeyResultSchema,
   adminGetProjectResultSchema,
   adminInspectSpreadsheetTabResultSchema,
+  adminRegisterSpreadsheetWatchesInputSchema,
+  adminRegisterSpreadsheetWatchesResultSchema,
   adminListApiKeysResultSchema,
   adminListProjectsResultSchema,
   adminListSpreadsheetTabsResultSchema,
@@ -29,6 +31,7 @@ import {
   rowParamsSchema,
   tableConfigSchema,
   BadRequestError,
+  ServiceUnavailableError,
   toErrorResponse,
   UnauthorizedError,
   updateRowInputSchema,
@@ -38,6 +41,8 @@ import {
   type AdminListApiKeysResult,
   type AdminListProjectsResult,
   type AdminInspectSpreadsheetTabResult,
+  type AdminRegisterSpreadsheetWatchesInput,
+  type AdminRegisterSpreadsheetWatchesResult,
   type AdminListSpreadsheetTabsResult,
   type ApiKeyPrincipal,
   type ApiScope,
@@ -359,6 +364,10 @@ function getRateLimitPrincipal(c: { req: { header(name: string): string | undefi
 }
 
 function getRateLimitRouteFamily(path: string) {
+  if (path.startsWith('/v1/system/')) {
+    return 'system';
+  }
+
   if (path.startsWith('/v1/admin/')) {
     return 'admin';
   }
@@ -414,6 +423,14 @@ function getRateLimitOperationKey(
 
   if (path.startsWith('/v1/admin/projects/') && path.endsWith('/reindex') && normalizedMethod === 'POST') {
     return 'admin.cache.reindex';
+  }
+
+  if (path === '/v1/admin/system/google/drive/watches/register' && normalizedMethod === 'POST') {
+    return 'admin.system.drive-watches.register';
+  }
+
+  if (path === '/v1/system/google/drive/notifications' && normalizedMethod === 'POST') {
+    return 'system.google.drive.notifications';
   }
 
   if (path.startsWith('/v1/admin/keys/') && normalizedMethod === 'DELETE') {
@@ -969,6 +986,40 @@ const refreshTableCacheRoute = createRoute({
   }
 });
 
+const registerSpreadsheetWatchesRoute = createRoute({
+  method: 'post',
+  path: '/v1/admin/system/google/drive/watches/register',
+  tags: ['System'],
+  security: adminSecurity,
+  request: {
+    body: {
+      content: jsonContent(adminRegisterSpreadsheetWatchesInputSchema),
+      description: 'Drive watch registration options'
+    }
+  },
+  responses: {
+    200: {
+      description: 'Register or renew Google Drive spreadsheet watches',
+      content: jsonContent(adminRegisterSpreadsheetWatchesResultSchema)
+    },
+    400: badRequestResponse,
+    401: unauthorizedResponse
+  }
+});
+
+const googleDriveNotificationRoute = createRoute({
+  method: 'post',
+  path: '/v1/system/google/drive/notifications',
+  tags: ['System'],
+  responses: {
+    204: {
+      description: 'Accept a Google Drive webhook notification'
+    },
+    400: badRequestResponse,
+    401: unauthorizedResponse
+  }
+});
+
 const getRowRoute = createRoute({
   method: 'get',
   path: '/v1/projects/{project}/tables/{table}/rows/{id}',
@@ -1148,6 +1199,11 @@ function createApp() {
   });
 
   app.use('/v1/*', async (c, next) => {
+    if (c.req.path === '/v1/system/google/drive/notifications') {
+      await next();
+      return;
+    }
+
     await enforceRateLimit(c);
     await next();
   });
@@ -1459,6 +1515,67 @@ function createApp() {
     });
 
     return c.json((response as { type: 'table.reindex.result'; result: ReindexTableResult }).result);
+  });
+
+  app.openapi(registerSpreadsheetWatchesRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    assertGlobalAdminScope(auth, 'admin:projects');
+    const input = await parseJsonBody(c, adminRegisterSpreadsheetWatchesInputSchema) satisfies AdminRegisterSpreadsheetWatchesInput;
+    const webhookToken = c.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim();
+    if (!webhookToken) {
+      throw new ServiceUnavailableError('GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.');
+    }
+
+    const webhookUrl = new URL('/v1/system/google/drive/notifications', c.req.url).toString();
+    const debounceSeconds = input.debounceSeconds ?? 30;
+    const expirationHours = input.expirationHours ?? 24 * 7;
+    const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl,
+      webhookToken,
+      debounceSeconds,
+      expirationMs: Date.now() + expirationHours * 60 * 60 * 1000
+    });
+
+    return c.json(
+      (response as {
+        type: 'control.spreadsheet-watches.register.result';
+        result: AdminRegisterSpreadsheetWatchesResult;
+      }).result
+    );
+  });
+
+  app.openapi(googleDriveNotificationRoute, async (c) => {
+    const webhookToken = c.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim();
+    if (!webhookToken) {
+      throw new ServiceUnavailableError('GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.');
+    }
+
+    const channelId = c.req.header('x-goog-channel-id')?.trim();
+    const resourceId = c.req.header('x-goog-resource-id')?.trim();
+    const resourceState = c.req.header('x-goog-resource-state')?.trim();
+    const providedToken = c.req.header('x-goog-channel-token')?.trim();
+
+    if (!channelId || !resourceId || !resourceState) {
+      throw new BadRequestError('Missing required Google Drive notification headers.');
+    }
+
+    if (providedToken !== webhookToken) {
+      throw new UnauthorizedError('Invalid Google Drive webhook token.');
+    }
+
+    c.set('authPrincipal', 'system:google-drive');
+    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+      type: 'control.spreadsheet-watch.notify',
+      channelId,
+      resourceId,
+      resourceState,
+      messageNumber: c.req.header('x-goog-message-number')?.trim() ?? null,
+      changedAt: new Date().toISOString(),
+      channelExpiration: c.req.header('x-goog-channel-expiration')?.trim() ?? null
+    });
+
+    return new Response(null, { status: 204 });
   });
 
   app.openapi(getRowRoute, async (c) => {

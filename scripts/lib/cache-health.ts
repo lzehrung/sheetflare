@@ -27,6 +27,7 @@ export type CacheHealthReport = {
 export function isCacheHealthy(cache: TableCacheStatus) {
   return (
     cache.status === 'ready' &&
+    !cache.stale &&
     cache.staleReason !== 'error' &&
     cache.lastSyncError === null &&
     cache.validation.status === 'ok'

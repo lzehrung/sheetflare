@@ -55,6 +55,23 @@ describe('cache-health helpers', () => {
     ).toBe(false);
   });
 
+  it('marks pending external sheet changes as unhealthy until reindex completes', () => {
+    expect(
+      isCacheHealthy(
+        createCacheStatus({
+          stale: true,
+          staleReason: 'external-change',
+          externalChange: {
+            pending: true,
+            lastChangedAt: '2026-04-29T18:05:00.000Z',
+            debounceUntil: '2026-04-29T18:05:30.000Z',
+            lastAutoReindexAt: null
+          }
+        })
+      )
+    ).toBe(false);
+  });
+
   it('builds report entries with validation state', () => {
     const entry = buildCacheHealthEntry(
       'demo',

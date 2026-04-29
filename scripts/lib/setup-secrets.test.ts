@@ -15,6 +15,7 @@ const tempDirs: string[] = [];
 afterEach(async () => {
   delete process.env.GOOGLE_CLIENT_EMAIL;
   delete process.env.GOOGLE_PRIVATE_KEY;
+  delete process.env.GOOGLE_DRIVE_WEBHOOK_SECRET;
   delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
   delete process.env.ADMIN_BEARER_TOKEN;
   delete process.env.ADMIN_UI_USERNAME;
@@ -26,6 +27,7 @@ describe('setup secret command builders', () => {
   it('builds worker secret put commands against the provided wrangler config', () => {
     expect(buildApiSecretCommands('apps/api/wrangler.jsonc')).toEqual({
       googlePrivateKey: ['wrangler', 'secret', 'put', 'GOOGLE_PRIVATE_KEY', '--config', 'apps/api/wrangler.jsonc'],
+      googleDriveWebhookSecret: ['wrangler', 'secret', 'put', 'GOOGLE_DRIVE_WEBHOOK_SECRET', '--config', 'apps/api/wrangler.jsonc'],
       adminBearerToken: ['wrangler', 'secret', 'put', 'ADMIN_BEARER_TOKEN', '--config', 'apps/api/wrangler.jsonc']
     });
   });
@@ -40,6 +42,7 @@ describe('setup secret command builders', () => {
   it('collects secrets noninteractively from environment values', async () => {
     process.env.GOOGLE_CLIENT_EMAIL = 'service-account@example.com';
     process.env.GOOGLE_PRIVATE_KEY = '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n';
+    process.env.GOOGLE_DRIVE_WEBHOOK_SECRET = 'drive-webhook-secret';
     process.env.ADMIN_BEARER_TOKEN = 'bootstrap-secret';
 
     expect(await collectSetupSecrets({
@@ -50,6 +53,7 @@ describe('setup secret command builders', () => {
     })).toEqual({
       googleClientEmail: 'service-account@example.com',
       googlePrivateKey: '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n',
+      driveWebhookSecret: 'drive-webhook-secret',
       adminBearerToken: 'bootstrap-secret',
       adminUiUsername: 'existing-admin',
       adminUiPassword: 'existing-password'
@@ -73,6 +77,7 @@ describe('setup secret command builders', () => {
 
     expect(result.googleClientEmail).toBe('service-account@example.com');
     expect(result.googlePrivateKey).toContain('BEGIN PRIVATE KEY');
+    expect(result.driveWebhookSecret).toBeTruthy();
     expect(result.adminUiUsername).toBeNull();
     expect(result.adminUiPassword).toBeNull();
   });

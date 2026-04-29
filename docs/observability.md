@@ -76,7 +76,7 @@ Alert on these conditions before broad production use:
    Schedule `npm run ops:cache:health` against critical tables and alert on any non-zero exit.
    This detects:
    - `status !== "ready"`
-   - `staleReason === "error"`
+   - `staleReason === "error"` or `staleReason === "external-change"` that does not clear
    - `lastSyncError !== null`
 
 3. Repeated `429` responses
@@ -93,6 +93,9 @@ Alert on these conditions before broad production use:
 
 7. Validation drift warnings
    Alert when `table.sync.complete.validationStatus == "warning"` for critical tables, or when `validationIssueCount` rises unexpectedly after a sync.
+
+8. External-change reindex backlog
+   Alert when critical tables remain in `staleReason: "external-change"` beyond the intended debounce window, which usually means Drive notifications are arriving but automatic reindex is failing or blocked.
 
 ## Executable Health Check
 

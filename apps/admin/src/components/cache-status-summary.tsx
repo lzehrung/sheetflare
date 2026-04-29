@@ -21,6 +21,16 @@ function formatValidationIssues(cache: TableCacheStatus) {
     .join('; ');
 }
 
+function formatExternalChangeSummary(cache: TableCacheStatus) {
+  if (!cache.externalChange.pending) {
+    return cache.externalChange.lastAutoReindexAt
+      ? `idle / last auto reindex ${formatTimestamp(cache.externalChange.lastAutoReindexAt)}`
+      : 'idle';
+  }
+
+  return `pending / debounce until ${formatTimestamp(cache.externalChange.debounceUntil)}`;
+}
+
 export function CacheStatusSummary({ cache }: CacheStatusSummaryProps) {
   return (
     <>
@@ -37,6 +47,10 @@ export function CacheStatusSummary({ cache }: CacheStatusSummaryProps) {
         <dd>{formatValidationSummary(cache)}</dd>
       </div>
       <div>
+        <dt>External Change</dt>
+        <dd>{formatExternalChangeSummary(cache)}</dd>
+      </div>
+      <div>
         <dt>Last Sync Completed</dt>
         <dd>{formatTimestamp(cache.lastSyncCompletedAt)}</dd>
       </div>
@@ -48,6 +62,12 @@ export function CacheStatusSummary({ cache }: CacheStatusSummaryProps) {
         <div>
           <dt>Validation Issues</dt>
           <dd>{formatValidationIssues(cache)}</dd>
+        </div>
+      ) : null}
+      {cache.externalChange.lastChangedAt ? (
+        <div>
+          <dt>Last External Change</dt>
+          <dd>{formatTimestamp(cache.externalChange.lastChangedAt)}</dd>
         </div>
       ) : null}
       {cache.lastSyncError ? (
