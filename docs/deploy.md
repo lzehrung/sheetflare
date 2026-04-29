@@ -62,20 +62,20 @@ Do not deploy if any of these fail.
 
 ## Deploy
 
-Preferred local staging deploy commands from repo root:
+Preferred local deploy commands from repo root:
 
 ```powershell
-npm run deploy:staging:api
-npm run deploy:staging:admin
+npm run deploy:api
+npm run deploy:admin
 ```
 
 Or deploy both in sequence:
 
 ```powershell
-npm run deploy:staging
+npm run deploy
 ```
 
-Equivalent explicit commands if you need to run them manually:
+Equivalent explicit command for the API Worker if you need to run it manually:
 
 ```powershell
 npm --workspace @sheetflare/api run build
@@ -107,24 +107,24 @@ $env:SHEETFLARE_BASE_URL = "https://your-worker.example.workers.dev"
 $env:SHEETFLARE_ADMIN_CREDENTIAL = "<ADMIN_BEARER_TOKEN>"
 ```
 
-2. Run the staging smoke suite:
+2. Run the smoke suite:
 
 ```powershell
-npm run smoke:staging
+npm run smoke
 ```
 
 Optional: persist a smoke report artifact:
 
 ```powershell
 $env:SHEETFLARE_SMOKE_REPORT_PATH = "reports/staging/smoke-$(Get-Date -Format yyyyMMdd-HHmmss).md"
-npm run smoke:staging
+npm run smoke
 ```
 
-3. Run the staging load harness and persist its report:
+3. Run the load harness and persist its report:
 
 ```powershell
 $env:SHEETFLARE_LOAD_REPORT_PATH = "reports/staging/load-$(Get-Date -Format yyyyMMdd-HHmmss).md"
-npm run load:staging
+npm run load
 ```
 
 4. For each critical table, verify cache status:
@@ -185,7 +185,7 @@ At minimum, rollback means restoring the previous Worker deployment and then ver
 Procedure:
 
 1. Redeploy the last known good version.
-2. Run `npm run smoke:staging`.
+2. Run `npm run smoke`.
 3. Re-check cache status on critical tables.
 4. If a rollout changed table config or sheet structure assumptions, run `npm run ops:reindex` on affected tables.
 

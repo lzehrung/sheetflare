@@ -20,14 +20,14 @@ Minimal React admin UI for operating the control plane.
 - `src/components/selected-project-panel.tsx`: selected-project metadata, table creation, and cache actions.
 - `src/auth.ts`: browser-local credential normalization and storage helpers.
 - `functions/_middleware.ts`: site-wide auth gate and security headers for Pages deploys.
-- `functions/_lib/api-proxy.ts`: same-origin proxy from Pages routes to the staging API Worker.
+- `functions/_lib/api-proxy.ts`: same-origin proxy from Pages routes to the configured API Worker.
 - `src/styles.css`: lightweight styling.
 
 ## Key Insights
 
 - The UI is intentionally small. It is an operator convenience layer, not the source of system behavior.
 - Credentials are stored in browser local storage, so this app assumes a trusted operator environment.
-- Deployed staging uses HTTP Basic Auth at the Pages edge plus the normal admin API credential inside the app.
+- A deployed admin site should use a site-level access gate such as Cloudflare Access or Pages-side Basic Auth plus the normal admin API credential inside the app.
 - If control-plane behavior changes, update the API and contracts first, then keep this UI aligned.
 - Operator state should stay explicit: project selection, cache status, sync freshness, and key scope should never rely on hidden browser state.
 

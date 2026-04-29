@@ -8,8 +8,8 @@ It is intentionally separate from the operator-facing docs. Consumer docs should
 
 - Cloudflare Worker name: `sheetflare-staging-api`
 - Cloudflare Pages project: `sheetflare-staging-admin`
-- Wrangler config: `apps/api/wrangler.jsonc`
-- Pages config: `apps/admin/wrangler.jsonc`
+- Wrangler config: `apps/api/wrangler.staging.jsonc`
+- Pages config: `apps/admin/wrangler.staging.jsonc`
 - deploy target: `*.workers.dev`
 - admin target: `https://sheetflare-staging-admin.pages.dev`
 - Google project: `sheetflare-staging`
@@ -43,7 +43,7 @@ $secretsPath = Join-Path $env:TEMP "sheetflare-staging-secrets.json"
   ADMIN_BEARER_TOKEN = $adminBearerToken
 } | ConvertTo-Json -Compress | Set-Content -LiteralPath $secretsPath
 
-npx wrangler deploy --config apps/api/wrangler.jsonc --secrets-file $secretsPath
+npx wrangler deploy --config apps/api/wrangler.staging.jsonc --secrets-file $secretsPath
 ```
 
 Remove the temporary secrets file after deploy.
@@ -53,7 +53,7 @@ Remove the temporary secrets file after deploy.
 The admin UI is deployed separately from the API Worker. The staging Pages project is:
 
 - project: `sheetflare-staging-admin`
-- config: `apps/admin/wrangler.jsonc`
+- config: `apps/admin/wrangler.staging.jsonc`
 - upstream API origin: `https://sheetflare-staging-api.lzehrung.workers.dev`
 
 The deployed site uses two distinct auth layers:
