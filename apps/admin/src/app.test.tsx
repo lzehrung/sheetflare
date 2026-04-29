@@ -320,7 +320,12 @@ describe('App', () => {
             rowCount: 3,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
-            lastSyncError: null
+            lastSyncError: null,
+            validation: {
+              status: 'ok',
+              issueCount: 0,
+              issues: []
+            }
           }
         });
       }
@@ -335,7 +340,12 @@ describe('App', () => {
             rowCount: 1,
             lastSyncStartedAt: '2026-04-27T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-27T00:00:01.000Z',
-            lastSyncError: null
+            lastSyncError: null,
+            validation: {
+              status: 'ok',
+              issueCount: 0,
+              issues: []
+            }
           }
         });
       }
@@ -432,7 +442,20 @@ describe('App', () => {
             rowCount: 0,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
-            lastSyncError: null
+            lastSyncError: null,
+            validation: {
+              status: 'warning',
+              issueCount: 1,
+              issues: [
+                {
+                  rowId: 'row-1',
+                  rowNumber: 2,
+                  field: 'email',
+                  code: 'UNIQUE',
+                  message: 'email must be unique.'
+                }
+              ]
+            }
           }
         });
       }
@@ -449,7 +472,12 @@ describe('App', () => {
             rowCount: 3,
             lastSyncStartedAt: '2026-04-26T00:00:02.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:03.000Z',
-            lastSyncError: null
+            lastSyncError: null,
+            validation: {
+              status: 'ok',
+              issueCount: 0,
+              issues: []
+            }
           }
         });
       }
@@ -470,6 +498,7 @@ describe('App', () => {
 
     const staleStatuses = await screen.findAllByText('ready / ttl-expired / 0 rows');
     expect(staleStatuses.length).toBeGreaterThan(0);
+    expect(screen.getAllByText('warning / 1 issues').length).toBeGreaterThan(0);
     const spreadsheetLink = screen.getByRole('link', { name: 'Open in Google Sheets' });
     expect(spreadsheetLink.getAttribute('href')).toBe('https://docs.google.com/spreadsheets/d/sheet-1/edit');
 
@@ -933,7 +962,12 @@ describe('App', () => {
             rowCount: 0,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
-            lastSyncError: null
+            lastSyncError: null,
+            validation: {
+              status: 'ok',
+              issueCount: 0,
+              issues: []
+            }
           }
         });
       }

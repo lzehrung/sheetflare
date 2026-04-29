@@ -598,6 +598,50 @@ describe('api routes', () => {
     expect(response.status).toBe(200);
   });
 
+  it('treats upsert=false as a real false value instead of enabling replacement', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects?upsert=false',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(409);
+  });
+
+  it('rejects invalid upsert query values', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects?upsert=yes',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(400);
+  });
+
   it('returns 200 for explicit table upserts that replace existing config', async () => {
     const app = createApp();
     const response = await app.request(
@@ -623,6 +667,27 @@ describe('api routes', () => {
         tableSlug: 'users'
       })
     });
+  });
+
+  it('treats table upsert=false as a real false value instead of replacing config', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects/demo/tables?upsert=false',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(409);
   });
 
   it('reports internal readiness separately from liveness', async () => {

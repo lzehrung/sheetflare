@@ -6,7 +6,12 @@ type WindowRow = {
   reset_at_ms: number;
 };
 
+const minCleanupIntervalMs = 1_000;
+const maxCleanupIntervalMs = 60_000;
+
 export class RateLimitDO {
+  private nextCleanupAtMs: number | null = null;
+
   constructor(
     private readonly ctx: DurableObjectState,
     env: unknown
@@ -64,10 +69,7 @@ export class RateLimitDO {
     const resetAtMs = bucketStartMs + windowMs;
     const bucketKey = `${input.key}:${bucketStartMs}`;
 
-    this.ctx.storage.sql.exec(
-      `DELETE FROM rate_limit_windows WHERE reset_at_ms <= ?`,
-      nowMs
-    );
+    this.maybeCleanupExpiredWindows(nowMs, windowMs);
 
     const existing = this.selectOptionalRow<WindowRow>(
       `SELECT bucket_key, count, reset_at_ms FROM rate_limit_windows WHERE bucket_key = ?`,
@@ -114,5 +116,24 @@ export class RateLimitDO {
       remaining: Math.max(limit - existing.count - 1, 0),
       resetAtMs: existing.reset_at_ms
     };
+  }
+
+  private maybeCleanupExpiredWindows(nowMs: number, windowMs: number) {
+    if (this.nextCleanupAtMs !== null && nowMs < this.nextCleanupAtMs) {
+      return;
+    }
+
+    this.ctx.storage.sql.exec(
+      `DELETE FROM rate_limit_windows WHERE reset_at_ms <= ?`,
+      nowMs
+    );
+    this.nextCleanupAtMs = nowMs + this.getCleanupIntervalMs(windowMs);
+  }
+
+  private getCleanupIntervalMs(windowMs: number) {
+    return Math.min(
+      Math.max(windowMs, minCleanupIntervalMs),
+      maxCleanupIntervalMs
+    );
   }
 }

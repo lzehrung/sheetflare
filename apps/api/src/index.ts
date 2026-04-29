@@ -136,13 +136,17 @@ const adminProjectsQuerySchema = z.object({
 });
 
 const adminUpsertQuerySchema = z.object({
-  upsert: z.coerce.boolean().optional().openapi({
-    param: {
-      name: 'upsert',
-      in: 'query'
-    },
-    example: true
-  })
+  upsert: z
+    .enum(['true', 'false'])
+    .transform((value) => value === 'true')
+    .optional()
+    .openapi({
+      param: {
+        name: 'upsert',
+        in: 'query'
+      },
+      example: true
+    })
 });
 
 const listRowsQueryOpenApiSchema = z.object({
