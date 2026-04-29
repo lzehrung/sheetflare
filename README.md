@@ -25,6 +25,7 @@ Project policies live in [LICENSE](./LICENSE), [SECURITY.md](./SECURITY.md), [CO
 ```powershell
 npm install
 npm run check
+npm run setup
 npm run dev:api
 npm run dev:admin
 npm run deploy
@@ -34,6 +35,7 @@ npm run smoke
 
 ## Operator Scripts
 
+- `npm run setup`
 - `npm run ops:create-admin-key`
 - `npm run ops:bootstrap`
 - `npm run ops:cache`
@@ -50,9 +52,16 @@ npm run smoke
 For the normal setup flow:
 
 1. Follow [docs/quickstart.md](./docs/quickstart.md).
-2. Use [docs/google-service-accounts.md](./docs/google-service-accounts.md) to provision the right Google credential model.
-3. Use [docs/deploy.md](./docs/deploy.md) for staging or production deployment details, including CI secret layout and Cloudflare token scopes.
-4. Use [docs/operator-runbook.md](./docs/operator-runbook.md) for day-2 operations and failure handling.
+2. Run `npm run setup`.
+3. Use [docs/google-service-accounts.md](./docs/google-service-accounts.md) only if you still need help provisioning the Google service account itself.
+4. Use [docs/deploy.md](./docs/deploy.md) for CI deployment details, manual fallback commands, and Cloudflare token scopes.
+5. Use [docs/operator-runbook.md](./docs/operator-runbook.md) for day-2 operations and failure handling.
+
+`npm run setup` writes `sheetflare.setup.json`, can apply secrets, can deploy, can bootstrap the first project and keys, and can run smoke validation. For reruns from an existing config:
+
+- `npm run setup -- --deploy`
+- `npm run setup -- --bootstrap`
+- `npm run setup -- --smoke`
 
 If you are maintaining this repository's own shared staging environment, use [docs/contributor-staging.md](./docs/contributor-staging.md).
 
