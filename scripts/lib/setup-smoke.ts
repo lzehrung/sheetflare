@@ -1,4 +1,5 @@
 import type { SetupConfig } from './setup-config';
+import { ScriptError } from './runtime';
 
 export function createSmokeEnv(options: {
   config: SetupConfig;
@@ -32,7 +33,7 @@ export function createSmokeEnv(options: {
 function findTableIdColumn(tables: SetupConfig['privateProject']['tables'], tableSlug: string) {
   const table = tables.find((entry) => entry.tableSlug === tableSlug);
   if (!table) {
-    throw new Error(`Private table ${tableSlug} was not found in setup config.`);
+    throw new ScriptError(`Private table ${tableSlug} was not found in setup config.`);
   }
 
   return table.idColumn ?? '_id';

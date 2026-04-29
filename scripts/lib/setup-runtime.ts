@@ -47,7 +47,7 @@ export function resolvePreferredSmokeAdminCredential(state: Pick<ResolvedSetupRu
 
 export function summarizeSetupSecrets(options: {
   showSecrets: boolean;
-  localStatePath: string;
+  localStatePath: string | null;
   adminBearerToken: string | null;
   adminUiUsername: string | null;
   adminUiPassword: string | null;

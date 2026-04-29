@@ -108,4 +108,28 @@ describe('summarizeSetupSecrets', () => {
       localStatePath: 'E:/repo/.sheetflare.setup.local.json'
     });
   });
+
+  it('reports no local state path when the current run did not persist local state', () => {
+    expect(summarizeSetupSecrets({
+      showSecrets: false,
+      localStatePath: null,
+      adminBearerToken: 'abcdefghijklmno',
+      adminUiUsername: 'operator@example.com',
+      adminUiPassword: 'supersecret',
+      adminApiKey: 'sfk_admin.secret',
+      privateReadKey: 'sfk_read.secret',
+      mutationKey: 'sfk_mutation.secret'
+    })).toEqual({
+      googleClientEmail: null,
+      apiUrl: null,
+      adminUrl: null,
+      adminBearerToken: 'abcd...lmno',
+      adminUiUsername: 'operator@example.com',
+      adminUiPassword: 'supe...cret',
+      adminApiKey: 'sfk_...cret',
+      privateReadKey: 'sfk_...cret',
+      mutationKey: 'sfk_...cret',
+      localStatePath: null
+    });
+  });
 });
