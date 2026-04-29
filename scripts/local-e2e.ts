@@ -74,7 +74,7 @@ async function main() {
     logSuccess('Local admin UI is ready');
 
     logStep('Run local API smoke checks');
-    await runCommand(getCommandName('npm'), ['run', 'smoke:staging'], smokeEnv);
+    await runCommand(getCommandName('npm'), ['run', 'smoke'], smokeEnv);
     logSuccess('Local API smoke checks passed');
 
     logStep('Run admin browser checks');

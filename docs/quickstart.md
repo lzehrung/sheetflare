@@ -250,7 +250,7 @@ If you also want to exercise anonymous `public-read` behavior, create a second p
 - its own spreadsheet or tab mapping
 - a table such as `users`
 
-The bundled smoke suite currently checks both a private and a public-read project.
+The bundled smoke suite always checks the private path. It adds anonymous `public-read` coverage only when `SHEETFLARE_PUBLIC_PROJECT` and `SHEETFLARE_PUBLIC_TABLE` are set.
 
 ## 9. Run the smoke suite
 
@@ -261,10 +261,15 @@ $env:SHEETFLARE_PRIVATE_PROJECT = "demo"
 $env:SHEETFLARE_PRIVATE_TABLE = "users"
 $env:SHEETFLARE_PRIVATE_READ_KEY = "sfk_private-read.secret"
 $env:SHEETFLARE_MUTATION_KEY = "sfk_mutation.secret"
-$env:SHEETFLARE_PUBLIC_PROJECT = "demo-public"
-$env:SHEETFLARE_PUBLIC_TABLE = "users"
 $env:SHEETFLARE_SMOKE_CREATE_VALUES_JSON = '{"name":"Smoke Row","status":"active"}'
 $env:SHEETFLARE_SMOKE_UPDATE_VALUES_JSON = '{"name":"Smoke Row Updated"}'
+```
+
+Optional for anonymous `public-read` coverage:
+
+```powershell
+$env:SHEETFLARE_PUBLIC_PROJECT = "demo-public"
+$env:SHEETFLARE_PUBLIC_TABLE = "users"
 ```
 
 Run:
@@ -286,11 +291,14 @@ The smoke suite checks:
 - admin access
 - private-table anonymous rejection
 - private-table keyed reads
-- public-read anonymous access
-- public-read anonymous write rejection
 - cache status with `staleReason`
 - create/get/update/delete on a smoke row
 - admin reindex
+
+When `SHEETFLARE_PUBLIC_PROJECT` and `SHEETFLARE_PUBLIC_TABLE` are set, it also checks:
+
+- public-read anonymous access
+- public-read anonymous write rejection
 
 ## 10. Inspect cache health
 
@@ -364,10 +372,13 @@ Required smoke env vars:
 - `SHEETFLARE_PRIVATE_TABLE`
 - `SHEETFLARE_PRIVATE_READ_KEY`
 - `SHEETFLARE_MUTATION_KEY`
-- `SHEETFLARE_PUBLIC_PROJECT`
-- `SHEETFLARE_PUBLIC_TABLE`
 - `SHEETFLARE_SMOKE_CREATE_VALUES_JSON`
 - `SHEETFLARE_SMOKE_UPDATE_VALUES_JSON`
+
+Optional for anonymous `public-read` coverage:
+
+- `SHEETFLARE_PUBLIC_PROJECT`
+- `SHEETFLARE_PUBLIC_TABLE`
 
 ```powershell
 npx playwright install chromium

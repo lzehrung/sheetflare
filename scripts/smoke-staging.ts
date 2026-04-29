@@ -65,29 +65,29 @@ type SmokeStep = {
 };
 
 type SmokeReport = {
-  kind: 'staging-smoke';
+  kind: 'smoke';
   status: 'passed' | 'failed';
   startedAt: string;
   finishedAt: string;
   baseUrl: string;
   privateProject: string;
   privateTable: string;
-  publicProject: string;
-  publicTable: string;
+  publicProject: string | null;
+  publicTable: string | null;
   steps: SmokeStep[];
   failureMessage: string | null;
 };
 
 function renderSmokeReportMarkdown(report: SmokeReport) {
   const lines = [
-    '# Staging Smoke Report',
+    '# Smoke Report',
     '',
     `- status: ${report.status}`,
     `- startedAt: ${report.startedAt}`,
     `- finishedAt: ${report.finishedAt}`,
     `- baseUrl: ${report.baseUrl}`,
     `- privateTable: ${report.privateProject}/${report.privateTable}`,
-    `- publicTable: ${report.publicProject}/${report.publicTable}`,
+    `- publicTable: ${report.publicProject && report.publicTable ? `${report.publicProject}/${report.publicTable}` : 'not configured'}`,
     ''
   ];
 
@@ -135,6 +135,7 @@ async function main() {
   const startedAt = new Date().toISOString();
   const steps: SmokeStep[] = [];
   const smokeId = `smoke-${Date.now()}`;
+  const hasPublicReadCoverage = Boolean(publicProject && publicTable);
   let createdRowId: string | null = null;
 
   async function runStep<T>(options: {
@@ -181,7 +182,7 @@ async function main() {
   }
 
   const report: SmokeReport = {
-    kind: 'staging-smoke',
+    kind: 'smoke',
     status: 'failed',
     startedAt,
     finishedAt: startedAt,
@@ -294,56 +295,58 @@ async function main() {
       }
     });
 
-    await runStep({
-      name: 'Public table accepts anonymous reads',
-      request: {
-        method: 'GET',
-        path: `/v1/projects/${encodeURIComponent(publicProject)}/tables/${encodeURIComponent(publicTable)}/rows`,
-        auth: 'anonymous'
-      },
-      summary: (value) => `Public-read table returned ${value.data.length} rows on the first page.`,
-      run: async () => {
-        const response = await requestJson<ListRowsResponse>({
-          baseUrl,
-          path: `/v1/projects/${encodeURIComponent(publicProject)}/tables/${encodeURIComponent(publicTable)}/rows`,
-          expectedStatus: 200
-        });
-        return {
-          responseStatus: response.response.status,
-          responseBody: assertPresent(response.data, 'Public table read returned an empty response body.'),
-          value: assertPresent(response.data, 'Public table read returned an empty response body.')
-        };
-      }
-    });
+    if (hasPublicReadCoverage) {
+      await runStep({
+        name: 'Public table accepts anonymous reads',
+        request: {
+          method: 'GET',
+          path: `/v1/projects/${encodeURIComponent(publicProject!)}/tables/${encodeURIComponent(publicTable!)}/rows`,
+          auth: 'anonymous'
+        },
+        summary: (value) => `Public-read table returned ${value.data.length} rows on the first page.`,
+        run: async () => {
+          const response = await requestJson<ListRowsResponse>({
+            baseUrl,
+            path: `/v1/projects/${encodeURIComponent(publicProject!)}/tables/${encodeURIComponent(publicTable!)}/rows`,
+            expectedStatus: 200
+          });
+          return {
+            responseStatus: response.response.status,
+            responseBody: assertPresent(response.data, 'Public table read returned an empty response body.'),
+            value: assertPresent(response.data, 'Public table read returned an empty response body.')
+          };
+        }
+      });
 
-    await runStep({
-      name: 'Public-read table rejects anonymous writes',
-      request: {
-        method: 'POST',
-        path: `/v1/projects/${encodeURIComponent(publicProject)}/tables/${encodeURIComponent(publicTable)}/rows`,
-        auth: 'anonymous'
-      },
-      summary: () => 'Public-read table blocks anonymous writes.',
-      run: async () => {
-        const response = await requestJson<Record<string, unknown>>({
-          baseUrl,
-          path: `/v1/projects/${encodeURIComponent(publicProject)}/tables/${encodeURIComponent(publicTable)}/rows`,
+      await runStep({
+        name: 'Public-read table rejects anonymous writes',
+        request: {
           method: 'POST',
-          expectedStatus: 401,
-          body: {
-            values: {
-              ...createValues,
-              [idColumn]: `public-${smokeId}`
+          path: `/v1/projects/${encodeURIComponent(publicProject!)}/tables/${encodeURIComponent(publicTable!)}/rows`,
+          auth: 'anonymous'
+        },
+        summary: () => 'Public-read table blocks anonymous writes.',
+        run: async () => {
+          const response = await requestJson<Record<string, unknown>>({
+            baseUrl,
+            path: `/v1/projects/${encodeURIComponent(publicProject!)}/tables/${encodeURIComponent(publicTable!)}/rows`,
+            method: 'POST',
+            expectedStatus: 401,
+            body: {
+              values: {
+                ...createValues,
+                [idColumn]: `public-${smokeId}`
+              }
             }
-          }
-        });
-        return {
-          responseStatus: response.response.status,
-          responseBody: response.data,
-          value: true
-        };
-      }
-    });
+          });
+          return {
+            responseStatus: response.response.status,
+            responseBody: response.data,
+            value: true
+          };
+        }
+      });
+    }
 
     const cacheStatusData = await runStep({
       name: 'Cache status includes stale reason',
@@ -512,7 +515,7 @@ async function main() {
 
     report.status = 'passed';
     report.finishedAt = new Date().toISOString();
-    console.log('\n[done] staging smoke checks passed');
+      console.log('\n[done] smoke checks passed');
   } catch (error) {
     report.status = 'failed';
     report.failureMessage = error instanceof ScriptError || error instanceof Error

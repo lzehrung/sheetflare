@@ -152,14 +152,14 @@ The smoke suite expects:
 - `SHEETFLARE_PRIVATE_TABLE`
 - `SHEETFLARE_PRIVATE_READ_KEY`
 - `SHEETFLARE_MUTATION_KEY`
-- `SHEETFLARE_PUBLIC_PROJECT`
-- `SHEETFLARE_PUBLIC_TABLE`
 - `SHEETFLARE_SMOKE_CREATE_VALUES_JSON`
 - `SHEETFLARE_SMOKE_UPDATE_VALUES_JSON`
 
 Optional:
 
 - `SHEETFLARE_SMOKE_ID_COLUMN`
+- `SHEETFLARE_PUBLIC_PROJECT`
+- `SHEETFLARE_PUBLIC_TABLE`
 
 Example:
 
@@ -168,15 +168,20 @@ $env:SHEETFLARE_PRIVATE_PROJECT = "demo-private"
 $env:SHEETFLARE_PRIVATE_TABLE = "users"
 $env:SHEETFLARE_PRIVATE_READ_KEY = "sfk_read-key.secret"
 $env:SHEETFLARE_MUTATION_KEY = "sfk_mutation-key.secret"
-$env:SHEETFLARE_PUBLIC_PROJECT = "demo-public"
-$env:SHEETFLARE_PUBLIC_TABLE = "users"
 $env:SHEETFLARE_SMOKE_CREATE_VALUES_JSON = '{"name":"Smoke Row","status":"active"}'
 $env:SHEETFLARE_SMOKE_UPDATE_VALUES_JSON = '{"name":"Smoke Row Updated"}'
 ```
 
 The smoke row will be created with a generated ID and deleted automatically.
 
-The smoke suite proves route-level behavior on top of `/ready`. It checks private-table auth rejection, public-read anonymous access, public-read anonymous write rejection, smoke-row CRUD, cache status visibility, and admin reindex.
+If you also want anonymous `public-read` coverage, add:
+
+```powershell
+$env:SHEETFLARE_PUBLIC_PROJECT = "demo-public"
+$env:SHEETFLARE_PUBLIC_TABLE = "users"
+```
+
+The smoke suite proves route-level behavior on top of `/ready`. It always checks private-table auth rejection, keyed reads, smoke-row CRUD, cache status visibility, and admin reindex. When `SHEETFLARE_PUBLIC_PROJECT` and `SHEETFLARE_PUBLIC_TABLE` are set, it also checks anonymous `public-read` access and anonymous write rejection.
 
 ## Rollback
 

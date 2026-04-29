@@ -9,8 +9,6 @@ describe('readLoadConfig', () => {
     SHEETFLARE_PRIVATE_TABLE: 'users',
     SHEETFLARE_PRIVATE_READ_KEY: 'sfk_private.secret',
     SHEETFLARE_MUTATION_KEY: 'sfk_mutation.secret',
-    SHEETFLARE_PUBLIC_PROJECT: 'public-demo',
-    SHEETFLARE_PUBLIC_TABLE: 'users',
     SHEETFLARE_SMOKE_CREATE_VALUES_JSON: '{"name":"Smoke"}',
     SHEETFLARE_SMOKE_UPDATE_VALUES_JSON: '{"status":"active"}'
   } satisfies NodeJS.ProcessEnv;
