@@ -15,6 +15,17 @@ export type SetupLocalState = {
 };
 
 type SetupLocalStateInputValue = SetupLocalState[keyof SetupLocalState] | null | undefined;
+const allowedSetupLocalStateKeys = new Set<keyof SetupLocalState>([
+  'googleClientEmail',
+  'apiUrl',
+  'adminUrl',
+  'adminBearerToken',
+  'adminUiUsername',
+  'adminUiPassword',
+  'adminApiKey',
+  'privateReadKey',
+  'mutationKey'
+]);
 
 function isMissingFileError(error: unknown) {
   return error instanceof Error && 'code' in error && error.code === 'ENOENT';
@@ -33,7 +44,8 @@ export async function readSetupLocalState(configPath: string) {
       throw new ScriptError(`Setup local state ${path} must contain a JSON object.`);
     }
 
-    return parsed as SetupLocalState;
+    const state = createSetupLocalStateFromUnknown(parsed, path);
+    return state;
   } catch (error) {
     if (isMissingFileError(error)) {
       return null;
@@ -43,6 +55,28 @@ export async function readSetupLocalState(configPath: string) {
     }
     throw new ScriptError(`Setup local state ${path} must contain valid JSON.`);
   }
+}
+
+export function createSetupLocalStateFromUnknown(input: unknown, path = 'setup local state'): SetupLocalState {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw new ScriptError(`${path} must contain a JSON object.`);
+  }
+
+  const state: SetupLocalState = {};
+  for (const [rawKey, rawValue] of Object.entries(input)) {
+    if (!allowedSetupLocalStateKeys.has(rawKey as keyof SetupLocalState)) {
+      throw new ScriptError(`${path} contains unknown key ${rawKey}.`);
+    }
+    if (typeof rawValue !== 'string') {
+      throw new ScriptError(`${path}.${rawKey} must be a string.`);
+    }
+    if (rawValue.trim().length === 0) {
+      throw new ScriptError(`${path}.${rawKey} must not be blank.`);
+    }
+    state[rawKey as keyof SetupLocalState] = rawValue;
+  }
+
+  return state;
 }
 
 export async function writeSetupLocalState(configPath: string, state: SetupLocalState) {

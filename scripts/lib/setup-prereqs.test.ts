@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { checkSetupPrereqs } from './setup-prereqs';
+import { checkSetupPrereqs, checkSetupPrereqsWithOptions, checkWranglerAuthPrereq } from './setup-prereqs';
 
 describe('checkSetupPrereqs', () => {
   it('reports ready results when install and wrangler auth are available', async () => {
@@ -66,6 +66,50 @@ describe('checkSetupPrereqs', () => {
       status: 'blocked',
       summary: 'Wrangler is not authenticated on this machine.',
       remediation: 'Run npx wrangler login before applying secrets or deploying.'
+    });
+  });
+
+  it('can skip wrangler auth when the requested setup actions do not need it', async () => {
+    const commandRunner = vi.fn(async () => ({
+      code: 0,
+      stdout: 'you@example.com',
+      stderr: ''
+    }));
+
+    const results = await checkSetupPrereqsWithOptions(
+      { includeWranglerAuth: false },
+      {
+        commandRunner,
+        pathExists: vi.fn(async () => true),
+        moduleResolver: vi.fn(() => undefined)
+      }
+    );
+
+    expect(results).toEqual([
+      {
+        name: 'Repo install',
+        status: 'ready',
+        summary: 'Workspace dependencies are available.',
+        remediation: null
+      }
+    ]);
+    expect(commandRunner).not.toHaveBeenCalled();
+  });
+
+  it('checks wrangler auth on demand', async () => {
+    const result = await checkWranglerAuthPrereq({
+      commandRunner: vi.fn(async () => ({
+        code: 0,
+        stdout: 'you@example.com',
+        stderr: ''
+      }))
+    });
+
+    expect(result).toEqual({
+      name: 'Wrangler auth',
+      status: 'ready',
+      summary: 'Wrangler authentication is available for deploy steps.',
+      remediation: null
     });
   });
 });

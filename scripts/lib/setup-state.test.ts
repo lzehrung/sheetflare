@@ -1,9 +1,10 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createSetupLocalState,
+  createSetupLocalStateFromUnknown,
   getSetupLocalStatePath,
   readSetupLocalState,
   redactSetupLocalState,
@@ -62,5 +63,26 @@ describe('setup local state', () => {
       apiUrl: 'https://example.workers.dev',
       adminUiUsername: 'operator@example.com'
     });
+  });
+
+  it('rejects invalid persisted local state on read', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-state-'));
+    tempDirs.push(dir);
+    const configPath = join(dir, 'sheetflare.setup.json');
+    await writeFile(getSetupLocalStatePath(configPath), `${JSON.stringify({ apiUrl: 42 }, null, 2)}\n`, 'utf8');
+
+    await expect(readSetupLocalState(configPath)).rejects.toThrow('apiUrl must be a string.');
+  });
+
+  it('rejects non-string local state values from disk', () => {
+    expect(() => createSetupLocalStateFromUnknown({
+      apiUrl: 42
+    }, 'state.json')).toThrow('state.json.apiUrl must be a string.');
+  });
+
+  it('rejects unknown local state keys from disk', () => {
+    expect(() => createSetupLocalStateFromUnknown({
+      unexpected: 'value'
+    }, 'state.json')).toThrow('state.json contains unknown key unexpected.');
   });
 });
