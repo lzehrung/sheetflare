@@ -1024,6 +1024,216 @@ describe('TableDO', () => {
     expect(sheet.requestedRanges).not.toContain("'Users'!C2:C2");
   });
 
+  it('rejects updates that target read-only columns after key normalization', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name', 'derived'],
+        ['row-1', 'Ada', 'computed']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          readOnlyFields: ['derived'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.row.update',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          rowId: 'row-1',
+          input: {
+            values: {
+              ' derived ': 'changed'
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Write payload contains read-only columns.'
+    });
+
+    expect(sheet.rows[1]).toEqual(['row-1', 'Ada', 'computed']);
+  });
+
+  it('rejects updates that target the managed id column', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.row.update',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          rowId: 'row-1',
+          input: {
+            values: {
+              _id: 'row-999',
+              name: 'Ada Lovelace'
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Write payload cannot update managed row id column _id.'
+    });
+
+    expect(sheet.rows[1]).toEqual(['row-1', 'Ada']);
+  });
+
+  it('does not rescan cached rows just to refresh schema metadata on updates', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    const listCachedRowsSpy = vi.spyOn(
+      TableDO.prototype as TableDO & { listCachedRows: () => unknown },
+      'listCachedRows'
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    listCachedRowsSpy.mockClear();
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.update',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-1',
+        input: {
+          values: {
+            name: 'Ada Lovelace'
+          }
+        }
+      }
+    );
+
+    expect(listCachedRowsSpy).not.toHaveBeenCalled();
+  });
+
   it('rejects create-row requests when the managed id already exists', async () => {
     const sheet: SheetState = {
       rows: [
@@ -2314,11 +2524,96 @@ describe('TableDO', () => {
             { name: '_id', inferredType: 'string', nullable: false },
             { name: 'name', inferredType: 'string', nullable: false },
             { name: 'notes', inferredType: 'unknown', nullable: true },
-            { name: 'status', inferredType: 'json', nullable: true }
+            { name: 'status', inferredType: 'string', nullable: true }
           ]
         }
       }
     });
+  });
+
+  it('recomputes schema lazily from cached rows after a write invalidates schema metadata', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', '']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['status'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.schema.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.create',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        input: {
+          values: {
+            status: 'active'
+          }
+        }
+      }
+    );
+
+    sheet.requestedRanges = [];
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.schema.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect(response).toMatchObject({
+      type: 'table.schema.get.result',
+      result: {
+        data: {
+          fields: [
+            { name: '_id', inferredType: 'string', nullable: false },
+            { name: 'status', inferredType: 'string', nullable: true }
+          ]
+        }
+      }
+    });
+    expect(sheet.requestedRanges).toEqual([]);
   });
 
   it('builds schema metadata from the full cached dataset instead of a 100-row sample', async () => {
