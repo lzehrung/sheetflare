@@ -35,7 +35,8 @@ function parseJsonResponse(text: string) {
   }
 
   try {
-    return JSON.parse(text) as ApiErrorResponse | unknown;
+    const parsed: unknown = JSON.parse(text);
+    return parsed;
   } catch {
     return null;
   }

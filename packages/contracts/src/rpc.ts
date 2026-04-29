@@ -57,8 +57,8 @@ export type ProjectDoRequest =
 export type ProjectDoResponse =
   | { type: 'project.get.result'; result: AdminGetProjectResult }
   | { type: 'project.access.get.result'; result: { data: ProjectAccessResult } }
-  | { type: 'project.create.result'; result: AdminGetProjectResult }
-  | { type: 'project.table.create.result'; result: UpsertTableResult }
+  | { type: 'project.create.result'; result: { data: AdminGetProjectResult; created: boolean } }
+  | { type: 'project.table.create.result'; result: { data: UpsertTableResult['data']; created: boolean } }
   | { type: 'project.table.list.result'; result: { data: UpsertTableResult['data'][] } }
   | { type: 'project.table.get.result'; result: UpsertTableResult }
   | { type: 'project.table.resolve.result'; result: { data: ResolvedProjectTableResult } }

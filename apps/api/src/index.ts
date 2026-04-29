@@ -78,6 +78,11 @@ type AppVariables = {
     remaining: number;
     resetAtMs: number;
   };
+  rateLimitContext?: {
+    principal: string;
+    routeFamily: string;
+    operationKey: string;
+  };
 };
 
 type AppContext = Context<{ Bindings: Env; Variables: AppVariables }>;
@@ -481,11 +486,17 @@ async function enforceRateLimit(c: AppContext) {
     remaining: result.remaining,
     resetAtMs: result.resetAtMs
   });
+  c.set('rateLimitContext', {
+    principal,
+    routeFamily,
+    operationKey
+  });
 
   if (!result.allowed) {
     throw new TooManyRequestsError('Rate limit exceeded.', {
       principal,
       routeFamily,
+      operationKey,
       maxRequests: config.maxRequests,
       windowSeconds: config.windowSeconds,
       resetAt: new Date(result.resetAtMs).toISOString()
@@ -755,6 +766,10 @@ const adminCreateProjectRoute = createRoute({
     }
   },
   responses: {
+    200: {
+      description: 'Replaced existing project through explicit upsert',
+      content: jsonContent(adminGetProjectResultSchema)
+    },
     201: {
       description: 'Created project',
       content: jsonContent(adminGetProjectResultSchema)
@@ -838,6 +853,10 @@ const adminCreateTableRoute = createRoute({
     }
   },
   responses: {
+    200: {
+      description: 'Replaced existing table through explicit upsert',
+      content: jsonContent(z.object({ data: tableConfigSchema }))
+    },
     201: {
       description: 'Created table',
       content: jsonContent(z.object({ data: tableConfigSchema }))
@@ -1098,6 +1117,7 @@ function createApp() {
 
     c.res.headers.set('x-request-id', c.get('requestId'));
     const rateLimit = c.get('rateLimit');
+    const rateLimitContext = c.get('rateLimitContext');
     if (rateLimit) {
       c.res.headers.set('x-ratelimit-limit', String(rateLimit.limit));
       c.res.headers.set('x-ratelimit-remaining', String(rateLimit.remaining));
@@ -1112,7 +1132,13 @@ function createApp() {
         status: c.res.status,
         durationMs: Date.now() - startedAt,
         requestId: c.get('requestId'),
-        principal: c.get('authPrincipal') ?? 'anonymous'
+        principal: c.get('authPrincipal') ?? 'anonymous',
+        rateLimitPrincipal: rateLimitContext?.principal ?? null,
+        rateLimitRouteFamily: rateLimitContext?.routeFamily ?? null,
+        rateLimitOperationKey: rateLimitContext?.operationKey ?? null,
+        rateLimitLimit: rateLimit?.limit ?? null,
+        rateLimitRemaining: rateLimit?.remaining ?? null,
+        rateLimitResetAt: rateLimit ? new Date(rateLimit.resetAtMs).toISOString() : null
       })
     );
   });
@@ -1123,6 +1149,8 @@ function createApp() {
   });
 
   app.onError((error, c) => {
+    const rateLimitContext = c.get('rateLimitContext');
+    const rateLimit = c.get('rateLimit');
     console.error(
       JSON.stringify({
         event: 'request.error',
@@ -1130,6 +1158,12 @@ function createApp() {
         path: c.req.path,
         requestId: c.get('requestId'),
         principal: c.get('authPrincipal') ?? 'anonymous',
+        rateLimitPrincipal: rateLimitContext?.principal ?? null,
+        rateLimitRouteFamily: rateLimitContext?.routeFamily ?? null,
+        rateLimitOperationKey: rateLimitContext?.operationKey ?? null,
+        rateLimitLimit: rateLimit?.limit ?? null,
+        rateLimitRemaining: rateLimit?.remaining ?? null,
+        rateLimitResetAt: rateLimit ? new Date(rateLimit.resetAtMs).toISOString() : null,
         errorName: error instanceof Error ? error.name : 'UnknownError',
         errorMessage: error instanceof Error ? error.message : String(error),
         errorDetails: error instanceof AppError ? error.details ?? null : null,
@@ -1145,7 +1179,6 @@ function createApp() {
         'x-request-id': c.get('requestId')
       }
     });
-    const rateLimit = c.get('rateLimit');
     if (rateLimit) {
       response.headers.set('x-ratelimit-limit', String(rateLimit.limit));
       response.headers.set('x-ratelimit-remaining', String(rateLimit.remaining));
@@ -1260,7 +1293,11 @@ function createApp() {
       ...(upsert ? { allowExisting: true } : {})
     });
 
-    return c.json((response as { type: 'project.create.result'; result: AdminGetProjectResult }).result, 201);
+    const result = (response as {
+      type: 'project.create.result';
+      result: { data: AdminGetProjectResult; created: boolean };
+    }).result;
+    return c.json(result.data, result.created ? 201 : 200);
   });
 
   app.openapi(adminListSpreadsheetTabsRoute, async (c) => {
@@ -1325,9 +1362,13 @@ function createApp() {
       ...(upsert ? { allowExisting: true } : {})
     });
 
+    const result = (response as {
+      type: 'project.table.create.result';
+      result: { data: UpsertTableResult['data']; created: boolean };
+    }).result;
     return c.json(
-      (response as { type: 'project.table.create.result'; result: UpsertTableResult }).result,
-      201
+      { data: result.data },
+      result.created ? 201 : 200
     );
   });
 
