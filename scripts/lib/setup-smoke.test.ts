@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createSmokeEnv } from './setup-smoke';
 import type { SetupConfig } from './setup-config';
+import { ScriptError } from './runtime';
 
 const privateConfig: SetupConfig = {
   profile: 'local',
@@ -80,5 +81,35 @@ describe('createSmokeEnv', () => {
       SHEETFLARE_PUBLIC_PROJECT: 'demo-public',
       SHEETFLARE_PUBLIC_TABLE: 'users'
     });
+  });
+
+  it('throws a ScriptError when the configured private smoke table is missing', () => {
+    expect(() => createSmokeEnv({
+      config: {
+        ...privateConfig,
+        smoke: {
+          ...privateConfig.smoke,
+          privateTableSlug: 'missing-table'
+        }
+      },
+      baseUrl: 'https://example.workers.dev',
+      adminCredential: 'sfk_admin.secret',
+      privateReadKey: 'sfk_read.secret',
+      mutationKey: 'sfk_mutation.secret'
+    })).toThrow(ScriptError);
+
+    expect(() => createSmokeEnv({
+      config: {
+        ...privateConfig,
+        smoke: {
+          ...privateConfig.smoke,
+          privateTableSlug: 'missing-table'
+        }
+      },
+      baseUrl: 'https://example.workers.dev',
+      adminCredential: 'sfk_admin.secret',
+      privateReadKey: 'sfk_read.secret',
+      mutationKey: 'sfk_mutation.secret'
+    })).toThrow('Private table missing-table was not found in setup config.');
   });
 });

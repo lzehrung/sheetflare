@@ -137,6 +137,7 @@ async function main() {
     ? createConsolePrompter()
     : null;
   let localState = await readSetupLocalState(resolvedConfigPath);
+  let localStateWritten = false;
   let configInput: unknown;
   let promptActions: SetupPromptActions | null = null;
 
@@ -228,6 +229,7 @@ async function main() {
           adminUiPassword: setupSecrets.adminUiPassword
         })
       });
+      localStateWritten = true;
 
       if (config.deploy.admin && adminUiUsername && adminUiPassword && !actions.deployNow) {
         const adminSiteSecrets = requireAdminSiteSecrets({
@@ -296,6 +298,7 @@ async function main() {
           adminUiPassword
         })
       });
+      localStateWritten = true;
     }
 
     if (!apiUrl && (actions.bootstrapNow || actions.smokeNow)) {
@@ -341,6 +344,7 @@ async function main() {
           mutationKey
         })
       });
+      localStateWritten = true;
     }
 
     if (actions.smokeNow) {
@@ -399,7 +403,7 @@ async function main() {
       adminUrl,
       ...summarizeSetupSecrets({
         showSecrets: options.showSecrets,
-        localStatePath,
+        localStatePath: localStateWritten ? localStatePath : null,
         adminBearerToken,
         adminUiUsername,
         adminUiPassword,
