@@ -229,15 +229,58 @@ Outcome:
 
 - the team agrees on the setup command contract before building prompt code
 
+Resolved decisions:
+
+- `sheetflare.setup.json` is the checked non-secret config file for V1 and lives at repo root by default.
+- V1 does not write a second local secret file by default.
+- `npm run setup` is interactive and confirm-before-side-effects by default.
+- API deploy is the primary path; admin deploy is an explicit prompt-controlled option.
+- Smoke does not run automatically without confirmation, even after successful bootstrap.
+- V1 is private-first and single-project-first.
+- Optional `public-read` coverage is supported, but only as an additive branch.
+- V1 prompt scope is limited to the minimum needed to produce one usable private project and one initial table.
+- Setup must reuse the existing deploy, bootstrap, and smoke seams rather than reimplementing them.
+
 Checklist:
 
-- [ ] Choose final config filename and repo placement
-- [ ] Choose whether V1 writes only `sheetflare.setup.json` or also an optional local secret template
-- [ ] Choose whether `npm run setup` should deploy by default or only after explicit confirmation
-- [ ] Choose how admin UI deploy is represented when the operator wants API-only setup
-- [ ] Choose whether smoke should run automatically after successful bootstrap or only by confirmation
-- [ ] Choose the minimal required prompt set for V1
-- [ ] Define which existing scripts are official dependencies of setup and which seams should be extracted first
+- [x] Choose final config filename and repo placement
+- [x] Choose whether V1 writes only `sheetflare.setup.json` or also an optional local secret template
+- [x] Choose whether `npm run setup` should deploy by default or only after explicit confirmation
+- [x] Choose how admin UI deploy is represented when the operator wants API-only setup
+- [x] Choose whether smoke should run automatically after successful bootstrap or only by confirmation
+- [x] Choose the minimal required prompt set for V1
+- [x] Define which existing scripts are official dependencies of setup and which seams should be extracted first
+
+V1 minimum prompt set:
+
+- deployment profile name
+- spreadsheet URL or spreadsheet ID
+- project slug
+- project display name
+- first table slug
+- first sheet tab name
+- ID column
+- indexed fields
+- whether admin deploy should be configured now
+- whether optional `public-read` coverage should be added
+- whether to apply secrets now
+- whether to deploy now
+- whether to bootstrap now
+- whether to run smoke now
+
+Official script dependencies for V1:
+
+- `npm run deploy:api`
+- `npm run deploy:admin`
+- `npm run ops:create-admin-key`
+- `npm run ops:bootstrap`
+- `npm run smoke`
+
+Seams that should be extracted first if reuse is awkward:
+
+- bootstrap input transformation
+- smoke input transformation
+- deploy result parsing and summary rendering
 
 Acceptance criteria:
 
