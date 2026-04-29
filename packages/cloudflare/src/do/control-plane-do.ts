@@ -391,14 +391,16 @@ export class ControlPlaneDO {
   ): Promise<AdminRegisterSpreadsheetWatchesResult> {
     const now = new Date().toISOString();
     const registrations = this.getSpreadsheetRegistrations();
+    const activeSpreadsheetIds = new Set(registrations.map((registration) => registration.spreadsheetId));
+    const existingWatches = new Map(
+      this.listSpreadsheetWatches().map((watch) => [watch.spreadsheet_id, watch] as const)
+    );
     const results = [];
 
-    for (const registration of registrations) {
-      const existing = this.getSpreadsheetWatch(registration.spreadsheetId);
-      if (existing) {
-        await this.stopExistingSpreadsheetWatch(existing);
-      }
+    await this.removeObsoleteSpreadsheetWatches(activeSpreadsheetIds);
 
+    for (const registration of registrations) {
+      const existing = existingWatches.get(registration.spreadsheetId) ?? null;
       const watch = await this.getSheetsClient(registration.googleCredentialRef).watchSpreadsheetFile(
         registration.spreadsheetId,
         {
@@ -438,6 +440,10 @@ export class ControlPlaneDO {
         existing?.last_reindex_error ?? null,
         now
       );
+
+      if (existing) {
+        await this.stopExistingSpreadsheetWatch(existing);
+      }
 
       results.push(this.mapSpreadsheetWatch(this.requireSpreadsheetWatch(registration.spreadsheetId), registration.projectSlugs));
     }
@@ -565,6 +571,16 @@ export class ControlPlaneDO {
     );
   }
 
+  private listSpreadsheetWatches() {
+    return this.selectRows<SpreadsheetWatchRow>(
+      `
+      SELECT *
+      FROM spreadsheet_watches
+      ORDER BY spreadsheet_id ASC
+      `
+    );
+  }
+
   private requireSpreadsheetWatch(spreadsheetId: string) {
     const watch = this.getSpreadsheetWatch(spreadsheetId);
     if (!watch) {
@@ -583,6 +599,23 @@ export class ControlPlaneDO {
       }
 
       throw error;
+    }
+  }
+
+  private async removeObsoleteSpreadsheetWatches(activeSpreadsheetIds: ReadonlySet<string>) {
+    for (const watch of this.listSpreadsheetWatches()) {
+      if (activeSpreadsheetIds.has(watch.spreadsheet_id)) {
+        continue;
+      }
+
+      await this.stopExistingSpreadsheetWatch(watch);
+      this.ctx.storage.sql.exec(
+        `
+        DELETE FROM spreadsheet_watches
+        WHERE spreadsheet_id = ?
+        `,
+        watch.spreadsheet_id
+      );
     }
   }
 
