@@ -3,6 +3,7 @@ import {
   adminCredentialHeaderName,
   adminCredentialStorageKey,
   buildAdminHeaders,
+  canPersistAdminCredential,
   normalizeAdminCredential,
   readStoredAdminCredential,
   writeStoredAdminCredential,
@@ -40,20 +41,38 @@ describe('normalizeAdminCredential', () => {
 });
 
 describe('stored admin credential helpers', () => {
-  it('persists and reloads normalized credentials', () => {
+  it('persists and reloads scoped admin API keys', () => {
+    const storage = new MemoryStorage();
+    writeStoredAdminCredential(storage, 'sfk_demo.secret');
+
+    expect(storage.getItem(adminCredentialStorageKey)).toBe('sfk_demo.secret');
+    expect(readStoredAdminCredential(storage)).toBe('sfk_demo.secret');
+  });
+
+  it('refuses to persist non-api-key credentials such as bootstrap tokens', () => {
     const storage = new MemoryStorage();
     writeStoredAdminCredential(storage, 'secret-token');
 
-    expect(storage.getItem(adminCredentialStorageKey)).toBe('secret-token');
-    expect(readStoredAdminCredential(storage)).toBe('secret-token');
+    expect(storage.getItem(adminCredentialStorageKey)).toBeNull();
+    expect(readStoredAdminCredential(storage)).toBeNull();
   });
 
   it('removes stored credentials when cleared', () => {
     const storage = new MemoryStorage();
-    writeStoredAdminCredential(storage, 'secret-token');
+    writeStoredAdminCredential(storage, 'sfk_demo.secret');
     writeStoredAdminCredential(storage, null);
 
     expect(readStoredAdminCredential(storage)).toBeNull();
+  });
+});
+
+describe('canPersistAdminCredential', () => {
+  it('allows scoped api keys', () => {
+    expect(canPersistAdminCredential('sfk_demo.secret')).toBe(true);
+  });
+
+  it('rejects bootstrap-style bearer tokens', () => {
+    expect(canPersistAdminCredential('secret-token')).toBe(false);
   });
 });
 

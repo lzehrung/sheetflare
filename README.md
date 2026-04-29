@@ -172,8 +172,8 @@ Performance notes:
   - force reindex
 - Table creation now supports `readOnlyFields` for columns that should stay sheet-managed.
 - Table creation also supports optional `fieldRules` for required, unique, enum, normalize, and type validation.
-- Credential persistence is opt-in. You can use the UI in session-only mode or explicitly remember the credential in the browser.
-- Paste either the bootstrap admin token or a scoped admin API key into the auth panel.
+- Credential persistence is opt-in for scoped admin API keys only. Bootstrap admin tokens stay session-only.
+- Paste either the bootstrap admin token or a scoped admin API key into the auth panel, but prefer scoped keys for routine admin use.
 
 ## Notes
 

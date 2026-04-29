@@ -27,7 +27,7 @@ export function CredentialPanel({
         <div>
           <h2>Operator Access</h2>
           <p className="muted compact">
-            Use a bootstrap admin token or a scoped admin API key. The credential is only stored locally if you opt in below.
+            Use a scoped admin API key for routine work. Bootstrap admin tokens are session-only and are not stored in the browser.
           </p>
         </div>
         <span className="badge">{credentialConfigured ? 'Configured' : 'Required'}</span>
@@ -51,7 +51,7 @@ export function CredentialPanel({
           checked={rememberCredential}
           onChange={(event) => onRememberCredentialChange(event.target.checked)}
         />
-        <span>Remember this credential in this browser</span>
+        <span>Remember this API key in this browser</span>
       </label>
 
       <div className="actions">

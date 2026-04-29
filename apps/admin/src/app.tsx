@@ -34,6 +34,7 @@ import {
   reindexTable
 } from './api';
 import {
+  canPersistAdminCredential,
   normalizeAdminCredential,
   readStoredAdminCredential,
   writeStoredAdminCredential
@@ -638,18 +639,29 @@ export function App() {
 
   function saveCredential() {
     const normalized = normalizeAdminCredential(draftCredential);
+    const persistCredential = rememberCredential && canPersistAdminCredential(normalized);
     if (typeof window !== 'undefined') {
-      writeStoredAdminCredential(window.localStorage, rememberCredential ? normalized : null);
+      writeStoredAdminCredential(window.localStorage, persistCredential ? normalized : null);
     }
 
     setCredential(normalized);
     setCacheStateByTable({});
     setCreatedKey(null);
     setDraftCredential(normalized ?? '');
-    setNotice({
-      tone: 'idle',
-      message: null
-    });
+    setNotice(
+      persistCredential || !normalized || !rememberCredential
+        ? {
+            tone: 'idle',
+            message: null
+          }
+        : {
+            tone: 'success',
+            message: 'Only scoped admin API keys are stored in this browser. Bootstrap tokens stay session-only.'
+          }
+    );
+    if (rememberCredential && !persistCredential) {
+      setRememberCredential(false);
+    }
   }
 
   function setCacheStatusLoading(projectSlug: string, tableSlug: string, loading: boolean) {

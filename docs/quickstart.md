@@ -1,6 +1,6 @@
 # Quickstart
 
-This is the fastest safe path to get Sheetflare running in staging and prove it works.
+This is the fastest safe path to get Sheetflare running and prove the core loop works.
 
 Use this document if you are:
 
@@ -9,14 +9,9 @@ Use this document if you are:
 
 If you need deeper operational detail, use [deploy.md](./deploy.md), [operator-runbook.md](./operator-runbook.md), and [google-service-accounts.md](./google-service-accounts.md).
 
-## 1. Prepare a staging sheet
+## 1. Prepare a sheet
 
-Create two Google Sheets projects:
-
-- one private project
-- one public-read project
-
-In each sheet, create a tab such as `Users` with a header row like:
+Create one Google Sheet with one tab such as `Users` and a header row like:
 
 ```text
 _id | name | status
@@ -31,7 +26,7 @@ Rules:
 
 ## 2. Prepare Google access
 
-Create a dedicated Google service account for staging.
+Create a dedicated Google service account for this environment.
 
 Recommended shape:
 
@@ -39,7 +34,7 @@ Recommended shape:
 - Google Sheets API enabled in that GCP project
 - spreadsheet-level `Editor` sharing only on the exact spreadsheets Sheetflare will manage
 
-Share both staging spreadsheets with the service-account email as an editor.
+Share the sheet with the service-account email as an editor.
 
 Use [google-service-accounts.md](./google-service-accounts.md) for the exact setup, secret-handling model, `GOOGLE_CREDENTIALS_JSON` format, and key-rotation guidance.
 
@@ -62,7 +57,7 @@ If needed:
 npx wrangler login
 ```
 
-Set these for staging:
+Set these on the Worker:
 
 - `GOOGLE_CLIENT_EMAIL`
 - `GOOGLE_PRIVATE_KEY`
@@ -100,7 +95,7 @@ npm run typecheck
 npm run build
 ```
 
-## 5. Deploy staging
+## 5. Deploy
 
 ```powershell
 npx wrangler deploy --config apps/api/wrangler.jsonc
@@ -109,7 +104,7 @@ npx wrangler deploy --config apps/api/wrangler.jsonc
 Save the deployed base URL, for example:
 
 ```powershell
-$env:SHEETFLARE_BASE_URL = "https://your-staging-worker.workers.dev"
+$env:SHEETFLARE_BASE_URL = "https://your-worker.example.workers.dev"
 ```
 
 ## 6. Bootstrap admin access
@@ -135,14 +130,13 @@ Optional faster path:
 
 That script can create projects, tables, and initial API keys in one pass.
 
-## 7. Create staging projects and tables
+## 7. Create a first private project and table
 
 Use the admin UI, the admin API, or `npm run ops:bootstrap` to create:
 
 - one private project
-- one public-read project
 
-For each project, add a table config such as:
+Add a table config such as:
 
 - `tableSlug`: `users`
 - `sheetTabName`: `Users`
@@ -150,12 +144,9 @@ For each project, add a table config such as:
 - `indexedFields`: `["name","status"]`
 - `readOnlyFields`: optional, for formula-derived or operator-managed columns
 - `fieldRules`: optional, for required, unique, enum, normalize, and type validation
-- `cacheTtlSeconds`: `15` or `60` for staging
+- `cacheTtlSeconds`: `15` or `60`
 
-Set `defaultAuthMode`:
-
-- private project: `"private"`
-- public project: `"public-read"`
+Set `defaultAuthMode` to `"private"` unless you intentionally want anonymous reads.
 
 Set `googleCredentialRef`:
 
@@ -191,9 +182,9 @@ $env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
 {
   "projects": [
     {
-      "slug": "demo-private",
-      "name": "Demo Private",
-      "spreadsheetId": "<PRIVATE_SPREADSHEET_ID>",
+      "slug": "demo",
+      "name": "Demo",
+      "spreadsheetId": "<SPREADSHEET_ID>",
       "googleCredentialRef": "default",
       "defaultAuthMode": "private",
       "tables": [
@@ -219,44 +210,17 @@ $env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
           "cacheTtlSeconds": 15
         }
       ]
-    },
-    {
-      "slug": "demo-public",
-      "name": "Demo Public",
-      "spreadsheetId": "<PUBLIC_SPREADSHEET_ID>",
-      "googleCredentialRef": "default",
-      "defaultAuthMode": "public-read",
-      "tables": [
-        {
-          "tableSlug": "users",
-          "sheetTabName": "Users",
-          "idColumn": "_id",
-          "indexedFields": ["name", "status"],
-          "readOnlyFields": ["status_label"],
-          "fieldRules": {
-            "email": {
-              "required": true,
-              "unique": true,
-              "normalize": ["trim", "lowercase"]
-            },
-            "status": {
-              "enum": ["pending", "active"]
-            }
-          },
-          "cacheTtlSeconds": 15
-        }
-      ]
     }
   ],
   "apiKeys": [
     {
-      "name": "private-read",
-      "projectSlug": "demo-private",
+      "name": "read",
+      "projectSlug": "demo",
       "scopes": ["table:read"]
     },
     {
       "name": "mutation",
-      "projectSlug": "demo-private",
+      "projectSlug": "demo",
       "scopes": ["table:create", "table:update", "table:delete"]
     },
     {
@@ -278,14 +242,22 @@ You need:
 - a private read key with `table:read`
 - a mutation key with `table:create`, `table:update`, and `table:delete`
 
-They may be the same key if that is simpler for staging.
+They may be the same key if that is simpler for an initial deployment.
 
-## 9. Run the staging smoke suite
+If you also want to exercise anonymous `public-read` behavior, create a second project with:
+
+- `defaultAuthMode: "public-read"`
+- its own spreadsheet or tab mapping
+- a table such as `users`
+
+The bundled smoke suite currently checks both a private and a public-read project.
+
+## 9. Run the smoke suite
 
 Set the smoke-test environment:
 
 ```powershell
-$env:SHEETFLARE_PRIVATE_PROJECT = "demo-private"
+$env:SHEETFLARE_PRIVATE_PROJECT = "demo"
 $env:SHEETFLARE_PRIVATE_TABLE = "users"
 $env:SHEETFLARE_PRIVATE_READ_KEY = "sfk_private-read.secret"
 $env:SHEETFLARE_MUTATION_KEY = "sfk_mutation.secret"
@@ -298,14 +270,14 @@ $env:SHEETFLARE_SMOKE_UPDATE_VALUES_JSON = '{"name":"Smoke Row Updated"}'
 Run:
 
 ```powershell
-npm run smoke:staging
+npm run smoke
 ```
 
 Optional artifact:
 
 ```powershell
-$env:SHEETFLARE_SMOKE_REPORT_PATH = "reports/staging/smoke-$(Get-Date -Format yyyyMMdd-HHmmss).md"
-npm run smoke:staging
+$env:SHEETFLARE_SMOKE_REPORT_PATH = "reports/smoke-$(Get-Date -Format yyyyMMdd-HHmmss).md"
+npm run smoke
 ```
 
 The smoke suite checks:
@@ -323,7 +295,7 @@ The smoke suite checks:
 ## 10. Inspect cache health
 
 ```powershell
-$env:SHEETFLARE_PROJECT = "demo-private"
+$env:SHEETFLARE_PROJECT = "demo"
 $env:SHEETFLARE_TABLE = "users"
 npm run ops:cache
 ```
@@ -363,8 +335,8 @@ npm run ops:reindex
 Run the load and churn harness:
 
 ```powershell
-$env:SHEETFLARE_LOAD_REPORT_PATH = "reports/staging/load-$(Get-Date -Format yyyyMMdd-HHmmss).md"
-npm run load:staging
+$env:SHEETFLARE_LOAD_REPORT_PATH = "reports/load-$(Get-Date -Format yyyyMMdd-HHmmss).md"
+npm run load
 ```
 
 ## 12. If setup fails
