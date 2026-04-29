@@ -74,6 +74,14 @@ export function createBootstrapEnv(config: SetupConfig, baseUrl: string, adminCr
   } satisfies NodeJS.ProcessEnv;
 }
 
+export function createBootstrapCommandOptions(env: NodeJS.ProcessEnv) {
+  return {
+    env,
+    echoStdout: false,
+    echoStderr: false
+  } as const;
+}
+
 export function parseBootstrapOutput(stdout: string): SetupBootstrapOutput {
   const marker = '__SHEETFLARE_BOOTSTRAP_RESULT__=';
   const markerIndex = stdout.lastIndexOf(marker);
