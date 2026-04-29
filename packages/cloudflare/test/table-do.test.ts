@@ -879,6 +879,90 @@ describe('TableDO', () => {
     ]);
   });
 
+  it('rolls back a moved create skeleton by re-resolving the managed row id before delete', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let injectedConcurrentRow = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/values:batchUpdate')) {
+        if (!injectedConcurrentRow) {
+          sheet.rows.splice(1, 0, ['row-manual', 'Manual']);
+          injectedConcurrentRow = true;
+        }
+
+        return new Response(JSON.stringify({
+          error: {
+            message: 'Backend error'
+          }
+        }), {
+          status: 503,
+          headers: {
+            'content-type': 'application/json'
+          }
+        });
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        allowExisting: true,
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['name']
+        }
+      }
+    );
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.row.create',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          input: {
+            values: {
+              name: 'Ada'
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'ServiceUnavailableError',
+      message: 'Google Sheets API is temporarily unavailable.'
+    });
+
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-manual', 'Manual']
+    ]);
+  });
+
   it('rejects create writes that target read-only columns', async () => {
     const sheet: SheetState = {
       rows: [
@@ -2493,6 +2577,119 @@ describe('TableDO', () => {
       field: 'email',
       code: 'UNIQUE',
       rowId: 'row-2'
+    });
+  });
+
+  it('refreshes validation status after an API mutation fixes previously drifted rows', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'email'],
+        ['row-1', 'Ada@Example.com'],
+        ['row-2', 'ada@example.com']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        allowExisting: true,
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['email'],
+          fieldRules: {
+            email: {
+              unique: true,
+              normalize: ['trim', 'lowercase']
+            }
+          }
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    const cacheStatusBeforeFix = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect((cacheStatusBeforeFix as {
+      type: 'table.cache.get.result';
+      result: { data: { validation: { status: string; issueCount: number } } };
+    }).result.data.validation).toMatchObject({
+      status: 'warning',
+      issueCount: 1
+    });
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.update',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-2',
+        input: {
+          values: {
+            email: 'ada+2@example.com'
+          }
+        }
+      }
+    );
+
+    const cacheStatusAfterFix = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect((cacheStatusAfterFix as {
+      type: 'table.cache.get.result';
+      result: {
+        data: {
+          validation: {
+            status: string;
+            issueCount: number;
+            issues: unknown[];
+          };
+        };
+      };
+    }).result.data.validation).toMatchObject({
+      status: 'ok',
+      issueCount: 0,
+      issues: []
     });
   });
 

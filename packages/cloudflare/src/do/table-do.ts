@@ -555,16 +555,7 @@ export class TableDO {
       liveRow = await sheets.readSingleRow(config, rowNumber, layout);
     } catch (error) {
       if (rowNumber !== null) {
-        try {
-          await sheets.deleteRow(config, rowNumber);
-        } catch (rollbackError) {
-          throw new ServiceUnavailableError('Create failed after Google Sheets row append and automatic rollback also failed.', {
-            rowId,
-            rowNumber,
-            createError: error instanceof Error ? error.message : String(error),
-            rollbackError: rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
-          });
-        }
+        await this.rollbackAppendedCreateRow(config, rowId, rowNumber, layout, error);
       }
 
       throw error;
@@ -894,6 +885,40 @@ export class TableDO {
     return result.row;
   }
 
+  private async rollbackAppendedCreateRow(
+    config: ResolvedTableConfig,
+    rowId: string,
+    appendedRowNumber: number,
+    layout: GoogleSheetHeaderLayout,
+    createError: unknown
+  ) {
+    try {
+      const rollbackTarget = await this.getSheetsClient(config).findRowById(
+        config,
+        rowId,
+        appendedRowNumber,
+        { layout, verifyUnique: true }
+      );
+
+      if (!rollbackTarget) {
+        throw new Error(`Appended row ${rowId} could not be found for rollback.`);
+      }
+
+      if (rollbackTarget.duplicateCount !== 1) {
+        throw new Error(`Appended row ${rowId} is no longer uniquely identifiable for rollback.`);
+      }
+
+      await this.getSheetsClient(config).deleteRow(config, rollbackTarget.row.rowNumber);
+    } catch (rollbackError) {
+      throw new ServiceUnavailableError('Create failed after Google Sheets row append and automatic rollback could not safely remove the partial row.', {
+        rowId,
+        appendedRowNumber,
+        createError: createError instanceof Error ? createError.message : String(createError),
+        rollbackError: rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+      });
+    }
+  }
+
   private shiftCachedRowNumbersAfterDelete(deletedRowNumber: number) {
     this.ctx.storage.sql.exec(
       `
@@ -1148,6 +1173,11 @@ export class TableDO {
     const syncMeta = this.getSyncMeta();
     this.setMeta('headers', JSON.stringify(headers));
     this.setMeta('config.signature', buildCacheConfigSignature(config));
+    if (Object.keys(config.fieldRules).length === 0) {
+      this.setMeta('validation.summary', JSON.stringify(emptyValidationSummary));
+    } else {
+      this.setMeta('validation.summary', JSON.stringify(this.buildValidationSummary(this.listCachedRows(), config)));
+    }
     this.setSyncMeta({
       status: 'ready',
       rowCount: this.countCachedRows(),
