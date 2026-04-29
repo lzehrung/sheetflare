@@ -44,22 +44,24 @@ export function createBootstrapConfigFromSetup(config: SetupConfig): BootstrapCo
 
   return {
     projects,
-    apiKeys: [
-      {
-        name: config.smoke.adminKeyName,
-        scopes: ['admin:projects', 'admin:keys', 'table:read', 'table:create', 'table:update', 'table:delete']
-      },
-      {
-        name: config.smoke.privateReadKeyName,
-        projectSlug: config.privateProject.slug,
-        scopes: ['table:read']
-      },
-      {
-        name: config.smoke.mutationKeyName,
-        projectSlug: config.privateProject.slug,
-        scopes: ['table:read', 'table:create', 'table:update', 'table:delete']
-      }
-    ]
+    apiKeys: config.smoke.enabled
+      ? [
+          {
+            name: config.smoke.adminKeyName,
+            scopes: ['admin:projects', 'admin:keys', 'table:read', 'table:create', 'table:update', 'table:delete']
+          },
+          {
+            name: config.smoke.privateReadKeyName,
+            projectSlug: config.privateProject.slug,
+            scopes: ['table:read']
+          },
+          {
+            name: config.smoke.mutationKeyName,
+            projectSlug: config.privateProject.slug,
+            scopes: ['table:read', 'table:create', 'table:update', 'table:delete']
+          }
+        ]
+      : []
   };
 }
 

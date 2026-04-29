@@ -136,12 +136,15 @@ Proof required:
 
 ### 4. Add a production operator runbook
 
+Status:
+- partial on 2026-04-29: `docs/operator-runbook.md` exists and is linked, but it still needs to stay aligned with the proven deploy path and final external-production evidence
+
 Goal:
 - make failures supportable without reading the source
 
 Exact work:
-- add `docs/operator-runbook.md`
-- cover:
+- keep `docs/operator-runbook.md` current with the supported onboarding and day-2 path
+- ensure it covers:
   - bootstrap setup
   - creating admin keys
   - rotating Google credentials
@@ -200,11 +203,15 @@ Proof required:
 
 ### 7. Add deployment and rollback procedure
 
+Status:
+- partial on 2026-04-29: `docs/deploy.md` exists and the repo has generic deploy scripts, but the procedure still needs real deployment evidence and rollback exercise notes
+
 Goal:
 - make release behavior predictable under bad deploys
 
 Exact work:
-- add `docs/deploy.md` with:
+- keep `docs/deploy.md` aligned with the supported setup and deploy flow
+- ensure it includes:
   - required env vars and secrets
   - deploy command
   - post-deploy smoke checks
@@ -250,15 +257,18 @@ Proof:
 
 ### 3. Add a small `scripts/` toolkit for operators
 
+Status:
+- partial on 2026-04-29: the repo already includes `ops:create-admin-key`, `ops:reindex`, `ops:cache`, `smoke`, and `load`; the remaining work is keeping them documented and validated against real deployments
+
 Why:
 - repeatable operations reduce support burden
 
 Change:
-- add scripts for:
+- keep the existing operator scripts coherent and documented:
   - mint admin key
   - reindex table
   - fetch cache status
-  - run staging smoke suite
+  - run smoke and load validation
 
 Proof:
 - scripts are documented and runnable

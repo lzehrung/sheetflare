@@ -4,6 +4,7 @@ import {
   type CreateProjectInput,
   type CreateTableInput,
   projectSlugSchema,
+  rowRecordSchema,
   tableSlugSchema
 } from '@sheetflare/contracts';
 import { ScriptError } from './runtime';
@@ -57,6 +58,10 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 function parseProjectSection(input: unknown, label: 'privateProject' | 'publicReadProject'): SetupProjectSection {
   if (!isRecord(input)) {
     throw new ScriptError(`${label} must be an object.`);
+  }
+
+  if ('defaultAuthMode' in input) {
+    throw new ScriptError(`${label}.defaultAuthMode is not supported in sheetflare.setup.json. Use privateProject for private access and publicReadProject for anonymous public-read access.`);
   }
 
   const { tables, ...projectFields } = input;
@@ -117,7 +122,15 @@ function parseRowValues(input: unknown, path: string) {
     throw new ScriptError(`${path} must be a non-empty JSON object.`);
   }
 
-  return input;
+  try {
+    return rowRecordSchema.parse(input);
+  } catch (error) {
+    if (error instanceof Error && 'issues' in error) {
+      throw new ScriptError(`${path} is invalid: ${formatZodError(error as { issues: Array<{ path: Array<string | number>; message: string }> })}`);
+    }
+
+    throw error;
+  }
 }
 
 function assertKeyNamesAreDistinct(smoke: Pick<SetupSmokeConfig, 'adminKeyName' | 'privateReadKeyName' | 'mutationKeyName'>) {

@@ -58,6 +58,43 @@ describe('parseSetupConfig', () => {
     });
   });
 
+  it('rejects project-level defaultAuthMode in setup config', () => {
+    expect(() => parseSetupConfig({
+      profile: 'local',
+      deploy: {
+        api: true,
+        admin: false
+      },
+      privateProject: {
+        slug: 'demo',
+        name: 'Demo',
+        spreadsheetId: 'sheet-1',
+        defaultAuthMode: 'private',
+        tables: [
+          {
+            tableSlug: 'users',
+            sheetTabName: 'Users'
+          }
+        ]
+      },
+      publicReadProject: null,
+      smoke: {
+        enabled: true,
+        privateTableSlug: 'users',
+        publicTableSlug: null,
+        adminKeyName: 'demo-admin',
+        privateReadKeyName: 'demo-read',
+        mutationKeyName: 'demo-mutation',
+        createValues: {
+          name: 'Smoke'
+        },
+        updateValues: {
+          status: 'active'
+        }
+      }
+    })).toThrow('privateProject.defaultAuthMode is not supported in sheetflare.setup.json.');
+  });
+
   it('parses a setup config with optional public-read coverage', () => {
     expect(parseSetupConfig({
       profile: 'local',
@@ -301,6 +338,44 @@ describe('parseSetupConfig', () => {
         }
       }
     })).toThrow('smoke.updateValues must not write read-only field derived.');
+  });
+
+  it('rejects smoke values outside the real row contract', () => {
+    expect(() => parseSetupConfig({
+      profile: 'local',
+      deploy: {
+        api: true,
+        admin: true
+      },
+      privateProject: {
+        slug: 'demo',
+        name: 'Demo',
+        spreadsheetId: 'sheet-1',
+        tables: [
+          {
+            tableSlug: 'users',
+            sheetTabName: 'Users'
+          }
+        ]
+      },
+      publicReadProject: null,
+      smoke: {
+        enabled: true,
+        privateTableSlug: 'users',
+        publicTableSlug: null,
+        adminKeyName: 'demo-admin',
+        privateReadKeyName: 'demo-read',
+        mutationKeyName: 'demo-mutation',
+        createValues: {
+          metadata: {
+            nested: true
+          }
+        },
+        updateValues: {
+          status: 'active'
+        }
+      }
+    })).toThrow('smoke.createValues is invalid: metadata');
   });
 });
 

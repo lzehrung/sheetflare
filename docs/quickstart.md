@@ -54,7 +54,7 @@ npm run setup
 
 The setup flow will:
 
-- check Wrangler auth and repo prerequisites
+- check repo prerequisites and, when needed, Wrangler auth for secret or deploy steps
 - prompt for the spreadsheet URL or ID
 - prompt for the first private project and table mapping
 - write `sheetflare.setup.json`
@@ -117,7 +117,8 @@ Add a table config such as:
 - `fieldRules`: optional, for required, unique, enum, normalize, and type validation
 - `cacheTtlSeconds`: `15` or `60`
 
-Set `defaultAuthMode` to `"private"` unless you intentionally want anonymous reads.
+In `sheetflare.setup.json`, `privateProject` is always bootstrapped as a private project.
+If you also want anonymous reads, add `publicReadProject` instead of trying to set `defaultAuthMode` inside the setup config.
 
 Set `googleCredentialRef`:
 
