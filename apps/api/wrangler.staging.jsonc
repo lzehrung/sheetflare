@@ -1,5 +1,5 @@
 {
-  "name": "sheetflare-api",
+  "name": "sheetflare-staging-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-04-26",
   "workers_dev": true,
@@ -18,7 +18,7 @@
     }
   ],
   "vars": {
-    "GOOGLE_CLIENT_EMAIL": "service-account@your-gcp-project.iam.gserviceaccount.com",
+    "GOOGLE_CLIENT_EMAIL": "sheetflare-staging@sheetflare-staging.iam.gserviceaccount.com",
     "RATE_LIMIT_MAX_REQUESTS": "300",
     "RATE_LIMIT_WINDOW_SECONDS": "60",
     "TABLE_MAX_FULL_SCAN_ROWS": "10000"

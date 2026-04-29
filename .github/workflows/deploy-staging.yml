@@ -45,7 +45,7 @@ jobs:
           node -e "const fs = require('fs'); const secrets = { GOOGLE_PRIVATE_KEY: process.env.SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY, ADMIN_BEARER_TOKEN: process.env.SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN }; if (!secrets.GOOGLE_PRIVATE_KEY || !secrets.ADMIN_BEARER_TOKEN) { throw new Error('Missing required staging deploy secrets.'); } fs.writeFileSync('.wrangler-staging-secrets.json', JSON.stringify(secrets));"
 
       - name: Deploy staging worker
-        run: npx wrangler@4.85.0 deploy --config apps/api/wrangler.jsonc --secrets-file .wrangler-staging-secrets.json
+        run: npx wrangler@4.85.0 deploy --config apps/api/wrangler.staging.jsonc --secrets-file .wrangler-staging-secrets.json
 
       - name: Remove staging secrets file
         if: ${{ always() }}

@@ -6,6 +6,7 @@
     "dev": "vite",
     "build": "vite build",
     "dev:pages": "npx wrangler@4.85.0 pages dev",
+    "deploy": "vite build && npx wrangler@4.85.0 pages deploy dist --project-name sheetflare-admin --branch main --commit-dirty=true",
     "deploy:staging": "vite build && npx wrangler@4.85.0 pages deploy dist --project-name sheetflare-staging-admin --branch main --commit-dirty=true",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests"
