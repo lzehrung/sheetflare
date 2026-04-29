@@ -161,8 +161,9 @@ Important fields:
 - `lastSyncStartedAt`
 - `lastSyncCompletedAt`
 - `lastSyncError`
+- `validation`
 
-`lastSyncStartedAt` and `lastSyncCompletedAt` describe the last full cache rebuild from Google Sheets. Successful point mutations update the cache in place but do not rewrite those sync timestamps.
+`lastSyncStartedAt`, `lastSyncCompletedAt`, and `validation` describe the last full cache rebuild from Google Sheets. Successful point mutations update the cache in place but do not rewrite those sync timestamps.
 
 Interpretation:
 
@@ -171,6 +172,12 @@ Interpretation:
 - `ttl-expired`: cache is old but point reads and mutations can still use narrow repair behavior
 - `config-changed`: table config changed in a way that requires resync
 - `error`: last sync failed and needs investigation
+
+Validation interpretation:
+
+- `validation.status: "ok"`: the last full sync did not detect field-rule drift
+- `validation.status: "warning"`: the last full sync found rows that violate configured `fieldRules`, for example duplicates after normalization or invalid enum/type values
+- `validation.issues`: a capped sample for operator triage, not an exhaustive dump
 
 For critical tables, automate this check:
 

@@ -161,6 +161,11 @@ function columnNumberToA1(columnNumber: number): string {
   return result;
 }
 
+function buildBoundedTableRange(headerRow: number, lastColumnNumber: number) {
+  const lastColumn = columnNumberToA1(lastColumnNumber);
+  return `A${headerRow}:${lastColumn}`;
+}
+
 type ColumnValueSegment = {
   startColumnNumber: number;
   values: Array<string | number | boolean>;
@@ -370,11 +375,12 @@ export class GoogleSheetsService {
   }
 
   async readTableSnapshot(config: GoogleSheetTableConfig): Promise<TableSnapshot> {
-    const range = `${escapeSheetName(config.sheetTabName)}`;
-    const values = await this.readValues(config.spreadsheetId, range);
-    const headerIndex = Math.max(config.headerRow - 1, 0);
-    const dataIndex = Math.max(config.dataStartRow - 1, headerIndex + 1);
-    const layout = buildHeaderLayout(values[headerIndex], config.idColumn);
+    const layout = await this.readHeaderLayout(config);
+    const values = await this.readValues(
+      config.spreadsheetId,
+      `${escapeSheetName(config.sheetTabName)}!${buildBoundedTableRange(config.headerRow, layout.entries.at(-1)?.columnNumber ?? 1)}`
+    );
+    const dataIndex = Math.max(config.dataStartRow - config.headerRow, 1);
 
     return {
       headers: layout.headers,

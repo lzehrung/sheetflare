@@ -194,6 +194,17 @@ function createSheetsFetch(sheet: SheetState) {
       });
     }
 
+    const boundedTableMatch = range.match(/^'Users'!A(\d+):([A-Z]+)$/);
+    if (boundedTableMatch) {
+      const startRow = Number(boundedTableMatch[1]) - 1;
+      const endColumnIndex = columnLettersToIndex(boundedTableMatch[2]);
+      return Response.json({
+        values: sheet.rows
+          .slice(startRow)
+          .map((row) => row.slice(0, endColumnIndex + 1))
+      });
+    }
+
     throw new Error(`Unhandled sheet range: ${range}`);
   };
 }
@@ -789,6 +800,83 @@ describe('TableDO', () => {
       ['row-1', 'Ada Lovelace']
     ]);
     expect(sheet.requestedRanges).not.toContain("'Users'");
+  });
+
+  it('rolls back an appended create skeleton when the follow-up patch fails', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/values:batchUpdate')) {
+        return new Response(JSON.stringify({
+          error: {
+            message: 'Backend error'
+          }
+        }), {
+          status: 503,
+          headers: {
+            'content-type': 'application/json'
+          }
+        });
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        allowExisting: true,
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['name']
+        }
+      }
+    );
+
+    await expect(
+      doRpc<TableDoResponse>(
+        env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+        {
+          type: 'table.row.create',
+          projectSlug: 'demo',
+          tableSlug: 'users',
+          input: {
+            values: {
+              name: 'Ada'
+            }
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'ServiceUnavailableError',
+      message: 'Google Sheets API is temporarily unavailable.'
+    });
+
+    expect(sheet.rows).toEqual([
+      ['_id', 'name']
+    ]);
   });
 
   it('rejects create writes that target read-only columns', async () => {
@@ -1487,7 +1575,7 @@ describe('TableDO', () => {
       ['_id', 'name'],
       ['42', 'Ada']
     ]);
-    expect(sheet.requestedRanges.filter((range) => range === "'Users'!1:1")).toHaveLength(1);
+    expect(sheet.requestedRanges.filter((range) => range === "'Users'!1:1")).toHaveLength(2);
   });
 
   it('rejects create writes with unknown columns instead of silently dropping them', async () => {
@@ -2303,6 +2391,234 @@ describe('TableDO', () => {
       }
     });
     expect(sheet.requestedRanges.length).toBe(requestedRangeCountBeforeRefresh);
+  });
+
+  it('surfaces sync-time field-rule drift in cache status without failing the sync', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'email'],
+        ['row-1', 'Ada@Example.com'],
+        ['row-2', 'ada@example.com']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        allowExisting: true,
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['email'],
+          fieldRules: {
+            email: {
+              unique: true,
+              normalize: ['trim', 'lowercase']
+            }
+          }
+        }
+      }
+    );
+
+    const listResponse = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    expect((listResponse as {
+      type: 'table.rows.list.result';
+      result: { data: Array<{ id: string }> };
+    }).result.data).toHaveLength(2);
+
+    const cacheStatus = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect((cacheStatus as {
+      type: 'table.cache.get.result';
+      result: {
+        data: {
+          status: string;
+          validation: {
+            status: string;
+            issueCount: number;
+            issues: Array<{ field: string; code: string; rowId: string }>;
+          };
+        };
+      };
+    }).result.data).toMatchObject({
+      status: 'ready',
+      validation: {
+        status: 'warning',
+        issueCount: 1
+      }
+    });
+    expect((cacheStatus as {
+      type: 'table.cache.get.result';
+      result: {
+        data: {
+          validation: {
+            issues: Array<{ field: string; code: string; rowId: string }>;
+          };
+        };
+      };
+    }).result.data.validation.issues[0]).toMatchObject({
+      field: 'email',
+      code: 'UNIQUE',
+      rowId: 'row-2'
+    });
+  });
+
+  it('keeps sync completion logs bound to the request context that started the sync', async () => {
+    let releaseSync: (() => void) | null = null;
+    const syncGate = new Promise<void>((resolve) => {
+      releaseSync = resolve;
+    });
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = decodeURIComponent(String(input));
+
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return Response.json({
+          access_token: 'token',
+          expires_in: 3600
+        });
+      }
+
+      if (url.includes('?fields=sheets.properties(sheetId,title,sheetType)')) {
+        return Response.json({
+          sheets: [
+            {
+              properties: {
+                title: 'Users',
+                sheetId: 1,
+                sheetType: 'GRID'
+              }
+            }
+          ]
+        });
+      }
+
+      if (url.includes("/values/'Users'!1:1")) {
+        return Response.json({
+          values: [['_id', 'name']]
+        });
+      }
+
+      if (url.includes("/values/'Users'!A1:B")) {
+        await syncGate;
+        return Response.json({
+          values: [
+            ['_id', 'name'],
+            ['row-1', 'Ada']
+          ]
+        });
+      }
+
+      if (url.includes(':append') || url.includes('/values:batchUpdate') || url.includes(':batchUpdate')) {
+        return Response.json({});
+      }
+
+      if (url.includes("/values/'Users'!2:2")) {
+        return Response.json({
+          values: [['row-1', 'Ada']]
+        });
+      }
+
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`);
+    });
+
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    const listPromise = doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {},
+        requestContext: {
+          requestId: 'req-sync-starter',
+          route: 'rows.list',
+          principal: 'principal-a'
+        }
+      }
+    );
+
+    await Promise.resolve();
+
+    const cachePromise = doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.get',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        requestContext: {
+          requestId: 'req-later',
+          route: 'table.cache.get',
+          principal: 'principal-b'
+        }
+      }
+    );
+
+    releaseSync?.();
+    await Promise.all([listPromise, cachePromise]);
+
+    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"requestId":"req-sync-starter"'));
+    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"principal":"principal-a"'));
+    expect(infoSpy).not.toHaveBeenCalledWith(expect.stringContaining('"requestId":"req-later"'));
   });
 
   it('rebuilds the cache when refresh-if-stale is called after ttl expiry', async () => {
