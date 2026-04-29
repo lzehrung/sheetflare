@@ -21,6 +21,7 @@ import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
 type SetupCliOptions = {
   configPath: string;
   writeDefaultConfig: boolean;
+  applySecrets: boolean;
   deploy: boolean;
   bootstrap: boolean;
   smoke: boolean;
@@ -44,6 +45,7 @@ function parseArgs(argv: string[]): SetupCliOptions {
   const options: SetupCliOptions = {
     configPath: 'sheetflare.setup.json',
     writeDefaultConfig: false,
+    applySecrets: false,
     deploy: false,
     bootstrap: false,
     smoke: false,
@@ -69,6 +71,11 @@ function parseArgs(argv: string[]): SetupCliOptions {
 
     if (argument === '--deploy') {
       options.deploy = true;
+      continue;
+    }
+
+    if (argument === '--apply-secrets') {
+      options.applySecrets = true;
       continue;
     }
 
@@ -229,7 +236,7 @@ async function main() {
     }, null, 2));
 
     const actions = promptActions ?? {
-      applySecretsNow: false,
+      applySecretsNow: options.applySecrets,
       deployNow: options.deploy,
       bootstrapNow: options.bootstrap,
       smokeNow: options.smoke
@@ -256,14 +263,12 @@ async function main() {
 
     let setupSecrets: Awaited<ReturnType<typeof collectSetupSecrets>> | null = null;
     if (actions.applySecretsNow) {
-      if (!prompter) {
-        throw new ScriptError('Applying secrets requires an interactive TTY in the current setup implementation.');
-      }
-
       logStep('Collecting setup secrets');
       setupSecrets = await collectSetupSecrets({
         prompter,
-        includeAdminUiSecrets: config.deploy.admin
+        includeAdminUiSecrets: config.deploy.admin,
+        defaultAdminUiUsername: adminUiUsername,
+        defaultAdminUiPassword: adminUiPassword
       });
       adminBearerToken = setupSecrets.adminBearerToken;
       adminUiUsername = setupSecrets.adminUiUsername;
@@ -285,6 +290,16 @@ async function main() {
           adminUiPassword: setupSecrets.adminUiPassword
         })
       });
+
+      if (config.deploy.admin && adminUiUsername && adminUiPassword && !actions.deployNow) {
+        logStep('Applying admin Pages site secrets');
+        await applyAdminSecrets({
+          pagesProjectName: getAdminPagesProjectName(),
+          username: adminUiUsername,
+          password: adminUiPassword
+        });
+        logSuccess('Admin site secrets applied');
+      }
     }
 
     if (actions.deployNow) {

@@ -24,6 +24,7 @@ npm run setup
 ```
 
 That command can write `sheetflare.setup.json`, deploy, bootstrap, and smoke-check the first project.
+It also keeps local reusable secret state in `.sheetflare.setup.local.json`; treat that file as secret material and keep it on the operator machine only.
 
 Manual fallback:
 

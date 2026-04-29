@@ -136,15 +136,15 @@ If it reports that you are not authenticated, run:
 npx wrangler login
 ```
 
-One shared credential:
+One shared credential manual fallback:
 
 ```powershell
 npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
 ```
 
-Then set `GOOGLE_CLIENT_EMAIL` as a normal Worker variable in `apps/api/wrangler.jsonc` or your deploy system.
+Then set `GOOGLE_CLIENT_EMAIL` as a normal Worker variable through your deploy system. If you are using the standard onboarding flow, prefer `npm run setup` or `npm run setup -- --apply-secrets` instead of editing checked repo defaults directly.
 
-Multiple named credentials:
+Multiple named credentials manual fallback:
 
 ```powershell
 npx wrangler secret put GOOGLE_CREDENTIALS_JSON --config apps/api/wrangler.jsonc

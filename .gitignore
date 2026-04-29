@@ -6,3 +6,4 @@ coverage/
 Thumbs.db
 *.log
 *.tsbuildinfo
+.sheetflare.setup.local.json
