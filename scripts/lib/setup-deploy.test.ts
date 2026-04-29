@@ -71,6 +71,39 @@ describe('setup deploy command builders', () => {
     await expect(readFile(tempConfigPath, 'utf8')).rejects.toThrow();
   });
 
+  it('accepts commented JSONC wrangler configs', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-deploy-'));
+    tempDirs.push(dir);
+    const configPath = join(dir, 'wrangler.jsonc');
+    await writeFile(
+      configPath,
+      `{
+  // starter comment
+  "name": "sheetflare-api",
+  "vars": {
+    "RATE_LIMIT_MAX_REQUESTS": "300",
+  },
+}
+`,
+      'utf8'
+    );
+
+    const result = await withPatchedJsonConfig(
+      configPath,
+      (config) => ({
+        ...config,
+        vars: {
+          ...(typeof config.vars === 'object' && config.vars !== null ? config.vars : {}),
+          GOOGLE_CLIENT_EMAIL: 'service-account@example.com'
+        }
+      }),
+      async (path) => JSON.parse(await readFile(path, 'utf8')) as { vars: { GOOGLE_CLIENT_EMAIL: string; RATE_LIMIT_MAX_REQUESTS: string } }
+    );
+
+    expect(result.vars.GOOGLE_CLIENT_EMAIL).toBe('service-account@example.com');
+    expect(result.vars.RATE_LIMIT_MAX_REQUESTS).toBe('300');
+  });
+
   it('removes the temporary patched config after failure', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-deploy-'));
     tempDirs.push(dir);
@@ -89,5 +122,18 @@ describe('setup deploy command builders', () => {
 
     await expect(readFile(configPath, 'utf8')).resolves.toContain('"sheetflare-api"');
     await expect(readFile(tempConfigPath, 'utf8')).rejects.toThrow();
+  });
+
+  it('rejects invalid JSONC config content with a clear error', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-deploy-'));
+    tempDirs.push(dir);
+    const configPath = join(dir, 'wrangler.jsonc');
+    await writeFile(configPath, '{ "name": "sheetflare-api", ', 'utf8');
+
+    await expect(withPatchedJsonConfig(
+      configPath,
+      (config) => config,
+      async () => null
+    )).rejects.toThrow('must contain valid JSONC for setup orchestration');
   });
 });

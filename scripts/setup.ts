@@ -305,9 +305,11 @@ async function main() {
 
       logStep('Bootstrapping projects and API keys');
       const bootstrapOutput = await runBootstrap(createBootstrapEnv(config, apiUrl, adminBearerToken));
-      adminApiKey = findCreatedKey(bootstrapOutput, config.smoke.adminKeyName);
-      privateReadKey = findCreatedKey(bootstrapOutput, config.smoke.privateReadKeyName);
-      mutationKey = findCreatedKey(bootstrapOutput, config.smoke.mutationKeyName);
+      if (config.smoke.enabled) {
+        adminApiKey = findCreatedKey(bootstrapOutput, config.smoke.adminKeyName);
+        privateReadKey = findCreatedKey(bootstrapOutput, config.smoke.privateReadKeyName);
+        mutationKey = findCreatedKey(bootstrapOutput, config.smoke.mutationKeyName);
+      }
       logSuccess('Bootstrap completed');
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
@@ -322,6 +324,9 @@ async function main() {
     }
 
     if (actions.smokeNow) {
+      if (!config.smoke.enabled) {
+        throw new ScriptError('Smoke is disabled in sheetflare.setup.json. Set smoke.enabled to true or rerun setup with a smoke-enabled config.');
+      }
       if (!apiUrl) {
         throw new ScriptError('API base URL is required for smoke.');
       }

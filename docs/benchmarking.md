@@ -2,20 +2,20 @@
 
 This document defines how to generate the evidence bundle needed for broader production use.
 
-## Staging Smoke Report
+## Smoke Report
 
 The smoke harness can now write both markdown and JSON artifacts.
 
 Set the normal smoke environment plus a report path:
 
 ```powershell
-$env:SHEETFLARE_SMOKE_REPORT_PATH = "reports/staging/smoke-$(Get-Date -Format yyyyMMdd-HHmmss).md"
+$env:SHEETFLARE_SMOKE_REPORT_PATH = "reports/smoke-$(Get-Date -Format yyyyMMdd-HHmmss).md"
 npm run smoke
 ```
 
 Artifacts written:
 
-- `<report>.md`: human-readable staging validation report
+- `<report>.md`: human-readable deployment validation report
 - `<report>.json`: structured artifact for automation or later comparison
 
 The smoke report captures:
@@ -30,10 +30,10 @@ The smoke report captures:
 
 ## Load And Churn Report
 
-Set the same staging variables used by the smoke harness, then add:
+Set the same smoke variables used by the smoke harness, then add:
 
 ```powershell
-$env:SHEETFLARE_LOAD_REPORT_PATH = "reports/staging/load-$(Get-Date -Format yyyyMMdd-HHmmss).md"
+$env:SHEETFLARE_LOAD_REPORT_PATH = "reports/load-$(Get-Date -Format yyyyMMdd-HHmmss).md"
 $env:SHEETFLARE_LOAD_STALE_WAIT_MS = "16000"
 $env:SHEETFLARE_LOAD_MANUAL_CHURN_PAUSE_MS = "30000"
 npm run load

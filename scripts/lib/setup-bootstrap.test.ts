@@ -102,6 +102,16 @@ describe('createBootstrapConfigFromSetup', () => {
       defaultAuthMode: 'public-read'
     });
   });
+
+  it('omits generated smoke keys when smoke is disabled', () => {
+    expect(createBootstrapConfigFromSetup({
+      ...baseConfig,
+      smoke: {
+        ...baseConfig.smoke,
+        enabled: false
+      }
+    }).apiKeys).toEqual([]);
+  });
 });
 
 describe('bootstrap output parsing', () => {

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
+import * as ts from 'typescript';
 import { getCommandName, runCommand } from './process';
 import { ScriptError } from './runtime';
 
@@ -10,11 +11,21 @@ const adminWranglerConfigPath = resolve('apps/admin/wrangler.jsonc');
 type JsonObject = Record<string, unknown>;
 
 function parseJsonConfig(text: string, path: string) {
+  let result: ReturnType<typeof ts.parseConfigFileTextToJson>;
   try {
-    return JSON.parse(text) as JsonObject;
+    result = ts.parseConfigFileTextToJson(path, text);
   } catch {
-    throw new ScriptError(`Wrangler config ${path} must contain valid JSON for setup orchestration.`);
+    throw new ScriptError(`Wrangler config ${path} must contain valid JSONC for setup orchestration.`);
   }
+  if (result.error) {
+    throw new ScriptError(`Wrangler config ${path} must contain valid JSONC for setup orchestration.`);
+  }
+
+  if (typeof result.config !== 'object' || result.config === null || Array.isArray(result.config)) {
+    throw new ScriptError(`Wrangler config ${path} must contain a JSON object for setup orchestration.`);
+  }
+
+  return result.config as JsonObject;
 }
 
 function createTempConfigPath(path: string) {
