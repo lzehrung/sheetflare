@@ -4,6 +4,7 @@ import { writeReportArtifacts } from './lib/reporting';
 import {
   buildCacheHealthEntry,
   buildCacheHealthReport,
+  type CacheHealthEntry,
   type CacheStatusResponse,
   renderCacheHealthMarkdown
 } from './lib/cache-health';
@@ -11,7 +12,7 @@ import {
 async function main() {
   const config = readCacheHealthConfig();
   const startedAt = new Date().toISOString();
-  const results = [];
+  const results: CacheHealthEntry[] = [];
 
   for (const target of config.targets) {
     logStep(`Checking cache health for ${target.project}/${target.table}`);
