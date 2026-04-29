@@ -54,6 +54,7 @@ Set these on the Worker:
 
 - `GOOGLE_CLIENT_EMAIL`
 - `GOOGLE_PRIVATE_KEY`
+- `GOOGLE_DRIVE_WEBHOOK_SECRET`
 - `GOOGLE_CREDENTIALS_JSON` optional
 - `ADMIN_BEARER_TOKEN`
 - `RATE_LIMIT_MAX_REQUESTS`
@@ -130,6 +131,7 @@ If you need to manage secrets through Wrangler manually instead of `npm run setu
 
 ```powershell
 npx wrangler secret put ADMIN_BEARER_TOKEN --config apps/api/wrangler.jsonc
+npx wrangler secret put GOOGLE_DRIVE_WEBHOOK_SECRET --config apps/api/wrangler.jsonc
 npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
 ```
 
@@ -138,6 +140,7 @@ Prefer your deployment system or setup flow for non-secret vars. Editing the che
 Google credential notes:
 
 - `GOOGLE_PRIVATE_KEY` is secret material and should be stored as a Worker secret
+- `GOOGLE_DRIVE_WEBHOOK_SECRET` is secret material and must be stored as a Worker secret
 - `GOOGLE_CREDENTIALS_JSON` is also secret material because it contains private keys
 - `GOOGLE_CLIENT_EMAIL` can be stored as a normal variable
 - if you use named credentials, project config must point at the intended `googleCredentialRef`

@@ -217,6 +217,7 @@ async function main() {
       await applyApiSecrets({
         apiWranglerConfigPath: getApiWranglerConfigPath(),
         googlePrivateKey: setupSecrets.googlePrivateKey,
+        driveWebhookSecret: setupSecrets.driveWebhookSecret,
         adminBearerToken: setupSecrets.adminBearerToken
       });
       logSuccess('Worker secrets applied');

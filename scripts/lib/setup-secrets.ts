@@ -12,6 +12,7 @@ type ServiceAccountCredentials = {
 export type SetupSecrets = {
   googleClientEmail: string;
   googlePrivateKey: string;
+  driveWebhookSecret: string;
   adminBearerToken: string;
   adminUiUsername: string | null;
   adminUiPassword: string | null;
@@ -164,11 +165,13 @@ export async function collectSetupSecrets(options: {
   }
 
   const adminBearerToken = readEnvValue('ADMIN_BEARER_TOKEN') ?? generateSecretToken(32);
+  const driveWebhookSecret = readEnvValue('GOOGLE_DRIVE_WEBHOOK_SECRET') ?? generateSecretToken(32);
 
   if (!options.includeAdminUiSecrets) {
     return {
       googleClientEmail,
       googlePrivateKey,
+      driveWebhookSecret,
       adminBearerToken,
       adminUiUsername: null,
       adminUiPassword: null
@@ -183,6 +186,7 @@ export async function collectSetupSecrets(options: {
   return {
     googleClientEmail,
     googlePrivateKey,
+    driveWebhookSecret,
     adminBearerToken,
     adminUiUsername: adminSiteSecrets.adminUiUsername,
     adminUiPassword: adminSiteSecrets.adminUiPassword
@@ -192,6 +196,7 @@ export async function collectSetupSecrets(options: {
 export async function applyApiSecrets(options: {
   apiWranglerConfigPath: string;
   googlePrivateKey: string;
+  driveWebhookSecret: string;
   adminBearerToken: string;
 }) {
   const wrangler = getCommandName('npx');
@@ -205,6 +210,17 @@ export async function applyApiSecrets(options: {
   );
   if (privateKeyResult.code !== 0) {
     throw new ScriptError('Failed to apply GOOGLE_PRIVATE_KEY with wrangler secret put.');
+  }
+
+  const driveWebhookSecretResult = await runCommand(
+    wrangler,
+    commands.googleDriveWebhookSecret,
+    {
+      input: `${options.driveWebhookSecret}\n`
+    }
+  );
+  if (driveWebhookSecretResult.code !== 0) {
+    throw new ScriptError('Failed to apply GOOGLE_DRIVE_WEBHOOK_SECRET with wrangler secret put.');
   }
 
   const bearerResult = await runCommand(
@@ -252,6 +268,7 @@ export async function applyAdminSecrets(options: {
 export function buildApiSecretCommands(apiWranglerConfigPath: string) {
   return {
     googlePrivateKey: ['wrangler', 'secret', 'put', 'GOOGLE_PRIVATE_KEY', '--config', apiWranglerConfigPath],
+    googleDriveWebhookSecret: ['wrangler', 'secret', 'put', 'GOOGLE_DRIVE_WEBHOOK_SECRET', '--config', apiWranglerConfigPath],
     adminBearerToken: ['wrangler', 'secret', 'put', 'ADMIN_BEARER_TOKEN', '--config', apiWranglerConfigPath]
   };
 }

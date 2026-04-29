@@ -75,4 +75,27 @@ describe('CacheStatusSummary', () => {
     expect(screen.getByText(/row 3 \(row-2\) email UNIQUE: email must be unique\./)).toBeTruthy();
     expect(screen.getByText(/row 5 \(row-4\) status REQUIRED: status is required\./)).toBeTruthy();
   });
+
+  it('renders external change debounce status when a sheet update is pending reindex', () => {
+    render(
+      <dl>
+        <CacheStatusSummary
+          cache={createCacheStatus({
+            stale: true,
+            staleReason: 'external-change',
+            externalChange: {
+              pending: true,
+              lastChangedAt: '2026-04-29T18:05:00.000Z',
+              debounceUntil: '2026-04-29T18:05:30.000Z',
+              lastAutoReindexAt: '2026-04-29T18:00:05.000Z'
+            }
+          })}
+        />
+      </dl>
+    );
+
+    expect(screen.getAllByText('External Change').length).toBeGreaterThan(0);
+    expect(screen.getByText(/pending \/ debounce until/i)).toBeTruthy();
+    expect(screen.getByText('Last External Change')).toBeTruthy();
+  });
 });

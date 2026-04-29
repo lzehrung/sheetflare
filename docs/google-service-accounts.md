@@ -16,7 +16,7 @@ Use this model unless you have a strong reason to do something else:
 
 - create one dedicated user-managed service account per environment
 - use names such as `sheetflare-staging` and `sheetflare-prod`
-- enable only the Google Sheets API in that GCP project
+- enable the Google Sheets API and Google Drive API in that GCP project
 - share only the exact spreadsheets Sheetflare should manage with the service-account email
 - grant spreadsheet-level `Editor` access through Google Sheets sharing
 
@@ -41,7 +41,7 @@ That means:
 ## Create a Dedicated Service Account
 
 1. Choose or create a GCP project for the environment.
-2. Enable the Google Sheets API.
+2. Enable the Google Sheets API and Google Drive API.
 3. Create a user-managed service account.
 4. Create a key only if your org policy allows service-account keys.
 
@@ -140,9 +140,10 @@ One shared credential manual fallback:
 
 ```powershell
 npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
+npx wrangler secret put GOOGLE_DRIVE_WEBHOOK_SECRET --config apps/api/wrangler.jsonc
 ```
 
-Then set `GOOGLE_CLIENT_EMAIL` as a normal Worker variable through your deploy system. If you are using the standard onboarding flow, prefer `npm run setup` or `npm run setup -- --apply-secrets` instead of editing checked repo defaults directly.
+Then set `GOOGLE_CLIENT_EMAIL` as a normal Worker variable through your deploy system. `GOOGLE_DRIVE_WEBHOOK_SECRET` is required when you enable automatic Drive-watch reindexing and should be treated as Worker secret material. If you are using the standard onboarding flow, prefer `npm run setup` or `npm run setup -- --apply-secrets` instead of editing checked repo defaults directly.
 
 Multiple named credentials manual fallback:
 

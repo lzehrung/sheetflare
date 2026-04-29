@@ -100,6 +100,11 @@ export const adminInspectSpreadsheetTabResultSchema = z.object({
   })
 });
 
+export const adminRegisterSpreadsheetWatchesInputSchema = z.object({
+  debounceSeconds: z.number().int().positive().max(3600).optional(),
+  expirationHours: z.number().int().positive().max(24 * 30).optional()
+});
+
 export const spreadsheetWatchSchema = z.object({
   spreadsheetId: spreadsheetIdSchema,
   googleCredentialRef: z.string().min(1),
@@ -190,6 +195,7 @@ export type AdminGetProjectResult = z.infer<typeof adminGetProjectResultSchema>;
 export type SpreadsheetTab = z.infer<typeof spreadsheetTabSchema>;
 export type AdminListSpreadsheetTabsResult = z.infer<typeof adminListSpreadsheetTabsResultSchema>;
 export type AdminInspectSpreadsheetTabResult = z.infer<typeof adminInspectSpreadsheetTabResultSchema>;
+export type AdminRegisterSpreadsheetWatchesInput = z.infer<typeof adminRegisterSpreadsheetWatchesInputSchema>;
 export type SpreadsheetWatch = z.infer<typeof spreadsheetWatchSchema>;
 export type AdminRegisterSpreadsheetWatchesResult = z.infer<typeof adminRegisterSpreadsheetWatchesResultSchema>;
 export type UpsertTableResult = z.infer<typeof upsertTableResultSchema>;

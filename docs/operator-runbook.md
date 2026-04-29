@@ -171,6 +171,7 @@ Interpretation:
 - `never-synced`: table has not completed its first sync
 - `ttl-expired`: cache is old but point reads and mutations can still use narrow repair behavior
 - `config-changed`: table config changed in a way that requires resync
+- `external-change`: Google Drive reported a spreadsheet update and a debounced auto-reindex is pending
 - `error`: last sync failed and needs investigation
 
 Validation interpretation:
@@ -178,6 +179,9 @@ Validation interpretation:
 - `validation.status: "ok"`: the last full sync did not detect field-rule drift
 - `validation.status: "warning"`: the last full sync found rows that violate configured `fieldRules`, for example duplicates after normalization or invalid enum/type values
 - `validation.issues`: a capped sample for operator triage, not an exhaustive dump
+- `externalChange.pending`: Drive notification arrived and the debounce window has not completed yet
+- `externalChange.debounceUntil`: when the queued automatic reindex is due
+- `externalChange.lastAutoReindexAt`: when the last Drive-triggered automatic reindex completed
 
 For critical tables, automate this check:
 
@@ -187,6 +191,36 @@ npm run ops:cache:health
 ```
 
 This exits non-zero when a critical table is not healthy.
+
+## Register Drive Watches
+
+Automatic debounced reindexing requires one Drive watch per spreadsheet.
+
+Prerequisites:
+
+- `GOOGLE_DRIVE_WEBHOOK_SECRET` is configured on the API Worker
+- the Google Drive API is enabled for the same Google Cloud project as the service account
+- the deployed Worker URL is reachable from Google
+
+Register or renew all spreadsheet watches currently known to Sheetflare:
+
+```powershell
+npm run ops:watch:drive
+```
+
+Optional overrides:
+
+```powershell
+$env:SHEETFLARE_DRIVE_WATCH_DEBOUNCE_SECONDS = "45"
+$env:SHEETFLARE_DRIVE_WATCH_EXPIRATION_HOURS = "168"
+npm run ops:watch:drive
+```
+
+Re-run this after:
+
+- rotating `GOOGLE_DRIVE_WEBHOOK_SECRET`
+- changing the deployed API base URL
+- onboarding new spreadsheets
 
 ## Force Reindex
 

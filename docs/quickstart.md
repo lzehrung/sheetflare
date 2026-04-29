@@ -31,7 +31,7 @@ Create a dedicated Google service account for this environment.
 Recommended shape:
 
 - one user-managed service account per environment
-- Google Sheets API enabled in that GCP project
+- Google Sheets API and Google Drive API enabled in that GCP project
 - spreadsheet-level `Editor` sharing only on the exact spreadsheets Sheetflare will manage
 
 Share the sheet with the service-account email as an editor.
@@ -98,7 +98,7 @@ Notes for reruns:
 Setup does not automate:
 
 - creating the Google service account itself
-- enabling the Google Sheets API in GCP
+- enabling the Google Sheets API and Google Drive API in GCP
 - sharing the spreadsheet with the service-account email
 - creating new sheet tabs for you
 - custom Worker or Pages naming beyond the checked public defaults
@@ -289,6 +289,7 @@ Healthy output should show:
 - `staleReason: "fresh"` after healthy activity or reindex
 - `lastSyncError: null`
 - `validation.status: "ok"` unless the last full sync detected direct sheet drift against configured `fieldRules`
+- `externalChange.pending: false` unless a Drive notification has queued a debounced auto-reindex
 
 `lastSyncStartedAt`, `lastSyncCompletedAt`, and `validation` refer to the last full rebuild from Google Sheets, not the most recent successful point mutation.
 
@@ -317,6 +318,18 @@ Force reindex:
 ```powershell
 npm run ops:reindex
 ```
+
+Register or renew Google Drive watches for automatic debounced reindexing:
+
+```powershell
+npm run ops:watch:drive
+```
+
+This requires:
+
+- `GOOGLE_DRIVE_WEBHOOK_SECRET` deployed on the API Worker
+- the Google Drive API enabled for the same service-account project
+- the deployed API URL to be reachable by Google
 
 Run the load and churn harness:
 

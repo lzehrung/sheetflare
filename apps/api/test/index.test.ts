@@ -33,10 +33,15 @@ function createEnv(options?: {
   const rateLimitRequests: Array<{ name: string; key: string }> = [];
   const projectRequests: string[] = [];
   const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }> = [];
+  const controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> = [];
   let verifyApiKeyCallCount = 0;
   let apiKeyTouchCallCount = 0;
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
     const body = (await request.json()) as { type: string; apiKeyId?: string; hash?: string; projectSlug?: string | null };
+    controlPlaneRequests.push({
+      type: body.type,
+      body
+    });
 
     if (body.type === 'control.api-key.verify') {
       verifyApiKeyCallCount += 1;
@@ -163,6 +168,42 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'control.spreadsheet-watches.register') {
+      return Response.json({
+        type: 'control.spreadsheet-watches.register.result',
+        result: {
+          data: [
+            {
+              spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
+              channelId: 'channel-1',
+              resourceId: 'resource-1',
+              resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+              expirationAt: '2026-05-03T00:00:00.000Z',
+              lastNotificationAt: null,
+              pendingChangedAt: null,
+              debounceUntil: null,
+              lastReindexStartedAt: null,
+              lastReindexCompletedAt: null,
+              lastReindexError: null,
+              projectSlugs: ['demo']
+            }
+          ]
+        }
+      });
+    }
+
+    if (body.type === 'control.spreadsheet-watch.notify') {
+      return Response.json({
+        type: 'control.spreadsheet-watch.notify.result',
+        result: {
+          accepted: true,
+          spreadsheetId: 'sheet-1',
+          debounceUntil: '2026-04-26T00:00:30.000Z'
+        }
+      });
+    }
+
     return Response.json({
       type: 'control.projects.list.result',
       result: {
@@ -171,6 +212,7 @@ function createEnv(options?: {
             slug: 'demo',
             name: 'Demo',
             spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
             tableCount: 2,
             updatedAt: '2026-04-26T00:00:00.000Z'
           }
@@ -416,7 +458,18 @@ function createEnv(options?: {
             rowCount: 2,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
-            lastSyncError: null
+            lastSyncError: null,
+            validation: {
+              status: 'ok',
+              issueCount: 0,
+              issues: []
+            },
+            externalChange: {
+              pending: false,
+              lastChangedAt: null,
+              debounceUntil: null,
+              lastAutoReindexAt: null
+            }
           }
         }
       });
@@ -436,7 +489,18 @@ function createEnv(options?: {
             rowCount: 3,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
-            lastSyncError: null
+            lastSyncError: null,
+            validation: {
+              status: 'ok',
+              issueCount: 0,
+              issues: []
+            },
+            externalChange: {
+              pending: false,
+              lastChangedAt: null,
+              debounceUntil: null,
+              lastAutoReindexAt: null
+            }
           }
         }
       });
@@ -484,6 +548,7 @@ function createEnv(options?: {
     RATE_LIMIT_DO: rateLimit as never,
     GOOGLE_CLIENT_EMAIL: 'service@example.com',
     GOOGLE_PRIVATE_KEY: 'private-key',
+    GOOGLE_DRIVE_WEBHOOK_SECRET: 'drive-secret',
     ADMIN_BEARER_TOKEN: 'secret',
     RATE_LIMIT_MAX_REQUESTS: '300',
     RATE_LIMIT_WINDOW_SECONDS: '60'
@@ -499,6 +564,10 @@ function createEnv(options?: {
   });
   Object.defineProperty(env, '__projectRequests', {
     value: projectRequests,
+    enumerable: false
+  });
+  Object.defineProperty(env, '__controlPlaneRequests', {
+    value: controlPlaneRequests,
     enumerable: false
   });
   Object.defineProperty(env, '__verifyApiKeyCallCount', {
@@ -547,11 +616,112 @@ describe('api routes', () => {
           slug: 'demo',
           name: 'Demo',
           spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'default',
           tableCount: 2,
           updatedAt: '2026-04-26T00:00:00.000Z'
         }
       ]
     });
+  });
+
+  it('registers Drive spreadsheet watches through a global admin route', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> };
+    const response = await app.request(
+      '/v1/admin/system/google/drive/watches/register',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          debounceSeconds: 45,
+          expirationHours: 72
+        })
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: [
+        {
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'default',
+          channelId: 'channel-1',
+          resourceId: 'resource-1',
+          resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+          expirationAt: '2026-05-03T00:00:00.000Z',
+          lastNotificationAt: null,
+          pendingChangedAt: null,
+          debounceUntil: null,
+          lastReindexStartedAt: null,
+          lastReindexCompletedAt: null,
+          lastReindexError: null,
+          projectSlugs: ['demo']
+        }
+      ]
+    });
+    expect(env.__controlPlaneRequests.at(-1)).toMatchObject({
+      type: 'control.spreadsheet-watches.register',
+      body: {
+        debounceSeconds: 45,
+        webhookToken: 'drive-secret'
+      }
+    });
+  });
+
+  it('accepts verified Google Drive webhook notifications without edge rate limiting', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }>;
+      __rateLimitRequests: Array<{ name: string; key: string }>;
+    };
+    const response = await app.request(
+      '/v1/system/google/drive/notifications',
+      {
+        method: 'POST',
+        headers: {
+          'x-goog-channel-id': 'channel-1',
+          'x-goog-resource-id': 'resource-1',
+          'x-goog-resource-state': 'update',
+          'x-goog-message-number': '2',
+          'x-goog-channel-token': 'drive-secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(204);
+    expect(env.__rateLimitRequests).toEqual([]);
+    expect(env.__controlPlaneRequests.at(-1)).toMatchObject({
+      type: 'control.spreadsheet-watch.notify',
+      body: {
+        channelId: 'channel-1',
+        resourceId: 'resource-1',
+        resourceState: 'update'
+      }
+    });
+  });
+
+  it('rejects Google Drive webhook notifications with the wrong verification token', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/system/google/drive/notifications',
+      {
+        method: 'POST',
+        headers: {
+          'x-goog-channel-id': 'channel-1',
+          'x-goog-resource-id': 'resource-1',
+          'x-goog-resource-state': 'update',
+          'x-goog-channel-token': 'wrong-secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(401);
   });
 
   it('rejects duplicate project creation unless upsert is requested explicitly', async () => {
@@ -1047,7 +1217,18 @@ describe('api routes', () => {
         rowCount: 2,
         lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
         lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
-        lastSyncError: null
+        lastSyncError: null,
+        validation: {
+          status: 'ok',
+          issueCount: 0,
+          issues: []
+        },
+        externalChange: {
+          pending: false,
+          lastChangedAt: null,
+          debounceUntil: null,
+          lastAutoReindexAt: null
+        }
       }
     });
   });
@@ -1080,7 +1261,18 @@ describe('api routes', () => {
         rowCount: 3,
         lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
         lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
-        lastSyncError: null
+        lastSyncError: null,
+        validation: {
+          status: 'ok',
+          issueCount: 0,
+          issues: []
+        },
+        externalChange: {
+          pending: false,
+          lastChangedAt: null,
+          debounceUntil: null,
+          lastAutoReindexAt: null
+        }
       }
     });
     expect(env.__tableRequests.at(-1)).toMatchObject({
