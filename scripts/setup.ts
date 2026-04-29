@@ -7,6 +7,14 @@ import { createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './lib/
 import { deployAdminPages, deployApiWorker, getApiWranglerConfigPath, getAdminPagesProjectName } from './lib/setup-deploy';
 import { applyAdminSecrets, applyApiSecrets, collectSetupSecrets } from './lib/setup-secrets';
 import { createSmokeEnv } from './lib/setup-smoke';
+import {
+  createSetupLocalState,
+  getSetupLocalStatePath,
+  readSetupLocalState,
+  redactSetupLocalState,
+  type SetupLocalState,
+  writeSetupLocalState
+} from './lib/setup-state';
 import { getCommandName, runCommand } from './lib/process';
 import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
 
@@ -16,6 +24,7 @@ type SetupCliOptions = {
   deploy: boolean;
   bootstrap: boolean;
   smoke: boolean;
+  showSecrets: boolean;
 };
 
 type SetupExecutionSummary = {
@@ -28,6 +37,7 @@ type SetupExecutionSummary = {
   adminApiKey: string | null;
   privateReadKey: string | null;
   mutationKey: string | null;
+  localStatePath: string | null;
 };
 
 function parseArgs(argv: string[]): SetupCliOptions {
@@ -36,7 +46,8 @@ function parseArgs(argv: string[]): SetupCliOptions {
     writeDefaultConfig: false,
     deploy: false,
     bootstrap: false,
-    smoke: false
+    smoke: false,
+    showSecrets: false
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -71,6 +82,11 @@ function parseArgs(argv: string[]): SetupCliOptions {
       continue;
     }
 
+    if (argument === '--show-secrets') {
+      options.showSecrets = true;
+      continue;
+    }
+
     throw new ScriptError(`Unknown setup argument: ${argument}`);
   }
 
@@ -100,6 +116,16 @@ function renderPrereqSummary(results: Awaited<ReturnType<typeof checkSetupPrereq
   }
 }
 
+function resolveValue(...values: Array<string | null | undefined>) {
+  for (const value of values) {
+    if (value && value.trim().length > 0) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
 async function promptForText(prompter: SetupPrompter, options: {
   message: string;
   envName?: string;
@@ -117,8 +143,7 @@ function printExecutionSummary(summary: SetupExecutionSummary) {
   console.log(JSON.stringify(summary, null, 2));
 }
 
-async function runBootstrap(configPath: string, env: NodeJS.ProcessEnv) {
-  void configPath;
+async function runBootstrap(env: NodeJS.ProcessEnv) {
   const result = await runCommand(
     getCommandName('npm'),
     ['run', 'ops:bootstrap'],
@@ -148,9 +173,54 @@ async function runSmoke(env: NodeJS.ProcessEnv) {
   }
 }
 
+async function persistLocalState(configPath: string, currentState: SetupLocalState | null, updates: SetupLocalState) {
+  const nextState = {
+    ...(currentState ?? {}),
+    ...updates
+  };
+  await writeSetupLocalState(configPath, nextState);
+  return nextState;
+}
+
+function summarizeSecrets(options: {
+  showSecrets: boolean;
+  localStatePath: string;
+  adminBearerToken: string | null;
+  adminUiUsername: string | null;
+  adminUiPassword: string | null;
+  adminApiKey: string | null;
+  privateReadKey: string | null;
+  mutationKey: string | null;
+}) {
+  if (options.showSecrets) {
+    return {
+      adminBearerToken: options.adminBearerToken,
+      adminUiUsername: options.adminUiUsername,
+      adminUiPassword: options.adminUiPassword,
+      adminApiKey: options.adminApiKey,
+      privateReadKey: options.privateReadKey,
+      mutationKey: options.mutationKey,
+      localStatePath: options.localStatePath
+    };
+  }
+
+  return {
+    ...redactSetupLocalState(createSetupLocalState({
+      adminBearerToken: options.adminBearerToken,
+      adminUiUsername: options.adminUiUsername,
+      adminUiPassword: options.adminUiPassword,
+      adminApiKey: options.adminApiKey,
+      privateReadKey: options.privateReadKey,
+      mutationKey: options.mutationKey
+    })),
+    localStatePath: options.localStatePath
+  };
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const resolvedConfigPath = resolve(options.configPath);
+  const localStatePath = getSetupLocalStatePath(resolvedConfigPath);
 
   if (options.writeDefaultConfig) {
     logStep(`Writing starter setup config to ${resolvedConfigPath}`);
@@ -166,6 +236,7 @@ async function main() {
   const prompter = process.stdin.isTTY && process.stdout.isTTY
     ? createConsolePrompter()
     : null;
+  let localState = await readSetupLocalState(resolvedConfigPath);
   let configInput: unknown;
   let promptActions: SetupPromptActions | null = null;
 
@@ -193,9 +264,7 @@ async function main() {
 
     logStep(`Validating setup config ${resolvedConfigPath}`);
     const config = parseSetupConfig(configInput);
-    logSuccess(
-      `Validated setup config for profile ${config.profile} with private project ${config.privateProject.slug}.`
-    );
+    logSuccess(`Validated setup config for profile ${config.profile} with private project ${config.privateProject.slug}.`);
     console.log(JSON.stringify({
       profile: config.profile,
       privateProject: config.privateProject.slug,
@@ -205,7 +274,7 @@ async function main() {
     }, null, 2));
 
     const actions = promptActions ?? {
-      applySecretsNow: options.deploy,
+      applySecretsNow: false,
       deployNow: options.deploy,
       bootstrapNow: options.bootstrap,
       smokeNow: options.smoke
@@ -220,19 +289,23 @@ async function main() {
       throw new ScriptError('Wrangler authentication is required before applying secrets or deploying. Run npx wrangler login and rerun setup.');
     }
 
-    let apiUrl: string | null = null;
-    let adminUrl: string | null = null;
-    let adminBearerToken: string | null = null;
-    let adminUiUsername: string | null = null;
-    let adminUiPassword: string | null = null;
-    let adminApiKey: string | null = null;
-    let privateReadKey: string | null = null;
-    let mutationKey: string | null = null;
+    let apiUrl: string | null = resolveValue(localState?.apiUrl, getEnv('SHEETFLARE_BASE_URL'));
+    let adminUrl: string | null = resolveValue(localState?.adminUrl);
+    let adminBearerToken: string | null = resolveValue(
+      localState?.adminBearerToken,
+      getEnv('SHEETFLARE_ADMIN_CREDENTIAL'),
+      getEnv('ADMIN_BEARER_TOKEN')
+    );
+    let adminUiUsername: string | null = resolveValue(localState?.adminUiUsername, getEnv('ADMIN_UI_USERNAME'));
+    let adminUiPassword: string | null = resolveValue(localState?.adminUiPassword, getEnv('ADMIN_UI_PASSWORD'));
+    let adminApiKey: string | null = resolveValue(localState?.adminApiKey, getEnv('SHEETFLARE_ADMIN_CREDENTIAL'));
+    let privateReadKey: string | null = resolveValue(localState?.privateReadKey, getEnv('SHEETFLARE_PRIVATE_READ_KEY'));
+    let mutationKey: string | null = resolveValue(localState?.mutationKey, getEnv('SHEETFLARE_MUTATION_KEY'));
 
     let setupSecrets: Awaited<ReturnType<typeof collectSetupSecrets>> | null = null;
-    if (actions.applySecretsNow || actions.deployNow) {
+    if (actions.applySecretsNow) {
       if (!prompter) {
-        throw new ScriptError('Applying secrets or deploying requires an interactive TTY in the current setup implementation.');
+        throw new ScriptError('Applying secrets requires an interactive TTY in the current setup implementation.');
       }
 
       logStep('Collecting setup secrets');
@@ -251,15 +324,29 @@ async function main() {
         adminBearerToken: setupSecrets.adminBearerToken
       });
       logSuccess('Worker secrets applied');
+
+      localState = await persistLocalState(resolvedConfigPath, localState, {
+        ...createSetupLocalState({
+          googleClientEmail: setupSecrets.googleClientEmail,
+          adminBearerToken: setupSecrets.adminBearerToken,
+          adminUiUsername: setupSecrets.adminUiUsername,
+          adminUiPassword: setupSecrets.adminUiPassword
+        })
+      });
     }
 
     if (actions.deployNow) {
-      if (!setupSecrets) {
-        throw new ScriptError('Setup secrets were not collected before deploy.');
+      const googleClientEmail = resolveValue(
+        setupSecrets?.googleClientEmail,
+        localState?.googleClientEmail,
+        getEnv('GOOGLE_CLIENT_EMAIL')
+      );
+      if (!googleClientEmail) {
+        throw new ScriptError('Deploy requires GOOGLE_CLIENT_EMAIL from setup secrets, local setup state, or the environment.');
       }
 
       logStep('Deploying API Worker');
-      const apiDeploy = await deployApiWorker(setupSecrets.googleClientEmail);
+      const apiDeploy = await deployApiWorker(googleClientEmail);
       apiUrl = apiDeploy.url;
       logSuccess(`API deployed at ${apiUrl}`);
 
@@ -269,21 +356,32 @@ async function main() {
         adminUrl = adminDeploy.url;
         logSuccess(`Admin deployed at ${adminUrl}`);
 
-        if (setupSecrets.adminUiUsername && setupSecrets.adminUiPassword) {
+        if (adminUiUsername && adminUiPassword) {
           logStep('Applying admin Pages site secrets');
           await applyAdminSecrets({
             pagesProjectName: getAdminPagesProjectName(),
-            username: setupSecrets.adminUiUsername,
-            password: setupSecrets.adminUiPassword
+            username: adminUiUsername,
+            password: adminUiPassword
           });
           logSuccess('Admin site secrets applied');
         }
       }
+
+      localState = await persistLocalState(resolvedConfigPath, localState, {
+        ...createSetupLocalState({
+          googleClientEmail,
+          apiUrl,
+          adminUrl,
+          adminBearerToken,
+          adminUiUsername,
+          adminUiPassword
+        })
+      });
     }
 
     if (!apiUrl && (actions.bootstrapNow || actions.smokeNow)) {
       if (!prompter) {
-        throw new ScriptError('Bootstrap or smoke without a fresh deploy requires an interactive TTY to collect runtime inputs.');
+        throw new ScriptError('Bootstrap or smoke requires SHEETFLARE_BASE_URL or a prior local setup state file when no fresh deploy was run.');
       }
       apiUrl = (await promptForText(prompter, {
         message: 'Deployed API base URL',
@@ -298,7 +396,7 @@ async function main() {
 
       if (!adminBearerToken) {
         if (!prompter) {
-          throw new ScriptError('Bootstrap requires an admin credential.');
+          throw new ScriptError('Bootstrap requires an admin credential from local setup state or environment.');
         }
         adminBearerToken = (await promptForText(prompter, {
           message: 'Admin bootstrap credential',
@@ -307,14 +405,21 @@ async function main() {
       }
 
       logStep('Bootstrapping projects and API keys');
-      const bootstrapOutput = await runBootstrap(
-        resolvedConfigPath,
-        createBootstrapEnv(config, apiUrl, adminBearerToken)
-      );
+      const bootstrapOutput = await runBootstrap(createBootstrapEnv(config, apiUrl, adminBearerToken));
       adminApiKey = findCreatedKey(bootstrapOutput, config.smoke.adminKeyName);
       privateReadKey = findCreatedKey(bootstrapOutput, config.smoke.privateReadKeyName);
       mutationKey = findCreatedKey(bootstrapOutput, config.smoke.mutationKeyName);
       logSuccess('Bootstrap completed');
+
+      localState = await persistLocalState(resolvedConfigPath, localState, {
+        ...createSetupLocalState({
+          apiUrl,
+          adminBearerToken,
+          adminApiKey,
+          privateReadKey,
+          mutationKey
+        })
+      });
     }
 
     if (actions.smokeNow) {
@@ -324,7 +429,7 @@ async function main() {
 
       if (!adminApiKey) {
         if (!prompter) {
-          throw new ScriptError('Smoke requires an admin API key or admin credential.');
+          throw new ScriptError('Smoke requires an admin API key or admin credential from local setup state or environment.');
         }
         adminApiKey = (await promptForText(prompter, {
           message: 'Admin API key for smoke',
@@ -333,7 +438,7 @@ async function main() {
       }
       if (!privateReadKey) {
         if (!prompter) {
-          throw new ScriptError('Smoke requires a private read key.');
+          throw new ScriptError('Smoke requires a private read key from local setup state or environment.');
         }
         privateReadKey = (await promptForText(prompter, {
           message: 'Private read API key for smoke'
@@ -341,7 +446,7 @@ async function main() {
       }
       if (!mutationKey) {
         if (!prompter) {
-          throw new ScriptError('Smoke requires a mutation API key.');
+          throw new ScriptError('Smoke requires a mutation API key from local setup state or environment.');
         }
         mutationKey = (await promptForText(prompter, {
           message: 'Mutation API key for smoke'
@@ -363,12 +468,16 @@ async function main() {
       configPath: resolvedConfigPath,
       apiUrl,
       adminUrl,
-      adminBearerToken,
-      adminUiUsername,
-      adminUiPassword,
-      adminApiKey,
-      privateReadKey,
-      mutationKey
+      ...summarizeSecrets({
+        showSecrets: options.showSecrets,
+        localStatePath,
+        adminBearerToken,
+        adminUiUsername,
+        adminUiPassword,
+        adminApiKey,
+        privateReadKey,
+        mutationKey
+      })
     });
   } finally {
     prompter?.close?.();
