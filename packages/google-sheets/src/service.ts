@@ -76,7 +76,7 @@ type HeaderLayoutEntry = {
   columnNumber: number;
 };
 
-type HeaderLayout = {
+export type GoogleSheetHeaderLayout = {
   headers: string[];
   entries: HeaderLayoutEntry[];
   idColumnNumber: number;
@@ -167,7 +167,7 @@ type ColumnValueSegment = {
 };
 
 function buildColumnValueSegments(
-  layout: HeaderLayout,
+  layout: GoogleSheetHeaderLayout,
   values: Partial<RowRecord>
 ): ColumnValueSegment[] {
   const segments: ColumnValueSegment[] = [];
@@ -248,7 +248,7 @@ function extractHeaderEntries(headerRow: readonly string[] | undefined): HeaderL
   return entries;
 }
 
-function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: string): HeaderLayout {
+function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: string): GoogleSheetHeaderLayout {
   const entries = extractHeaderEntries(headerRow);
 
   const idEntry = entries.find((entry) => entry.name === idColumn);
@@ -265,7 +265,7 @@ function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: s
   };
 }
 
-function buildRowEnvelope(config: GoogleSheetTableConfig, layout: HeaderLayout, rowNumber: number, cells: readonly string[]): RowEnvelope {
+function buildRowEnvelope(config: GoogleSheetTableConfig, layout: GoogleSheetHeaderLayout, rowNumber: number, cells: readonly string[]): RowEnvelope {
   const values: RowRecord = {};
 
   for (const entry of layout.entries) {
@@ -317,7 +317,7 @@ export class GoogleSheetsService {
     this.delay = config.delay ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
-  private async readHeaderLayout(config: GoogleSheetTableConfig): Promise<HeaderLayout> {
+  private async readHeaderLayout(config: GoogleSheetTableConfig): Promise<GoogleSheetHeaderLayout> {
     const values = await this.readValues(
       config.spreadsheetId,
       `${escapeSheetName(config.sheetTabName)}!${config.headerRow}:${config.headerRow}`
@@ -329,6 +329,10 @@ export class GoogleSheetsService {
   async readHeaders(config: GoogleSheetTableConfig): Promise<string[]> {
     const layout = await this.readHeaderLayout(config);
     return layout.headers;
+  }
+
+  async getHeaderLayout(config: GoogleSheetTableConfig): Promise<GoogleSheetHeaderLayout> {
+    return this.readHeaderLayout(config);
   }
 
   async readHeaderNames(spreadsheetId: string, sheetTabName: string, headerRow: number): Promise<string[]> {
@@ -389,10 +393,10 @@ export class GoogleSheetsService {
     config: GoogleSheetTableConfig,
     rowId: string,
     rowNumberHint?: number | null,
-    options?: { verifyUnique?: boolean }
+    options?: { verifyUnique?: boolean; layout?: GoogleSheetHeaderLayout }
   ): Promise<RowLookupResult | null> {
     const verifyUnique = options?.verifyUnique ?? true;
-    const layout = await this.readHeaderLayout(config);
+    const layout = options?.layout ?? await this.readHeaderLayout(config);
     let hintedRow: RowEnvelope | null = null;
     if (rowNumberHint) {
       hintedRow = await this.readSingleRow(config, rowNumberHint, layout).catch(() => null);
@@ -431,7 +435,7 @@ export class GoogleSheetsService {
 
   async readRowReferences(
     config: GoogleSheetTableConfig,
-    layout?: HeaderLayout
+    layout?: GoogleSheetHeaderLayout
   ): Promise<RowReference[]> {
     const resolvedLayout = layout ?? await this.readHeaderLayout(config);
     const idColumnLetter = columnNumberToA1(resolvedLayout.idColumnNumber);
@@ -454,7 +458,7 @@ export class GoogleSheetsService {
   async readSingleRow(
     config: GoogleSheetTableConfig,
     rowNumber: number,
-    layout?: HeaderLayout
+    layout?: GoogleSheetHeaderLayout
   ): Promise<RowEnvelope> {
     const [resolvedLayout, values] = await Promise.all([
       layout ? Promise.resolve(layout) : this.readHeaderLayout(config),
@@ -494,10 +498,14 @@ export class GoogleSheetsService {
     return parseUpdatedRangeRowNumber(body.updates?.updatedRange);
   }
 
-  async appendRowSkeleton(config: GoogleSheetTableConfig, rowId: string): Promise<number> {
-    const layout = await this.readHeaderLayout(config);
+  async appendRowSkeleton(
+    config: GoogleSheetTableConfig,
+    rowId: string,
+    layout?: GoogleSheetHeaderLayout
+  ): Promise<number> {
+    const resolvedLayout = layout ?? await this.readHeaderLayout(config);
     const accessToken = await this.getAccessToken();
-    const idColumnLetter = columnNumberToA1(layout.idColumnNumber);
+    const idColumnLetter = columnNumberToA1(resolvedLayout.idColumnNumber);
     const range = `${escapeSheetName(config.sheetTabName)}!${idColumnLetter}${config.dataStartRow}:${idColumnLetter}`;
     const response = await this.authorizedRequest(
       `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
@@ -549,10 +557,11 @@ export class GoogleSheetsService {
   async writeRowPatch(
     config: GoogleSheetTableConfig,
     rowNumber: number,
-    values: Partial<RowRecord>
+    values: Partial<RowRecord>,
+    layout?: GoogleSheetHeaderLayout
   ): Promise<void> {
-    const layout = await this.readHeaderLayout(config);
-    const segments = buildColumnValueSegments(layout, values);
+    const resolvedLayout = layout ?? await this.readHeaderLayout(config);
+    const segments = buildColumnValueSegments(resolvedLayout, values);
     if (segments.length === 0) {
       return;
     }

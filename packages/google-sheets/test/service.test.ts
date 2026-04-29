@@ -925,4 +925,78 @@ describe('GoogleSheetsService.writeRow', () => {
     expect(rowNumber).toBe(5);
     expect(requestedUrls.some((url) => url.includes("/values/'Users'!B2:B:append"))).toBe(true);
   });
+
+  it('reuses a previously resolved header layout across sparse mutation helpers', async () => {
+    const requestedUrls: string[] = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = decodeURIComponent(String(input));
+        requestedUrls.push(url);
+
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes("/values/'Users'!1:1")) {
+          return Response.json({
+            values: [['name', '_id', 'derived', 'status']]
+          });
+        }
+
+        if (url.includes("/values/'Users'!B2:B:append")) {
+          return Response.json({
+            updates: {
+              updatedRange: "'Users'!B5:B5"
+            }
+          });
+        }
+
+        if (url.includes("/values/'Users'!5:5")) {
+          return Response.json({
+            values: [['Ada', 'row-5', 'derived', 'active']]
+          });
+        }
+
+        if (url.includes('/values:batchUpdate')) {
+          return Response.json({});
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    const config = {
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      readOnlyFields: ['derived'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    } satisfies GoogleSheetTableConfig;
+
+    const layout = await service.getHeaderLayout(config);
+    const rowNumber = await service.appendRowSkeleton(config, 'row-5', layout);
+    await service.writeRowPatch(config, rowNumber, {
+      name: 'Ada',
+      status: 'active'
+    }, layout);
+    await service.readSingleRow(config, rowNumber, layout);
+
+    expect(requestedUrls.filter((url) => url.includes("/values/'Users'!1:1"))).toHaveLength(1);
+  });
 });

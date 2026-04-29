@@ -37,7 +37,11 @@ import {
   pickKnownColumns,
   validateFieldRules
 } from '@sheetflare/domain';
-import { GoogleSheetsService, type GoogleSheetTableConfig } from '@sheetflare/google-sheets';
+import {
+  GoogleSheetsService,
+  type GoogleSheetHeaderLayout,
+  type GoogleSheetTableConfig
+} from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from '../types';
 import { getMaxFullScanRows } from '../config';
 import { doRpc } from '../rpc';
@@ -499,9 +503,9 @@ export class TableDO {
     await this.ensureMutationValidationReady(config);
     const normalizedInput = normalizeRowValues(input);
     assertWritableFields(normalizedInput, config.readOnlyFields);
-    const headers = await this.getHeaders(config, {
-      bypassCache: true
-    });
+    const sheets = this.getSheetsClient(config);
+    const layout = await sheets.getHeaderLayout(config);
+    const headers = layout.headers;
     const hasProvidedId = Object.prototype.hasOwnProperty.call(normalizedInput, config.idColumn);
     const parsedManagedRowId = parseManagedRowId(normalizedInput[config.idColumn]);
     if (hasProvidedId && !parsedManagedRowId.ok) {
@@ -514,7 +518,7 @@ export class TableDO {
     }
 
     const rowId = parsedManagedRowId.ok ? parsedManagedRowId.rowId : generateRowId();
-    const existingRow = await this.resolveRowById(config, rowId);
+    const existingRow = await this.resolveRowById(config, rowId, { layout });
     if (existingRow) {
       throw new BadRequestError(`Row ${rowId} already exists.`, {
         rowId,
@@ -532,13 +536,12 @@ export class TableDO {
     normalizedCandidate[config.idColumn] = rowId;
     this.assertFieldRules(normalizedCandidate, config);
     this.assertUniqueFieldRules(normalizedCandidate, config);
-    const sheets = this.getSheetsClient(config);
-    const rowNumber = await sheets.appendRowSkeleton(config, rowId);
+    const rowNumber = await sheets.appendRowSkeleton(config, rowId, layout);
     const writableValues = Object.fromEntries(
       Object.entries(normalizedCandidate).filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
     ) as Partial<RowRecord>;
-    await sheets.writeRowPatch(config, rowNumber, writableValues);
-    const liveRow = await sheets.readSingleRow(config, rowNumber);
+    await sheets.writeRowPatch(config, rowNumber, writableValues, layout);
+    const liveRow = await sheets.readSingleRow(config, rowNumber, layout);
 
     this.upsertRowIndex(rowId, rowNumber);
     this.upsertCachedRow(liveRow);
@@ -559,13 +562,13 @@ export class TableDO {
     }
 
     await this.ensureMutationValidationReady(config);
-    const headers = await this.getHeaders(config, {
-      bypassCache: true
-    });
+    const sheets = this.getSheetsClient(config);
+    const layout = await sheets.getHeaderLayout(config);
+    const headers = layout.headers;
     const normalizedPatch = normalizePartialRowValues(patch);
     assertManagedIdFieldIsNotWritten(normalizedPatch, config.idColumn);
     assertWritableFields(normalizedPatch, config.readOnlyFields);
-    const existingRow = await this.resolveRowById(config, rowId);
+    const existingRow = await this.resolveRowById(config, rowId, { layout });
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
@@ -585,9 +588,8 @@ export class TableDO {
         .filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
         .map(([fieldName]) => [fieldName, normalizedCandidate[fieldName]])
     ) as Partial<RowRecord>;
-    const sheets = this.getSheetsClient(config);
-    await sheets.writeRowPatch(config, existingRow.rowNumber, writableValues);
-    const liveRow = await sheets.readSingleRow(config, existingRow.rowNumber);
+    await sheets.writeRowPatch(config, existingRow.rowNumber, writableValues, layout);
+    const liveRow = await sheets.readSingleRow(config, existingRow.rowNumber, layout);
     this.upsertRowIndex(rowId, existingRow.rowNumber);
     this.upsertCachedRow(liveRow);
     this.upsertCachedCells(config, liveRow);
@@ -608,18 +610,18 @@ export class TableDO {
 
     await this.ensurePointOperationReady(config);
     const cachedHeaders = this.getMeta('headers');
-    const headers = await this.getHeaders(config, {
-      bypassCache: true
-    });
-    const existingRow = await this.resolveRowById(config, rowId);
+    const sheets = this.getSheetsClient(config);
+    const layout = await sheets.getHeaderLayout(config);
+    const headers = layout.headers;
+    const existingRow = await this.resolveRowById(config, rowId, { layout });
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
 
-    await this.getSheetsClient(config).deleteRow(config, existingRow.rowNumber);
+    await sheets.deleteRow(config, existingRow.rowNumber);
     this.deleteRowIndex(rowId);
     this.deleteCachedRow(rowId);
-    await this.refreshCachedRowNumbersAfterDelete(config, headers, cachedHeaders);
+    await this.refreshCachedRowNumbersAfterDelete(config, layout, cachedHeaders);
     this.invalidateSchemaMeta();
     this.markCacheFreshAfterMutation(config, headers);
 
@@ -830,7 +832,7 @@ export class TableDO {
   private async resolveRowById(
     config: ResolvedTableConfig,
     rowId: string,
-    options?: { verifyUnique?: boolean }
+    options?: { verifyUnique?: boolean; layout?: GoogleSheetHeaderLayout }
   ): Promise<RowEnvelope | null> {
     const cached = this.getCachedRow(rowId);
     const rowNumberHint = cached?.rowNumber ?? this.lookupRowNumber(rowId);
@@ -856,15 +858,16 @@ export class TableDO {
 
   private async refreshCachedRowNumbersAfterDelete(
     config: ResolvedTableConfig,
-    headers: string[],
+    layout: GoogleSheetHeaderLayout,
     cachedHeaders: string | null
   ) {
+    const headers = layout.headers;
     if (cachedHeaders !== JSON.stringify(headers)) {
       await this.syncCache(config.projectSlug, config.tableSlug, { force: true });
       return;
     }
 
-    const references = await this.getSheetsClient(config).readRowReferences(config);
+    const references = await this.getSheetsClient(config).readRowReferences(config, layout);
     if (!this.canRepairDeleteFromRowReferences(references)) {
       await this.syncCache(config.projectSlug, config.tableSlug, { force: true });
       return;

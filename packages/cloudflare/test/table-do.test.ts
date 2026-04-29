@@ -1443,6 +1443,8 @@ describe('TableDO', () => {
       }
     );
 
+    sheet.requestedRanges = [];
+
     const response = await doRpc<TableDoResponse>(
       env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
       {
@@ -1474,6 +1476,7 @@ describe('TableDO', () => {
       ['_id', 'name'],
       ['42', 'Ada']
     ]);
+    expect(sheet.requestedRanges.filter((range) => range === "'Users'!1:1")).toHaveLength(1);
   });
 
   it('rejects create writes with unknown columns instead of silently dropping them', async () => {
@@ -1669,7 +1672,7 @@ describe('TableDO', () => {
       message: 'Write payload contains unknown columns.'
     });
 
-    expect(sheet.requestedRanges).toContain("'Users'!1:1");
+    expect(sheet.requestedRanges.filter((range) => range === "'Users'!1:1")).toHaveLength(1);
   });
 
   it('updates a cached row through the hinted row number without forcing a full-sheet resync', async () => {
@@ -1744,6 +1747,7 @@ describe('TableDO', () => {
       }
     });
     expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+    expect(sheet.requestedRanges.filter((range) => range === "'Users'!1:1")).toHaveLength(1);
     expect(sheet.requestedRanges).not.toContain("'Users'");
   });
 
@@ -1974,6 +1978,7 @@ describe('TableDO', () => {
     });
     expect(sheet.requestedRanges).not.toContain("'Users'");
     expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+    expect(sheet.requestedRanges.filter((range) => range === "'Users'!1:1")).toHaveLength(1);
 
     const listed = await doRpc<TableDoResponse>(
       env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
