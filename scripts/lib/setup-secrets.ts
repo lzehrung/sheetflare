@@ -90,11 +90,15 @@ export async function collectAdminSiteSecrets(options: {
     ...(defaultAdminUiUsername ? { defaultValue: defaultAdminUiUsername } : {}),
     validate: (value) => value.trim().length > 0 ? null : 'Admin UI username must not be blank.'
   });
+  const passwordPromptMessage = defaultAdminUiPassword
+    ? 'Admin UI site password (leave blank to keep current)'
+    : 'Admin UI site password (leave blank to generate)';
   const adminUiPasswordInput = await options.prompter.text({
-    message: 'Admin UI site password (leave blank to generate)',
-    ...(defaultAdminUiPassword ? { defaultValue: defaultAdminUiPassword } : {})
+    message: passwordPromptMessage
   });
-  const adminUiPassword = adminUiPasswordInput.trim().length > 0 ? adminUiPasswordInput : generateSecretToken(24);
+  const adminUiPassword = adminUiPasswordInput.trim().length > 0
+    ? adminUiPasswordInput
+    : defaultAdminUiPassword ?? generateSecretToken(24);
 
   return {
     adminUiUsername: adminUiUsername.trim(),

@@ -106,6 +106,42 @@ describe('setup secret command builders', () => {
     );
   });
 
+  it('does not prefill the existing admin UI password in interactive prompts and keeps it on blank input', async () => {
+    const prompts: Array<{ message: string; defaultValue?: string }> = [];
+    const responses = ['operator', ''];
+
+    const result = await collectAdminSiteSecrets({
+      prompter: {
+        async text(options) {
+          prompts.push({
+            message: options.message,
+            ...(options.defaultValue !== undefined ? { defaultValue: options.defaultValue } : {})
+          });
+          return responses.shift() ?? '';
+        },
+        async confirm() {
+          return true;
+        }
+      },
+      defaultAdminUiUsername: 'operator',
+      defaultAdminUiPassword: 'existing-secret'
+    });
+
+    expect(result).toEqual({
+      adminUiUsername: 'operator',
+      adminUiPassword: 'existing-secret'
+    });
+    expect(prompts).toEqual([
+      {
+        message: 'Admin UI site username',
+        defaultValue: 'operator'
+      },
+      {
+        message: 'Admin UI site password (leave blank to keep current)'
+      }
+    ]);
+  });
+
   it('narrows collected admin site secrets to non-null strings before apply steps', () => {
     expect(requireAdminSiteSecrets({
       adminUiUsername: 'operator',
