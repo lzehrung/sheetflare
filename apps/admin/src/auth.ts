@@ -26,8 +26,17 @@ export function readStoredAdminCredential(storage: StorageLike): string | null {
   return value ? normalizeAdminCredential(value) : null;
 }
 
+export function canPersistAdminCredential(credential: string | null) {
+  return Boolean(credential?.startsWith('sfk_'));
+}
+
 export function writeStoredAdminCredential(storage: StorageLike, credential: string | null) {
   if (!credential) {
+    storage.removeItem(adminCredentialStorageKey);
+    return;
+  }
+
+  if (!canPersistAdminCredential(credential)) {
     storage.removeItem(adminCredentialStorageKey);
     return;
   }

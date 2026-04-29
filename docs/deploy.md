@@ -116,14 +116,14 @@ npm run smoke
 Optional: persist a smoke report artifact:
 
 ```powershell
-$env:SHEETFLARE_SMOKE_REPORT_PATH = "reports/staging/smoke-$(Get-Date -Format yyyyMMdd-HHmmss).md"
+$env:SHEETFLARE_SMOKE_REPORT_PATH = "reports/smoke-$(Get-Date -Format yyyyMMdd-HHmmss).md"
 npm run smoke
 ```
 
 3. Run the load harness and persist its report:
 
 ```powershell
-$env:SHEETFLARE_LOAD_REPORT_PATH = "reports/staging/load-$(Get-Date -Format yyyyMMdd-HHmmss).md"
+$env:SHEETFLARE_LOAD_REPORT_PATH = "reports/load-$(Get-Date -Format yyyyMMdd-HHmmss).md"
 npm run load
 ```
 
@@ -192,8 +192,8 @@ Procedure:
 ## Durable Object Notes
 
 - `ControlPlaneDO`, `ProjectDO`, `TableDO`, and `RateLimitDO` use SQLite-backed storage.
-- Any migration that changes DO schema or behavior must be followed by a staging deploy and smoke pass.
-- Do not merge schema-affecting changes without confirming reindex still succeeds on staging tables.
+- Any migration that changes DO schema or behavior must be followed by a fresh deploy and smoke pass.
+- Do not merge schema-affecting changes without confirming reindex still succeeds on representative tables.
 
 ## Release Gate
 

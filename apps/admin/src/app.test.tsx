@@ -1037,4 +1037,36 @@ describe('App', () => {
     await screen.findByRole('combobox', { name: /Sheet Tab/ });
     expect(spreadsheetTabsCalls).toBe(1);
   });
+
+  it('stores scoped admin api keys but keeps bootstrap tokens session-only', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByLabelText('Remember this API key in this browser'));
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByText('Only scoped admin API keys are stored in this browser. Bootstrap tokens stay session-only.');
+    expect(storage.get('sheetflare.adminCredential')).toBeUndefined();
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'sfk_demo.secret' }
+    });
+    fireEvent.click(screen.getByLabelText('Remember this API key in this browser'));
+    fireEvent.click(screen.getByText('Save and load'));
+
+    expect(storage.get('sheetflare.adminCredential')).toBe('sfk_demo.secret');
+  });
 });
