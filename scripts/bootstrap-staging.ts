@@ -87,13 +87,16 @@ async function main() {
     logSuccess(`Key created: ${createdKey.record.id}`);
   }
 
-  console.log(JSON.stringify({
+  const output = {
     projects: config.projects.map((project) => ({
       slug: project.slug,
       tables: (project.tables ?? []).map((table) => table.tableSlug)
     })),
     apiKeys: createdKeys
-  }, null, 2));
+  };
+
+  console.log(JSON.stringify(output, null, 2));
+  console.log(`__SHEETFLARE_BOOTSTRAP_RESULT__=${JSON.stringify(output)}`);
 }
 
 void main().catch((error: unknown) => {

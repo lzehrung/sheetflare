@@ -1,0 +1,113 @@
+import { describe, expect, it } from 'vitest';
+import { createBootstrapConfigFromSetup, findCreatedKey, parseBootstrapOutput } from './setup-bootstrap';
+import type { SetupConfig } from './setup-config';
+
+const baseConfig: SetupConfig = {
+  profile: 'local',
+  deploy: {
+    api: true,
+    admin: true
+  },
+  privateProject: {
+    slug: 'demo',
+    name: 'Demo',
+    spreadsheetId: 'sheet-1',
+    googleCredentialRef: 'default',
+    tables: [
+      {
+        tableSlug: 'users',
+        sheetTabName: 'Users',
+        idColumn: '_id',
+        indexedFields: ['email']
+      }
+    ]
+  },
+  publicReadProject: null,
+  smoke: {
+    enabled: true,
+    privateTableSlug: 'users',
+    publicTableSlug: null,
+    adminKeyName: 'demo-admin',
+    privateReadKeyName: 'demo-read',
+    mutationKeyName: 'demo-mutation',
+    createValues: {
+      name: 'Smoke'
+    },
+    updateValues: {
+      name: 'Smoke Updated'
+    }
+  }
+};
+
+describe('createBootstrapConfigFromSetup', () => {
+  it('creates private and smoke key bootstrap inputs', () => {
+    expect(createBootstrapConfigFromSetup(baseConfig)).toEqual({
+      projects: [
+        {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'default',
+          defaultAuthMode: 'private',
+          tables: [
+            {
+              tableSlug: 'users',
+              sheetTabName: 'Users',
+              idColumn: '_id',
+              indexedFields: ['email']
+            }
+          ]
+        }
+      ],
+      apiKeys: [
+        {
+          name: 'demo-admin',
+          scopes: ['admin:projects', 'admin:keys', 'table:read', 'table:create', 'table:update', 'table:delete']
+        },
+        {
+          name: 'demo-read',
+          projectSlug: 'demo',
+          scopes: ['table:read']
+        },
+        {
+          name: 'demo-mutation',
+          projectSlug: 'demo',
+          scopes: ['table:read', 'table:create', 'table:update', 'table:delete']
+        }
+      ]
+    });
+  });
+
+  it('includes an optional public-read project when configured', () => {
+    expect(createBootstrapConfigFromSetup({
+      ...baseConfig,
+      publicReadProject: {
+        slug: 'demo-public',
+        name: 'Demo Public',
+        spreadsheetId: 'sheet-1',
+        googleCredentialRef: 'default',
+        tables: [
+          {
+            tableSlug: 'users',
+            sheetTabName: 'Users'
+          }
+        ]
+      },
+      smoke: {
+        ...baseConfig.smoke,
+        publicTableSlug: 'users'
+      }
+    }).projects[1]).toMatchObject({
+      slug: 'demo-public',
+      defaultAuthMode: 'public-read'
+    });
+  });
+});
+
+describe('bootstrap output parsing', () => {
+  it('parses the bootstrap marker line and finds created keys', () => {
+    const output = parseBootstrapOutput(`noise\n__SHEETFLARE_BOOTSTRAP_RESULT__={"projects":[],"apiKeys":[{"apiKey":"sfk_value.secret","record":{"id":"key-1","name":"demo-read","projectSlug":"demo","scopes":["table:read"]}}]}\n`);
+
+    expect(findCreatedKey(output, 'demo-read')).toBe('sfk_value.secret');
+  });
+});
