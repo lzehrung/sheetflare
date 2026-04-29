@@ -3,6 +3,7 @@
 ![Sheetflare](./docs/assets/sheetflare.jpg)
 
 Sheetflare is a Cloudflare-first starter for exposing Google Sheets tabs through a small Hono API backed by Durable Objects.
+It is aimed at controlled self-hosted deployments and is not yet production-proven for broad external workloads.
 
 Production hardening guidance lives in [production-readiness-checklist.md](./production-readiness-checklist.md).
 Start with [docs/quickstart.md](./docs/quickstart.md).
@@ -74,6 +75,7 @@ When the API worker is running:
 - `GET /docs` serves the interactive API reference UI.
 
 The docs reflect the actual HTTP surface, including auth requirements, path params, query params, and request/response bodies for the supported endpoints.
+Admin project and table POST routes create by default. Replacing an existing config requires an explicit `?upsert=true`.
 
 ## Auth Model
 

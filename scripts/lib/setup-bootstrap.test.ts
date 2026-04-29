@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createBootstrapConfigFromSetup, findCreatedKey, parseBootstrapOutput } from './setup-bootstrap';
+import { createBootstrapConfigFromSetup, createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './setup-bootstrap';
 import type { SetupConfig } from './setup-config';
 
 const baseConfig: SetupConfig = {
@@ -119,5 +119,11 @@ describe('bootstrap output parsing', () => {
     const output = parseBootstrapOutput(`noise\n__SHEETFLARE_BOOTSTRAP_RESULT__={"projects":[],"apiKeys":[{"apiKey":"sfk_value.secret","record":{"id":"key-1","name":"demo-read","projectSlug":"demo","scopes":["table:read"]}}]}\n`);
 
     expect(findCreatedKey(output, 'demo-read')).toBe('sfk_value.secret');
+  });
+
+  it('adds the full-result mode flag for setup-driven bootstrap runs', () => {
+    expect(createBootstrapEnv(baseConfig, 'https://example.com', 'sfk_admin.secret')).toMatchObject({
+      SHEETFLARE_BOOTSTRAP_RESULT_MODE: 'full'
+    });
   });
 });

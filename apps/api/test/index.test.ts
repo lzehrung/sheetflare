@@ -180,8 +180,18 @@ function createEnv(options?: {
   });
 
   const project = new FakeDurableObjectNamespace(() => async (request) => {
-    const body = (await request.json()) as { type: string; tab?: string; headerRow?: number };
+    const body = (await request.json()) as {
+      type: string;
+      tab?: string;
+      headerRow?: number;
+      allowExisting?: boolean;
+      input?: {
+        slug?: string;
+        tableSlug?: string;
+      };
+    };
     projectRequests.push(body.type);
+    const requestUrl = new URL(request.url);
     const table = {
       projectSlug: 'demo',
       tableSlug: 'users',
@@ -198,6 +208,36 @@ function createEnv(options?: {
       createdAt: '2026-04-26T00:00:00.000Z',
       updatedAt: '2026-04-26T00:00:00.000Z'
     };
+
+    if (body.type === 'project.create') {
+      if (body.input?.slug === 'demo' && body.allowExisting !== true && requestUrl.searchParams.get('upsert') !== 'true') {
+        return Response.json({
+          error: {
+            code: 'CONFLICT',
+            message: 'Project demo already exists.',
+            details: {
+              projectSlug: 'demo'
+            }
+          }
+        }, { status: 409 });
+      }
+
+      return Response.json({
+        type: 'project.create.result',
+        result: {
+          project: {
+            slug: body.input?.slug ?? 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z',
+            defaultAuthMode: options?.defaultAuthMode ?? 'private'
+          },
+          tables: [table]
+        }
+      });
+    }
 
     if (body.type === 'project.get') {
       return Response.json({
@@ -302,10 +342,32 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'project.table.create') {
+      if (body.input?.tableSlug === 'users' && body.allowExisting !== true && requestUrl.searchParams.get('upsert') !== 'true') {
+        return Response.json({
+          error: {
+            code: 'CONFLICT',
+            message: 'Table demo/users already exists.',
+            details: {
+              projectSlug: 'demo',
+              tableSlug: 'users'
+            }
+          }
+        }, { status: 409 });
+      }
+
+      return Response.json({
+        type: 'project.table.create.result',
+        result: {
+          data: table
+        }
+      });
+    }
+
     return Response.json({
-      type: 'project.table.create.result',
+      type: 'project.table.list.result',
       result: {
-        data: table
+        data: [table]
       }
     });
   });
@@ -486,6 +548,50 @@ describe('api routes', () => {
         }
       ]
     });
+  });
+
+  it('rejects duplicate project creation unless upsert is requested explicitly', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(409);
+  });
+
+  it('allows explicit project upserts for idempotent automation', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects?upsert=true',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(201);
   });
 
   it('reports internal readiness separately from liveness', async () => {
@@ -983,6 +1089,26 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(401);
+    expect(env.__rateLimitRequests).toEqual([
+      { name: 'rate-limit:admin:client:anonymous', key: 'admin.projects.list' }
+    ]);
+  });
+
+  it('ignores x-forwarded-for when deriving the anonymous rate-limit principal', async () => {
+    const app = createApp();
+    const env = createEnv({ rateLimitAllowed: false }) as Env & { __rateLimitRequests: Array<{ name: string; key: string }> };
+
+    const response = await app.request(
+      '/v1/admin/projects',
+      {
+        headers: {
+          'x-forwarded-for': '203.0.113.10'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(429);
     expect(env.__rateLimitRequests).toEqual([
       { name: 'rate-limit:admin:client:anonymous', key: 'admin.projects.list' }
     ]);

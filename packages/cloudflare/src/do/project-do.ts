@@ -3,6 +3,7 @@ import {
   type AdminListSpreadsheetTabsResult,
   type AdminGetProjectResult,
   BadRequestError,
+  ConflictError,
   type ControlPlaneDoResponse,
   type CreateProjectInput,
   type CreateTableInput,
@@ -153,7 +154,7 @@ export class ProjectDO {
       case 'project.create':
         return {
           type: 'project.create.result',
-          result: await this.createProject(body.input)
+          result: await this.createProject(body.input, body.allowExisting ?? false)
         };
       case 'project.get':
         return {
@@ -171,7 +172,7 @@ export class ProjectDO {
         return {
           type: 'project.table.create.result',
           result: {
-            data: await this.createTable(body.projectSlug, body.input)
+            data: await this.createTable(body.projectSlug, body.input, body.allowExisting ?? false)
           }
         };
       case 'project.table.list':
@@ -208,11 +209,20 @@ export class ProjectDO {
     }
   }
 
-  private async createProject(input: CreateProjectInput): Promise<AdminGetProjectResult> {
+  private async createProject(input: CreateProjectInput, allowExisting: boolean): Promise<AdminGetProjectResult> {
     const now = new Date().toISOString();
     const googleCredentialRef = normalizeOptionalFieldName(input.googleCredentialRef) ?? defaultGoogleCredentialRef;
 
     resolveGoogleCredential(this.env, googleCredentialRef);
+
+    if (!allowExisting) {
+      const existing = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, input.slug);
+      if (existing) {
+        throw new ConflictError(`Project ${input.slug} already exists.`, {
+          projectSlug: input.slug
+        });
+      }
+    }
 
     this.ctx.storage.sql.exec(
       `
@@ -256,7 +266,7 @@ export class ProjectDO {
     };
   }
 
-  private async createTable(projectSlug: string, input: CreateTableInput): Promise<TableConfig> {
+  private async createTable(projectSlug: string, input: CreateTableInput, allowExisting: boolean): Promise<TableConfig> {
     const project = this.mapProject(this.requireProjectRow(projectSlug));
     const now = new Date().toISOString();
     const idColumn = normalizeOptionalFieldName(input.idColumn) ?? '_id';
@@ -273,6 +283,19 @@ export class ProjectDO {
       indexedFields,
       fieldRules
     });
+    if (!allowExisting) {
+      const existing = this.selectOptionalRow<TableRow>(
+        `SELECT * FROM tables WHERE project_slug = ? AND table_slug = ?`,
+        projectSlug,
+        input.tableSlug
+      );
+      if (existing) {
+        throw new ConflictError(`Table ${projectSlug}/${input.tableSlug} already exists.`, {
+          projectSlug,
+          tableSlug: input.tableSlug
+        });
+      }
+    }
     await this.validateTableConfigAgainstSpreadsheet(project, {
       sheetTabName: input.sheetTabName,
       idColumn,

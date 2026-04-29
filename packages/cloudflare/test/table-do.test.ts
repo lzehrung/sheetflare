@@ -249,6 +249,73 @@ describe('TableDO', () => {
     expect((response as { type: 'project.create.result'; result: { project: { googleCredentialRef: string } } }).result.project.googleCredentialRef).toBe('default');
   });
 
+  it('rejects duplicate project creation unless allowExisting is set', async () => {
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await expect(
+      doRpc<ProjectDoResponse>(
+        env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+        {
+          type: 'project.create',
+          input: {
+            slug: 'demo',
+            name: 'Demo Updated',
+            spreadsheetId: 'sheet-2'
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'ConflictError',
+      message: 'Project demo already exists.'
+    });
+  });
+
+  it('allows explicit project upserts when allowExisting is set', async () => {
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    const response = await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        allowExisting: true,
+        input: {
+          slug: 'demo',
+          name: 'Demo Updated',
+          spreadsheetId: 'sheet-2'
+        }
+      }
+    );
+
+    expect((response as { type: 'project.create.result'; result: { project: { name: string; spreadsheetId: string } } }).result.project).toMatchObject({
+      name: 'Demo Updated',
+      spreadsheetId: 'sheet-2'
+    });
+  });
+
   it('rejects project creation when a named credential ref is missing', async () => {
     const env = createTestEnv();
 
@@ -310,6 +377,52 @@ describe('TableDO', () => {
     ).rejects.toMatchObject({
       name: 'BadRequestError',
       message: 'Indexed field missing is not present in the detected sheet headers.'
+    });
+  });
+
+  it('rejects duplicate table creation unless allowExisting is set', async () => {
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        allowExisting: true,
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await expect(
+      doRpc<ProjectDoResponse>(
+        env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+        {
+          type: 'project.table.create',
+          projectSlug: 'demo',
+          input: {
+            tableSlug: 'users',
+            sheetTabName: 'Users'
+          }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'ConflictError',
+      message: 'Table demo/users already exists.'
     });
   });
 
@@ -608,6 +721,7 @@ describe('TableDO', () => {
       env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
       {
         type: 'project.table.create',
+        allowExisting: true,
         projectSlug: 'demo',
         input: {
           tableSlug: 'users',
@@ -692,6 +806,7 @@ describe('TableDO', () => {
       env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
       {
         type: 'project.table.create',
+        allowExisting: true,
         projectSlug: 'demo',
         input: {
           tableSlug: 'users',
@@ -748,6 +863,7 @@ describe('TableDO', () => {
       env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
       {
         type: 'project.table.create',
+        allowExisting: true,
         projectSlug: 'demo',
         input: {
           tableSlug: 'users',
@@ -831,6 +947,7 @@ describe('TableDO', () => {
       env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
       {
         type: 'project.table.create',
+        allowExisting: true,
         projectSlug: 'demo',
         input: {
           tableSlug: 'users',
@@ -905,6 +1022,7 @@ describe('TableDO', () => {
       env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
       {
         type: 'project.table.create',
+        allowExisting: true,
         projectSlug: 'demo',
         input: {
           tableSlug: 'users',
@@ -1939,6 +2057,7 @@ describe('TableDO', () => {
       env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
       {
         type: 'project.table.create',
+        allowExisting: true,
         projectSlug: 'demo',
         input: {
           tableSlug: 'users',
@@ -2040,6 +2159,7 @@ describe('TableDO', () => {
       env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
       {
         type: 'project.table.create',
+        allowExisting: true,
         projectSlug: 'demo',
         input: {
           tableSlug: 'users',
