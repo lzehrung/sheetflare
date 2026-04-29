@@ -289,6 +289,8 @@ Healthy output should show:
 - `staleReason: "fresh"` after healthy activity or reindex
 - `lastSyncError: null`
 
+`lastSyncStartedAt` and `lastSyncCompletedAt` refer to the last full rebuild from Google Sheets, not the most recent successful point mutation.
+
 ## 10. Useful operator commands
 
 Create admin key:

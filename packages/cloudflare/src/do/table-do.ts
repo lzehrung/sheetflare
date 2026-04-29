@@ -1118,14 +1118,14 @@ export class TableDO {
   }
 
   private markCacheFreshAfterMutation(config: ResolvedTableConfig, headers: string[]) {
-    const now = new Date().toISOString();
+    const syncMeta = this.getSyncMeta();
     this.setMeta('headers', JSON.stringify(headers));
     this.setMeta('config.signature', buildCacheConfigSignature(config));
     this.setSyncMeta({
       status: 'ready',
       rowCount: this.countCachedRows(),
-      lastSyncStartedAt: now,
-      lastSyncCompletedAt: now,
+      lastSyncStartedAt: syncMeta.lastSyncStartedAt,
+      lastSyncCompletedAt: syncMeta.lastSyncCompletedAt,
       lastSyncError: null
     });
   }

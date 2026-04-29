@@ -162,6 +162,8 @@ Important fields:
 - `lastSyncCompletedAt`
 - `lastSyncError`
 
+`lastSyncStartedAt` and `lastSyncCompletedAt` describe the last full cache rebuild from Google Sheets. Successful point mutations update the cache in place but do not rewrite those sync timestamps.
+
 Interpretation:
 
 - `fresh`: cache is usable and within TTL/config

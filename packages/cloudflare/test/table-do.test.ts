@@ -2736,6 +2736,111 @@ describe('TableDO', () => {
     expect(sheet.requestedRanges).toEqual([]);
   });
 
+  it('preserves last full sync timestamps after a successful mutation updates the cache', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-26T12:00:00.000Z'));
+
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['status'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {}
+      }
+    );
+
+    const cacheStatusBeforeMutation = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    vi.setSystemTime(new Date('2026-04-26T12:10:00.000Z'));
+
+    await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.update',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-1',
+        input: {
+          values: {
+            status: 'active'
+          }
+        }
+      }
+    );
+
+    const cacheStatusAfterMutation = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.cache.get',
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      }
+    );
+
+    expect((cacheStatusBeforeMutation as {
+      type: 'table.cache.get.result';
+      result: { data: { lastSyncStartedAt: string | null; lastSyncCompletedAt: string | null } };
+    }).result.data).toMatchObject({
+      lastSyncStartedAt: '2026-04-26T12:00:00.000Z',
+      lastSyncCompletedAt: '2026-04-26T12:00:00.000Z'
+    });
+    expect((cacheStatusAfterMutation as {
+      type: 'table.cache.get.result';
+      result: { data: { lastSyncStartedAt: string | null; lastSyncCompletedAt: string | null; stale: boolean; rowCount: number } };
+    }).result.data).toMatchObject({
+      lastSyncStartedAt: '2026-04-26T12:00:00.000Z',
+      lastSyncCompletedAt: '2026-04-26T12:00:00.000Z',
+      stale: false,
+      rowCount: 1
+    });
+
+    vi.useRealTimers();
+  });
+
   it('builds schema metadata from the full cached dataset instead of a 100-row sample', async () => {
     const rows = Array.from({ length: 101 }, (_, index) =>
       index === 100
