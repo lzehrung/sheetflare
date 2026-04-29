@@ -77,7 +77,7 @@ Setup writes a checked non-secret config file at repo root:
 sheetflare.setup.json
 ```
 
-Setup also writes `.sheetflare.setup.local.json` beside it. That local state file stores deployment URLs and generated credentials so reruns can stay noninteractive. It is secret material, it is gitignored, and it should stay on the operator machine only.
+When setup applies secrets, deploys, or bootstraps, it creates or updates `.sheetflare.setup.local.json` beside the checked config. That local state file stores deployment URLs and generated credentials so reruns can stay noninteractive. A config-only run may not create it. It is secret material, it is gitignored, and it should stay on the operator machine only.
 
 The generated config is reusable. Common reruns:
 
