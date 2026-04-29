@@ -1,5 +1,6 @@
-import { readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { readFile, rm, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 import { getCommandName, runCommand } from './process';
 import { ScriptError } from './runtime';
 
@@ -16,19 +17,26 @@ function parseJsonConfig(text: string, path: string) {
   }
 }
 
-async function withPatchedJsonFile<T>(
+function createTempConfigPath(path: string) {
+  const directory = dirname(path);
+  const filename = basename(path, '.jsonc');
+  return join(directory, `${filename}.setup-${randomUUID()}.jsonc`);
+}
+
+export async function withPatchedJsonConfig<T>(
   path: string,
   patcher: (value: JsonObject) => JsonObject,
-  action: () => Promise<T>
+  action: (tempConfigPath: string) => Promise<T>
 ) {
   const originalText = await readFile(path, 'utf8');
   const originalValue = parseJsonConfig(originalText, path);
+  const tempConfigPath = createTempConfigPath(path);
   const patchedText = `${JSON.stringify(patcher(originalValue), null, 2)}\n`;
-  await writeFile(path, patchedText, 'utf8');
+  await writeFile(tempConfigPath, patchedText, 'utf8');
   try {
-    return await action();
+    return await action(tempConfigPath);
   } finally {
-    await writeFile(path, originalText, 'utf8');
+    await rm(tempConfigPath, { force: true });
   }
 }
 
@@ -70,8 +78,8 @@ function patchAdminConfig(config: JsonObject, apiBaseUrl: string) {
   return next;
 }
 
-export function buildApiDeployCommand() {
-  return ['wrangler@4.85.0', 'deploy', '--config', 'wrangler.jsonc'];
+export function buildApiDeployCommand(configPath: string) {
+  return ['wrangler@4.85.0', 'deploy', '--config', configPath];
 }
 
 export function buildAdminDeployCommand(projectName: string) {
@@ -79,13 +87,13 @@ export function buildAdminDeployCommand(projectName: string) {
 }
 
 export async function deployApiWorker(googleClientEmail: string) {
-  return withPatchedJsonFile(
+  return withPatchedJsonConfig(
     apiWranglerConfigPath,
     (config) => patchApiConfig(config, googleClientEmail),
-    async () => {
+    async (tempConfigPath) => {
       const result = await runCommand(
         getCommandName('npx'),
-        buildApiDeployCommand(),
+        buildApiDeployCommand(tempConfigPath),
         {
           cwd: resolve('apps/api')
         }
@@ -104,10 +112,10 @@ export async function deployApiWorker(googleClientEmail: string) {
 
 export async function deployAdminPages(apiBaseUrl: string) {
   const projectName = getAdminPagesProjectName();
-  return withPatchedJsonFile(
+  return withPatchedJsonConfig(
     adminWranglerConfigPath,
     (config) => patchAdminConfig(config, apiBaseUrl),
-    async () => {
+    async (tempConfigPath) => {
       const buildResult = await runCommand(
         getCommandName('npm'),
         ['run', 'build'],
@@ -121,7 +129,7 @@ export async function deployAdminPages(apiBaseUrl: string) {
 
       const result = await runCommand(
         getCommandName('npx'),
-        buildAdminDeployCommand(projectName),
+        [...buildAdminDeployCommand(projectName), '--config', tempConfigPath],
         {
           cwd: resolve('apps/admin')
         }
