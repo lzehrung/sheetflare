@@ -228,6 +228,80 @@ describe('parseSetupConfig', () => {
       }
     })).toThrow('smoke.publicTableSlug must be set when publicReadProject is configured.');
   });
+
+  it('rejects smoke writes to the managed id column', () => {
+    expect(() => parseSetupConfig({
+      profile: 'local',
+      deploy: {
+        api: true,
+        admin: true
+      },
+      privateProject: {
+        slug: 'demo',
+        name: 'Demo',
+        spreadsheetId: 'sheet-1',
+        tables: [
+          {
+            tableSlug: 'users',
+            sheetTabName: 'Users',
+            idColumn: '_id'
+          }
+        ]
+      },
+      publicReadProject: null,
+      smoke: {
+        enabled: true,
+        privateTableSlug: 'users',
+        publicTableSlug: null,
+        adminKeyName: 'demo-admin',
+        privateReadKeyName: 'demo-read',
+        mutationKeyName: 'demo-mutation',
+        createValues: {
+          _id: 'smoke-id'
+        },
+        updateValues: {
+          name: 'Smoke'
+        }
+      }
+    })).toThrow('smoke.createValues must not write the managed ID column _id.');
+  });
+
+  it('rejects smoke writes to read-only fields', () => {
+    expect(() => parseSetupConfig({
+      profile: 'local',
+      deploy: {
+        api: true,
+        admin: true
+      },
+      privateProject: {
+        slug: 'demo',
+        name: 'Demo',
+        spreadsheetId: 'sheet-1',
+        tables: [
+          {
+            tableSlug: 'users',
+            sheetTabName: 'Users',
+            readOnlyFields: ['derived']
+          }
+        ]
+      },
+      publicReadProject: null,
+      smoke: {
+        enabled: true,
+        privateTableSlug: 'users',
+        publicTableSlug: null,
+        adminKeyName: 'demo-admin',
+        privateReadKeyName: 'demo-read',
+        mutationKeyName: 'demo-mutation',
+        createValues: {
+          name: 'Smoke'
+        },
+        updateValues: {
+          derived: 'should-fail'
+        }
+      }
+    })).toThrow('smoke.updateValues must not write read-only field derived.');
+  });
 });
 
 describe('spreadsheet id normalization', () => {

@@ -11,10 +11,10 @@ import {
   createSetupLocalState,
   getSetupLocalStatePath,
   readSetupLocalState,
-  redactSetupLocalState,
   type SetupLocalState,
   writeSetupLocalState
 } from './lib/setup-state';
+import { resolveSetupRuntimeState, summarizeSetupSecrets } from './lib/setup-runtime';
 import { getCommandName, runCommand } from './lib/process';
 import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
 
@@ -116,16 +116,6 @@ function renderPrereqSummary(results: Awaited<ReturnType<typeof checkSetupPrereq
   }
 }
 
-function resolveValue(...values: Array<string | null | undefined>) {
-  for (const value of values) {
-    if (value && value.trim().length > 0) {
-      return value;
-    }
-  }
-
-  return null;
-}
-
 async function promptForText(prompter: SetupPrompter, options: {
   message: string;
   envName?: string;
@@ -180,41 +170,6 @@ async function persistLocalState(configPath: string, currentState: SetupLocalSta
   };
   await writeSetupLocalState(configPath, nextState);
   return nextState;
-}
-
-function summarizeSecrets(options: {
-  showSecrets: boolean;
-  localStatePath: string;
-  adminBearerToken: string | null;
-  adminUiUsername: string | null;
-  adminUiPassword: string | null;
-  adminApiKey: string | null;
-  privateReadKey: string | null;
-  mutationKey: string | null;
-}) {
-  if (options.showSecrets) {
-    return {
-      adminBearerToken: options.adminBearerToken,
-      adminUiUsername: options.adminUiUsername,
-      adminUiPassword: options.adminUiPassword,
-      adminApiKey: options.adminApiKey,
-      privateReadKey: options.privateReadKey,
-      mutationKey: options.mutationKey,
-      localStatePath: options.localStatePath
-    };
-  }
-
-  return {
-    ...redactSetupLocalState(createSetupLocalState({
-      adminBearerToken: options.adminBearerToken,
-      adminUiUsername: options.adminUiUsername,
-      adminUiPassword: options.adminUiPassword,
-      adminApiKey: options.adminApiKey,
-      privateReadKey: options.privateReadKey,
-      mutationKey: options.mutationKey
-    })),
-    localStatePath: options.localStatePath
-  };
 }
 
 async function main() {
@@ -289,18 +244,15 @@ async function main() {
       throw new ScriptError('Wrangler authentication is required before applying secrets or deploying. Run npx wrangler login and rerun setup.');
     }
 
-    let apiUrl: string | null = resolveValue(localState?.apiUrl, getEnv('SHEETFLARE_BASE_URL'));
-    let adminUrl: string | null = resolveValue(localState?.adminUrl);
-    let adminBearerToken: string | null = resolveValue(
-      localState?.adminBearerToken,
-      getEnv('SHEETFLARE_ADMIN_CREDENTIAL'),
-      getEnv('ADMIN_BEARER_TOKEN')
-    );
-    let adminUiUsername: string | null = resolveValue(localState?.adminUiUsername, getEnv('ADMIN_UI_USERNAME'));
-    let adminUiPassword: string | null = resolveValue(localState?.adminUiPassword, getEnv('ADMIN_UI_PASSWORD'));
-    let adminApiKey: string | null = resolveValue(localState?.adminApiKey, getEnv('SHEETFLARE_ADMIN_CREDENTIAL'));
-    let privateReadKey: string | null = resolveValue(localState?.privateReadKey, getEnv('SHEETFLARE_PRIVATE_READ_KEY'));
-    let mutationKey: string | null = resolveValue(localState?.mutationKey, getEnv('SHEETFLARE_MUTATION_KEY'));
+    const resolvedRuntimeState = resolveSetupRuntimeState(localState);
+    let apiUrl: string | null = resolvedRuntimeState.apiUrl;
+    let adminUrl: string | null = resolvedRuntimeState.adminUrl;
+    let adminBearerToken: string | null = resolvedRuntimeState.adminBearerToken;
+    let adminUiUsername: string | null = resolvedRuntimeState.adminUiUsername;
+    let adminUiPassword: string | null = resolvedRuntimeState.adminUiPassword;
+    let adminApiKey: string | null = resolvedRuntimeState.adminApiKey;
+    let privateReadKey: string | null = resolvedRuntimeState.privateReadKey;
+    let mutationKey: string | null = resolvedRuntimeState.mutationKey;
 
     let setupSecrets: Awaited<ReturnType<typeof collectSetupSecrets>> | null = null;
     if (actions.applySecretsNow) {
@@ -336,11 +288,9 @@ async function main() {
     }
 
     if (actions.deployNow) {
-      const googleClientEmail = resolveValue(
-        setupSecrets?.googleClientEmail,
-        localState?.googleClientEmail,
-        getEnv('GOOGLE_CLIENT_EMAIL')
-      );
+      const googleClientEmail = setupSecrets?.googleClientEmail
+        ?? localState?.googleClientEmail
+        ?? resolvedRuntimeState.googleClientEmail;
       if (!googleClientEmail) {
         throw new ScriptError('Deploy requires GOOGLE_CLIENT_EMAIL from setup secrets, local setup state, or the environment.');
       }
@@ -468,7 +418,7 @@ async function main() {
       configPath: resolvedConfigPath,
       apiUrl,
       adminUrl,
-      ...summarizeSecrets({
+      ...summarizeSetupSecrets({
         showSecrets: options.showSecrets,
         localStatePath,
         adminBearerToken,

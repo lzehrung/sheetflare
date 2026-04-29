@@ -133,6 +133,34 @@ function assertTableSlugExists(project: SetupProjectSection, tableSlug: string, 
   }
 }
 
+function findTable(project: SetupProjectSection, tableSlug: string) {
+  const table = project.tables.find((entry) => entry.tableSlug === tableSlug);
+  if (!table) {
+    throw new ScriptError(`Configured table ${tableSlug} was not found in ${project.slug}.`);
+  }
+
+  return table;
+}
+
+function assertSmokeKeysAreWritable(
+  project: SetupProjectSection,
+  tableSlug: string,
+  values: Record<string, unknown>,
+  path: string
+) {
+  const table = findTable(project, tableSlug);
+  const idColumn = table.idColumn ?? '_id';
+  if (Object.prototype.hasOwnProperty.call(values, idColumn)) {
+    throw new ScriptError(`${path} must not write the managed ID column ${idColumn}.`);
+  }
+
+  for (const fieldName of table.readOnlyFields ?? []) {
+    if (Object.prototype.hasOwnProperty.call(values, fieldName)) {
+      throw new ScriptError(`${path} must not write read-only field ${fieldName}.`);
+    }
+  }
+}
+
 export function parseSpreadsheetId(input: string) {
   const trimmed = input.trim();
   if (trimmed.length === 0) {
@@ -243,6 +271,8 @@ export function parseSetupConfig(input: unknown): SetupConfig {
 
   assertKeyNamesAreDistinct(smoke);
   assertTableSlugExists(privateProject, smoke.privateTableSlug, 'smoke.privateTableSlug');
+  assertSmokeKeysAreWritable(privateProject, smoke.privateTableSlug, smoke.createValues, 'smoke.createValues');
+  assertSmokeKeysAreWritable(privateProject, smoke.privateTableSlug, smoke.updateValues, 'smoke.updateValues');
 
   if (smoke.publicTableSlug && !publicReadProject) {
     throw new ScriptError('smoke.publicTableSlug requires publicReadProject to be configured.');
