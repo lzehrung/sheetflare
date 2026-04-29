@@ -4,9 +4,9 @@ import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig } from
 import { actionsRequireWranglerAuth, parseSetupArgs, resolveSetupActions } from './lib/setup-cli';
 import { createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, type SetupPrereqResult } from './lib/setup-prereqs';
-import { createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './lib/setup-bootstrap';
+import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './lib/setup-bootstrap';
 import { deployAdminPages, deployApiWorker, getApiWranglerConfigPath, getAdminPagesProjectName } from './lib/setup-deploy';
-import { applyAdminSecrets, applyApiSecrets, collectAdminSiteSecrets, collectSetupSecrets } from './lib/setup-secrets';
+import { applyAdminSecrets, applyApiSecrets, collectAdminSiteSecrets, collectSetupSecrets, requireAdminSiteSecrets } from './lib/setup-secrets';
 import { createSmokeEnv } from './lib/setup-smoke';
 import {
   createSetupLocalState,
@@ -79,10 +79,13 @@ async function runBootstrap(env: NodeJS.ProcessEnv) {
     ['run', 'ops:bootstrap'],
     {
       cwd: resolve('.'),
-      env
+      ...createBootstrapCommandOptions(env)
     }
   );
   if (result.code !== 0) {
+    if (result.stderr.trim().length > 0) {
+      process.stderr.write(result.stderr);
+    }
     throw new ScriptError('Bootstrap failed.');
   }
 
@@ -227,11 +230,15 @@ async function main() {
       });
 
       if (config.deploy.admin && adminUiUsername && adminUiPassword && !actions.deployNow) {
+        const adminSiteSecrets = requireAdminSiteSecrets({
+          adminUiUsername,
+          adminUiPassword
+        });
         logStep('Applying admin Pages site secrets');
         await applyAdminSecrets({
           pagesProjectName: getAdminPagesProjectName(),
-          username: adminUiUsername,
-          password: adminUiPassword
+          username: adminSiteSecrets.adminUiUsername,
+          password: adminSiteSecrets.adminUiPassword
         });
         logSuccess('Admin site secrets applied');
       }
@@ -267,10 +274,14 @@ async function main() {
         logSuccess(`Admin deployed at ${adminUrl}`);
 
         logStep('Applying admin Pages site secrets');
+        const adminSiteSecrets = requireAdminSiteSecrets({
+          adminUiUsername,
+          adminUiPassword
+        });
         await applyAdminSecrets({
           pagesProjectName: getAdminPagesProjectName(),
-          username: adminUiUsername,
-          password: adminUiPassword
+          username: adminSiteSecrets.adminUiUsername,
+          password: adminSiteSecrets.adminUiPassword
         });
         logSuccess('Admin site secrets applied');
       }

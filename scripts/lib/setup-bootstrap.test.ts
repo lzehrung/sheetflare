@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { createBootstrapConfigFromSetup, createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './setup-bootstrap';
+import {
+  createBootstrapCommandOptions,
+  createBootstrapConfigFromSetup,
+  createBootstrapEnv,
+  findCreatedKey,
+  parseBootstrapOutput
+} from './setup-bootstrap';
 import type { SetupConfig } from './setup-config';
 
 const baseConfig: SetupConfig = {
@@ -124,6 +130,15 @@ describe('bootstrap output parsing', () => {
   it('adds the full-result mode flag for setup-driven bootstrap runs', () => {
     expect(createBootstrapEnv(baseConfig, 'https://example.com', 'sfk_admin.secret')).toMatchObject({
       SHEETFLARE_BOOTSTRAP_RESULT_MODE: 'full'
+    });
+  });
+
+  it('disables bootstrap stdout and stderr echo so secret-bearing result markers stay local', () => {
+    const env = createBootstrapEnv(baseConfig, 'https://example.com', 'sfk_admin.secret');
+    expect(createBootstrapCommandOptions(env)).toMatchObject({
+      env,
+      echoStdout: false,
+      echoStderr: false
     });
   });
 });

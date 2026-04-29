@@ -2,7 +2,13 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
-import { buildAdminSecretCommands, buildApiSecretCommands, collectAdminSiteSecrets, collectSetupSecrets } from './setup-secrets';
+import {
+  buildAdminSecretCommands,
+  buildApiSecretCommands,
+  collectAdminSiteSecrets,
+  collectSetupSecrets,
+  requireAdminSiteSecrets
+} from './setup-secrets';
 
 const tempDirs: string[] = [];
 
@@ -96,6 +102,25 @@ describe('setup secret command builders', () => {
     await expect(collectAdminSiteSecrets({
       prompter: null
     })).rejects.toThrow(
+      'Admin UI deploy requires ADMIN_UI_USERNAME and ADMIN_UI_PASSWORD from local setup state or the environment.'
+    );
+  });
+
+  it('narrows collected admin site secrets to non-null strings before apply steps', () => {
+    expect(requireAdminSiteSecrets({
+      adminUiUsername: 'operator',
+      adminUiPassword: 'secret-password'
+    })).toEqual({
+      adminUiUsername: 'operator',
+      adminUiPassword: 'secret-password'
+    });
+  });
+
+  it('throws clearly when admin site secrets are still missing at apply time', () => {
+    expect(() => requireAdminSiteSecrets({
+      adminUiUsername: null,
+      adminUiPassword: 'secret-password'
+    })).toThrow(
       'Admin UI deploy requires ADMIN_UI_USERNAME and ADMIN_UI_PASSWORD from local setup state or the environment.'
     );
   });

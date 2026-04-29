@@ -34,8 +34,7 @@ describe('setup deploy command builders', () => {
       '--project-name',
       'sheetflare-admin',
       '--branch',
-      'main',
-      '--commit-dirty=true'
+      'main'
     ]);
   });
 

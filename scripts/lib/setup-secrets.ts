@@ -22,6 +22,11 @@ export type AdminSiteSecrets = {
   adminUiPassword: string;
 };
 
+type AdminSiteSecretState = {
+  adminUiUsername: string | null;
+  adminUiPassword: string | null;
+};
+
 function generateSecretToken(byteLength = 32) {
   return randomBytes(byteLength).toString('base64url');
 }
@@ -94,6 +99,19 @@ export async function collectAdminSiteSecrets(options: {
   return {
     adminUiUsername: adminUiUsername.trim(),
     adminUiPassword
+  };
+}
+
+export function requireAdminSiteSecrets(state: AdminSiteSecretState): AdminSiteSecrets {
+  if (!state.adminUiUsername?.trim() || !state.adminUiPassword?.trim()) {
+    throw new ScriptError(
+      'Admin UI deploy requires ADMIN_UI_USERNAME and ADMIN_UI_PASSWORD from local setup state or the environment. Run npm run setup -- --apply-secrets first, or set those environment variables before deploying the admin UI.'
+    );
+  }
+
+  return {
+    adminUiUsername: state.adminUiUsername,
+    adminUiPassword: state.adminUiPassword
   };
 }
 

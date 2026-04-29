@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { checkSetupPrereqs, checkSetupPrereqsWithOptions, checkWranglerAuthPrereq } from './setup-prereqs';
+import {
+  checkSetupPrereqs,
+  checkSetupPrereqsWithOptions,
+  checkWranglerAuthPrereq,
+  resolveModuleSpecifier
+} from './setup-prereqs';
 
 describe('checkSetupPrereqs', () => {
   it('reports ready results when install and wrangler auth are available', async () => {
@@ -111,5 +116,21 @@ describe('checkSetupPrereqs', () => {
       summary: 'Wrangler authentication is available for deploy steps.',
       remediation: null
     });
+  });
+
+  it('resolves workspace modules without relying on a CommonJS require global', () => {
+    const originalRequire = Reflect.get(globalThis, 'require');
+    Reflect.set(globalThis, 'require', undefined);
+    try {
+      const resolvedPath = resolveModuleSpecifier('@sheetflare/contracts');
+      expect(resolvedPath).toContain('packages');
+      expect(resolvedPath).toContain('contracts');
+    } finally {
+      if (originalRequire === undefined) {
+        Reflect.deleteProperty(globalThis, 'require');
+      } else {
+        Reflect.set(globalThis, 'require', originalRequire);
+      }
+    }
   });
 });

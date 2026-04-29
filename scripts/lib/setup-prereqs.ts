@@ -1,10 +1,12 @@
 import { access } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { getCommandName } from './process';
 
 const execFileAsync = promisify(execFile);
+const setupPrereqRequire = createRequire(import.meta.url);
 
 export type SetupPrereqStatus = 'ready' | 'warning' | 'blocked';
 
@@ -66,7 +68,11 @@ async function defaultPathExists(path: string) {
 }
 
 function defaultModuleResolver(specifier: string) {
-  require.resolve(specifier);
+  resolveModuleSpecifier(specifier);
+}
+
+export function resolveModuleSpecifier(specifier: string) {
+  return setupPrereqRequire.resolve(specifier);
 }
 
 export async function checkSetupPrereqs(dependencies: SetupPrereqDependencies = {}) {
