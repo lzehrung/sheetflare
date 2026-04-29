@@ -122,7 +122,7 @@ Once staging exists, exercise at minimum:
    - the failure is visible in the cache report
 
 2. A rate-limit pressure case
-   Run `npm run load:staging`, confirm:
+   Run `npm run load`, confirm:
    - `request.complete` emits `429`
    - the benchmark report records the first same-principal `429`
    - your alert threshold would have triggered if the pressure were sustained

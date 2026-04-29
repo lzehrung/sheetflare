@@ -9,8 +9,6 @@ describe('readSmokeConfig', () => {
     SHEETFLARE_PRIVATE_TABLE: 'users',
     SHEETFLARE_PRIVATE_READ_KEY: 'sfk_private.secret',
     SHEETFLARE_MUTATION_KEY: 'sfk_mutation.secret',
-    SHEETFLARE_PUBLIC_PROJECT: 'public-demo',
-    SHEETFLARE_PUBLIC_TABLE: 'users',
     SHEETFLARE_SMOKE_CREATE_VALUES_JSON: '{"name":"Smoke"}',
     SHEETFLARE_SMOKE_UPDATE_VALUES_JSON: '{"status":"active"}'
   } satisfies NodeJS.ProcessEnv;
@@ -42,6 +40,24 @@ describe('readSmokeConfig', () => {
 
     expect(() => readSmokeConfig(env)).toThrow(
       'SHEETFLARE_SMOKE_ID_COLUMN must not be blank when provided.'
+    );
+  });
+
+  it('allows private-only smoke coverage when no public-read project is configured', () => {
+    expect(readSmokeConfig(baseEnv)).toMatchObject({
+      publicProject: null,
+      publicTable: null
+    });
+  });
+
+  it('requires public project and table together when enabling public-read coverage', () => {
+    const env = {
+      ...baseEnv,
+      SHEETFLARE_PUBLIC_PROJECT: 'public-demo'
+    } satisfies NodeJS.ProcessEnv;
+
+    expect(() => readSmokeConfig(env)).toThrow(
+      'SHEETFLARE_PUBLIC_PROJECT and SHEETFLARE_PUBLIC_TABLE must be set together when public-read coverage is enabled.'
     );
   });
 });

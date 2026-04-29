@@ -280,7 +280,7 @@ Use [google-service-accounts.md](./google-service-accounts.md) if you need the e
 Set the required environment variables documented in [deploy.md](./deploy.md), then run:
 
 ```powershell
-npm run smoke:staging
+npm run smoke
 ```
 
 The smoke script verifies:
@@ -298,7 +298,7 @@ The smoke script verifies:
 If you are validating for broader external use, also run:
 
 ```powershell
-npm run load:staging
+npm run load
 ```
 
 Use [benchmarking.md](./benchmarking.md) and [observability.md](./observability.md) for the reporting and alerting workflow around those runs.
