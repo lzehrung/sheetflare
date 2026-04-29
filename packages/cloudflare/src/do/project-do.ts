@@ -479,6 +479,7 @@ export class ProjectDO {
       slug: project.slug,
       name: project.name,
       spreadsheetId: project.spreadsheet_id,
+      googleCredentialRef: project.google_credential_ref,
       tableCount: countRow?.count ?? 0,
       updatedAt: project.updated_at
     };

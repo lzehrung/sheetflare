@@ -1,4 +1,6 @@
+import { ServiceUnavailableError } from '@sheetflare/contracts';
 import type {
+  AdminRegisterSpreadsheetWatchesResult,
   AdminCreateApiKeyResult,
   AdminListApiKeysResult,
   AdminListProjectsResult,
@@ -6,13 +8,22 @@ import type {
   ApiKeyRecord,
   ControlPlaneDoRequest,
   ControlPlaneDoResponse,
-  ProjectSummary
+  ProjectDoResponse,
+  ProjectSummary,
+  TableConfig,
+  TableDoResponse,
+  TableRequestContext
 } from '@sheetflare/contracts';
+import { GoogleSheetsService } from '@sheetflare/google-sheets';
+import type { CloudflareEnv } from '../types';
+import { doRpc } from '../rpc';
+import { resolveGoogleCredential } from '../google-credentials';
 
 type RegistryRow = {
   slug: string;
   name: string;
   spreadsheet_id: string;
+  google_credential_ref: string;
   table_count: number;
   updated_at: string;
 };
@@ -28,12 +39,38 @@ type ApiKeyRow = {
   last_used_at: string | null;
 };
 
+type SpreadsheetWatchRow = {
+  spreadsheet_id: string;
+  google_credential_ref: string;
+  channel_id: string;
+  resource_id: string;
+  resource_uri: string | null;
+  expiration_at: string | null;
+  debounce_seconds: number;
+  last_notification_at: string | null;
+  pending_changed_at: string | null;
+  debounce_until: string | null;
+  last_reindex_started_at: string | null;
+  last_reindex_completed_at: string | null;
+  last_reindex_error: string | null;
+  updated_at: string;
+};
+
+function getProjectStub(env: CloudflareEnv, projectSlug: string) {
+  return env.PROJECT_DO.get(env.PROJECT_DO.idFromName(`project:${projectSlug}`));
+}
+
+function getTableStub(env: CloudflareEnv, projectSlug: string, tableSlug: string) {
+  return env.TABLE_DO.get(env.TABLE_DO.idFromName(`table:${projectSlug}:${tableSlug}`));
+}
+
 export class ControlPlaneDO {
+  private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
+
   constructor(
     private readonly ctx: DurableObjectState,
-    env: unknown
+    private readonly env: CloudflareEnv
   ) {
-    void env;
     this.initialize();
   }
 
@@ -43,10 +80,19 @@ export class ControlPlaneDO {
         slug TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         spreadsheet_id TEXT NOT NULL,
+        google_credential_ref TEXT NOT NULL DEFAULT 'default',
         table_count INTEGER NOT NULL,
         updated_at TEXT NOT NULL
       )
     `);
+
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE project_registry ADD COLUMN google_credential_ref TEXT NOT NULL DEFAULT 'default'`);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('duplicate column name')) {
+        throw error;
+      }
+    }
 
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS api_keys (
@@ -59,6 +105,35 @@ export class ControlPlaneDO {
         revoked_at TEXT,
         last_used_at TEXT
       )
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS spreadsheet_watches (
+        spreadsheet_id TEXT PRIMARY KEY,
+        google_credential_ref TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        resource_uri TEXT,
+        expiration_at TEXT,
+        debounce_seconds INTEGER NOT NULL,
+        last_notification_at TEXT,
+        pending_changed_at TEXT,
+        debounce_until TEXT,
+        last_reindex_started_at TEXT,
+        last_reindex_completed_at TEXT,
+        last_reindex_error TEXT,
+        updated_at TEXT NOT NULL
+      )
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_spreadsheet_watches_channel_id
+      ON spreadsheet_watches(channel_id)
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_spreadsheet_watches_debounce_until
+      ON spreadsheet_watches(debounce_until)
     `);
   }
 
@@ -90,6 +165,16 @@ export class ControlPlaneDO {
         return {
           type: 'control.project.upsert.result',
           result: { ok: true }
+        };
+      case 'control.spreadsheet-watches.register':
+        return {
+          type: 'control.spreadsheet-watches.register.result',
+          result: await this.registerSpreadsheetWatches(body.webhookUrl, body.webhookToken, body.debounceSeconds, body.expirationMs ?? null)
+        };
+      case 'control.spreadsheet-watch.notify':
+        return {
+          type: 'control.spreadsheet-watch.notify.result',
+          result: await this.recordSpreadsheetNotification(body.channelId, body.resourceId, body.resourceState, body.messageNumber, body.changedAt, body.channelExpiration)
         };
       case 'control.api-key.create':
         return {
@@ -133,7 +218,7 @@ export class ControlPlaneDO {
   private listProjects(): AdminListProjectsResult {
     const rows = this.ctx.storage.sql
       .exec(`
-        SELECT slug, name, spreadsheet_id, table_count, updated_at
+        SELECT slug, name, spreadsheet_id, google_credential_ref, table_count, updated_at
         FROM project_registry
         ORDER BY updated_at DESC, slug ASC
       `)
@@ -147,20 +232,42 @@ export class ControlPlaneDO {
   private upsertProjectSummary(summary: ProjectSummary) {
     this.ctx.storage.sql.exec(
       `
-      INSERT INTO project_registry (slug, name, spreadsheet_id, table_count, updated_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO project_registry (slug, name, spreadsheet_id, google_credential_ref, table_count, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(slug) DO UPDATE SET
         name = excluded.name,
         spreadsheet_id = excluded.spreadsheet_id,
+        google_credential_ref = excluded.google_credential_ref,
         table_count = excluded.table_count,
         updated_at = excluded.updated_at
       `,
       summary.slug,
       summary.name,
       summary.spreadsheetId,
+      summary.googleCredentialRef,
       summary.tableCount,
       summary.updatedAt
     );
+  }
+
+  async alarm() {
+    const dueWatches = this.ctx.storage.sql.exec(
+      `
+      SELECT *
+      FROM spreadsheet_watches
+      WHERE pending_changed_at IS NOT NULL
+        AND debounce_until IS NOT NULL
+        AND debounce_until <= ?
+      ORDER BY debounce_until ASC, spreadsheet_id ASC
+      `,
+      new Date().toISOString()
+    ).toArray() as SpreadsheetWatchRow[];
+
+    for (const watch of dueWatches) {
+      await this.reindexSpreadsheetWatch(watch);
+    }
+
+    await this.scheduleNextAlarm();
   }
 
   private async createApiKey(input: {
@@ -224,6 +331,10 @@ export class ControlPlaneDO {
     return rows[0] ?? null;
   }
 
+  private selectRows<Row>(query: string, ...params: unknown[]): Row[] {
+    return this.ctx.storage.sql.exec(query, ...params).toArray() as Row[];
+  }
+
   private verifyApiKey(apiKeyId: string, hash: string): ApiKeyPrincipal | null {
     const row = this.selectOptionalRow<ApiKeyRow>(`SELECT * FROM api_keys WHERE id = ?`, apiKeyId);
 
@@ -266,8 +377,379 @@ export class ControlPlaneDO {
       slug: row.slug,
       name: row.name,
       spreadsheetId: row.spreadsheet_id,
+      googleCredentialRef: row.google_credential_ref,
       tableCount: row.table_count,
       updatedAt: row.updated_at
+    };
+  }
+
+  private async registerSpreadsheetWatches(
+    webhookUrl: string,
+    webhookToken: string,
+    debounceSeconds: number,
+    expirationMs: number | null
+  ): Promise<AdminRegisterSpreadsheetWatchesResult> {
+    const now = new Date().toISOString();
+    const registrations = this.getSpreadsheetRegistrations();
+    const results = [];
+
+    for (const registration of registrations) {
+      const existing = this.getSpreadsheetWatch(registration.spreadsheetId);
+      if (existing) {
+        await this.stopExistingSpreadsheetWatch(existing);
+      }
+
+      const watch = await this.getSheetsClient(registration.googleCredentialRef).watchSpreadsheetFile(
+        registration.spreadsheetId,
+        {
+          webhookUrl,
+          token: webhookToken,
+          expirationMs
+        }
+      );
+
+      this.ctx.storage.sql.exec(
+        `
+        INSERT INTO spreadsheet_watches (
+          spreadsheet_id, google_credential_ref, channel_id, resource_id, resource_uri, expiration_at, debounce_seconds,
+          last_notification_at, pending_changed_at, debounce_until, last_reindex_started_at, last_reindex_completed_at, last_reindex_error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(spreadsheet_id) DO UPDATE SET
+          google_credential_ref = excluded.google_credential_ref,
+          channel_id = excluded.channel_id,
+          resource_id = excluded.resource_id,
+          resource_uri = excluded.resource_uri,
+          expiration_at = excluded.expiration_at,
+          debounce_seconds = excluded.debounce_seconds,
+          updated_at = excluded.updated_at
+        `,
+        registration.spreadsheetId,
+        registration.googleCredentialRef,
+        watch.channelId,
+        watch.resourceId,
+        watch.resourceUri,
+        watch.expirationAt,
+        debounceSeconds,
+        existing?.last_notification_at ?? null,
+        existing?.pending_changed_at ?? null,
+        existing?.debounce_until ?? null,
+        existing?.last_reindex_started_at ?? null,
+        existing?.last_reindex_completed_at ?? null,
+        existing?.last_reindex_error ?? null,
+        now
+      );
+
+      results.push(this.mapSpreadsheetWatch(this.requireSpreadsheetWatch(registration.spreadsheetId), registration.projectSlugs));
+    }
+
+    await this.scheduleNextAlarm();
+
+    return {
+      data: results
+    };
+  }
+
+  private async recordSpreadsheetNotification(
+    channelId: string,
+    resourceId: string,
+    resourceState: string,
+    messageNumber: string | null,
+    changedAt: string,
+    channelExpiration: string | null
+  ) {
+    void messageNumber;
+    const watch = this.selectOptionalRow<SpreadsheetWatchRow>(
+      `SELECT * FROM spreadsheet_watches WHERE channel_id = ?`,
+      channelId
+    );
+
+    if (!watch || watch.resource_id !== resourceId) {
+      return {
+        accepted: false,
+        spreadsheetId: null,
+        debounceUntil: null
+      };
+    }
+
+    const parsedExpiration = this.parseDriveNotificationExpiration(channelExpiration);
+    if (resourceState === 'sync') {
+      this.ctx.storage.sql.exec(
+        `
+        UPDATE spreadsheet_watches
+        SET last_notification_at = ?, expiration_at = COALESCE(?, expiration_at), updated_at = ?
+        WHERE spreadsheet_id = ?
+        `,
+        changedAt,
+        parsedExpiration,
+        changedAt,
+        watch.spreadsheet_id
+      );
+      return {
+        accepted: true,
+        spreadsheetId: watch.spreadsheet_id,
+        debounceUntil: null
+      };
+    }
+
+    const debounceUntil = new Date(Date.parse(changedAt) + watch.debounce_seconds * 1000).toISOString();
+    this.ctx.storage.sql.exec(
+      `
+      UPDATE spreadsheet_watches
+      SET last_notification_at = ?,
+          pending_changed_at = ?,
+          debounce_until = ?,
+          expiration_at = COALESCE(?, expiration_at),
+          updated_at = ?
+      WHERE spreadsheet_id = ?
+      `,
+      changedAt,
+      changedAt,
+      debounceUntil,
+      parsedExpiration,
+      changedAt,
+      watch.spreadsheet_id
+    );
+
+    await this.markSpreadsheetTablesExternallyDirty(watch.spreadsheet_id, changedAt, debounceUntil);
+    await this.scheduleNextAlarm();
+
+    return {
+      accepted: true,
+      spreadsheetId: watch.spreadsheet_id,
+      debounceUntil
+    };
+  }
+
+  private getSpreadsheetRegistrations() {
+    const rows = this.selectRows<RegistryRow>(
+      `
+      SELECT slug, name, spreadsheet_id, google_credential_ref, table_count, updated_at
+      FROM project_registry
+      ORDER BY spreadsheet_id ASC, slug ASC
+      `
+    );
+
+    const grouped = new Map<string, { googleCredentialRef: string; projectSlugs: string[] }>();
+    for (const row of rows) {
+      const existing = grouped.get(row.spreadsheet_id);
+      if (!existing) {
+        grouped.set(row.spreadsheet_id, {
+          googleCredentialRef: row.google_credential_ref,
+          projectSlugs: [row.slug]
+        });
+        continue;
+      }
+
+      if (existing.googleCredentialRef !== row.google_credential_ref) {
+        throw new ServiceUnavailableError(`Spreadsheet ${row.spreadsheet_id} is registered with conflicting Google credential refs.`, {
+          spreadsheetId: row.spreadsheet_id,
+          firstGoogleCredentialRef: existing.googleCredentialRef,
+          conflictingGoogleCredentialRef: row.google_credential_ref
+        });
+      }
+
+      existing.projectSlugs.push(row.slug);
+    }
+
+    return [...grouped.entries()].map(([spreadsheetId, value]) => ({
+      spreadsheetId,
+      googleCredentialRef: value.googleCredentialRef,
+      projectSlugs: value.projectSlugs
+    }));
+  }
+
+  private getSpreadsheetWatch(spreadsheetId: string) {
+    return this.selectOptionalRow<SpreadsheetWatchRow>(
+      `SELECT * FROM spreadsheet_watches WHERE spreadsheet_id = ?`,
+      spreadsheetId
+    );
+  }
+
+  private requireSpreadsheetWatch(spreadsheetId: string) {
+    const watch = this.getSpreadsheetWatch(spreadsheetId);
+    if (!watch) {
+      throw new Error(`Spreadsheet watch ${spreadsheetId} was not found.`);
+    }
+
+    return watch;
+  }
+
+  private async stopExistingSpreadsheetWatch(watch: SpreadsheetWatchRow) {
+    try {
+      await this.getSheetsClient(watch.google_credential_ref).stopDriveChannel(watch.channel_id, watch.resource_id);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'NotFoundError') {
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  private async markSpreadsheetTablesExternallyDirty(spreadsheetId: string, changedAt: string, debounceUntil: string) {
+    for (const projectSlug of this.getProjectSlugsForSpreadsheet(spreadsheetId)) {
+      const tables = await this.listProjectTables(projectSlug);
+      for (const table of tables) {
+        await doRpc<TableDoResponse>(getTableStub(this.env, projectSlug, table.tableSlug), {
+          type: 'table.external-change.record',
+          projectSlug,
+          tableSlug: table.tableSlug,
+          changedAt,
+          debounceUntil,
+          requestContext: this.buildSystemRequestContext('control.spreadsheet-watch.notify')
+        });
+      }
+    }
+  }
+
+  private async reindexSpreadsheetWatch(watch: SpreadsheetWatchRow) {
+    const startedAt = new Date().toISOString();
+    this.ctx.storage.sql.exec(
+      `
+      UPDATE spreadsheet_watches
+      SET last_reindex_started_at = ?, last_reindex_error = NULL, updated_at = ?
+      WHERE spreadsheet_id = ?
+      `,
+      startedAt,
+      startedAt,
+      watch.spreadsheet_id
+    );
+
+    try {
+      for (const projectSlug of this.getProjectSlugsForSpreadsheet(watch.spreadsheet_id)) {
+        const tables = await this.listProjectTables(projectSlug);
+        for (const table of tables) {
+          await doRpc<TableDoResponse>(getTableStub(this.env, projectSlug, table.tableSlug), {
+            type: 'table.reindex',
+            projectSlug,
+            tableSlug: table.tableSlug,
+            requestContext: this.buildSystemRequestContext('control.spreadsheet-watch.alarm', 'external-change')
+          });
+        }
+      }
+
+      const completedAt = new Date().toISOString();
+      this.ctx.storage.sql.exec(
+        `
+        UPDATE spreadsheet_watches
+        SET pending_changed_at = NULL,
+            debounce_until = NULL,
+            last_reindex_completed_at = ?,
+            last_reindex_error = NULL,
+            updated_at = ?
+        WHERE spreadsheet_id = ?
+        `,
+        completedAt,
+        completedAt,
+        watch.spreadsheet_id
+      );
+    } catch (error) {
+      const retryAt = new Date(Date.now() + Math.max(watch.debounce_seconds, 30) * 1000).toISOString();
+      this.ctx.storage.sql.exec(
+        `
+        UPDATE spreadsheet_watches
+        SET debounce_until = ?,
+            last_reindex_error = ?,
+            updated_at = ?
+        WHERE spreadsheet_id = ?
+        `,
+        retryAt,
+        error instanceof Error ? error.message : String(error),
+        new Date().toISOString(),
+        watch.spreadsheet_id
+      );
+    }
+  }
+
+  private getProjectSlugsForSpreadsheet(spreadsheetId: string) {
+    return this.selectRows<{ slug: string }>(
+      `
+      SELECT slug
+      FROM project_registry
+      WHERE spreadsheet_id = ?
+      ORDER BY slug ASC
+      `,
+      spreadsheetId
+    ).map((row) => row.slug);
+  }
+
+  private async listProjectTables(projectSlug: string): Promise<TableConfig[]> {
+    const response = await doRpc<ProjectDoResponse>(getProjectStub(this.env, projectSlug), {
+      type: 'project.table.list',
+      projectSlug
+    });
+
+    return (response as {
+      type: 'project.table.list.result';
+      result: { data: TableConfig[] };
+    }).result.data;
+  }
+
+  private async scheduleNextAlarm() {
+    const next = this.selectOptionalRow<{ debounce_until: string | null }>(
+      `
+      SELECT debounce_until
+      FROM spreadsheet_watches
+      WHERE pending_changed_at IS NOT NULL
+        AND debounce_until IS NOT NULL
+      ORDER BY debounce_until ASC
+      LIMIT 1
+      `
+    );
+
+    if (!next?.debounce_until) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+
+    await this.ctx.storage.setAlarm(Date.parse(next.debounce_until));
+  }
+
+  private parseDriveNotificationExpiration(value: string | null) {
+    if (!value) {
+      return null;
+    }
+
+    const parsedMs = Date.parse(value);
+    return Number.isNaN(parsedMs) ? null : new Date(parsedMs).toISOString();
+  }
+
+  private getSheetsClient(googleCredentialRef: string) {
+    const existing = this.sheetsByCredentialRef.get(googleCredentialRef);
+    if (existing) {
+      return existing;
+    }
+
+    const credential = resolveGoogleCredential(this.env, googleCredentialRef);
+    const service = new GoogleSheetsService(credential);
+    this.sheetsByCredentialRef.set(googleCredentialRef, service);
+    return service;
+  }
+
+  private buildSystemRequestContext(route: string, syncSource: TableRequestContext['syncSource'] = 'request'): TableRequestContext {
+    return {
+      requestId: `control:${crypto.randomUUID()}`,
+      route,
+      principal: 'system:drive-watch',
+      syncSource
+    };
+  }
+
+  private mapSpreadsheetWatch(row: SpreadsheetWatchRow, projectSlugs: string[]): AdminRegisterSpreadsheetWatchesResult['data'][number] {
+    return {
+      spreadsheetId: row.spreadsheet_id,
+      googleCredentialRef: row.google_credential_ref,
+      channelId: row.channel_id,
+      resourceId: row.resource_id,
+      resourceUri: row.resource_uri,
+      expirationAt: row.expiration_at,
+      lastNotificationAt: row.last_notification_at,
+      pendingChangedAt: row.pending_changed_at,
+      debounceUntil: row.debounce_until,
+      lastReindexStartedAt: row.last_reindex_started_at,
+      lastReindexCompletedAt: row.last_reindex_completed_at,
+      lastReindexError: row.last_reindex_error,
+      projectSlugs
     };
   }
 

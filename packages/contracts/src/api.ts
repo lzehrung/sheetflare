@@ -69,6 +69,7 @@ export const projectSummarySchema = z.object({
   slug: projectSlugSchema,
   name: z.string().min(1),
   spreadsheetId: spreadsheetIdSchema,
+  googleCredentialRef: z.string().min(1),
   tableCount: z.number().int().nonnegative(),
   updatedAt: z.string().datetime()
 });
@@ -97,6 +98,26 @@ export const adminInspectSpreadsheetTabResultSchema = z.object({
     headerRow: z.number().int().positive(),
     headers: z.array(z.string().min(1))
   })
+});
+
+export const spreadsheetWatchSchema = z.object({
+  spreadsheetId: spreadsheetIdSchema,
+  googleCredentialRef: z.string().min(1),
+  channelId: z.string().min(1),
+  resourceId: z.string().min(1),
+  resourceUri: z.string().min(1).nullable(),
+  expirationAt: z.string().datetime().nullable(),
+  lastNotificationAt: z.string().datetime().nullable(),
+  pendingChangedAt: z.string().datetime().nullable(),
+  debounceUntil: z.string().datetime().nullable(),
+  lastReindexStartedAt: z.string().datetime().nullable(),
+  lastReindexCompletedAt: z.string().datetime().nullable(),
+  lastReindexError: z.string().nullable(),
+  projectSlugs: z.array(projectSlugSchema)
+});
+
+export const adminRegisterSpreadsheetWatchesResultSchema = z.object({
+  data: z.array(spreadsheetWatchSchema)
 });
 
 export const upsertTableResultSchema = z.object({
@@ -169,6 +190,8 @@ export type AdminGetProjectResult = z.infer<typeof adminGetProjectResultSchema>;
 export type SpreadsheetTab = z.infer<typeof spreadsheetTabSchema>;
 export type AdminListSpreadsheetTabsResult = z.infer<typeof adminListSpreadsheetTabsResultSchema>;
 export type AdminInspectSpreadsheetTabResult = z.infer<typeof adminInspectSpreadsheetTabResultSchema>;
+export type SpreadsheetWatch = z.infer<typeof spreadsheetWatchSchema>;
+export type AdminRegisterSpreadsheetWatchesResult = z.infer<typeof adminRegisterSpreadsheetWatchesResultSchema>;
 export type UpsertTableResult = z.infer<typeof upsertTableResultSchema>;
 export type GetRowResult = z.infer<typeof getRowResultSchema>;
 export type CreateRowResult = z.infer<typeof createRowResultSchema>;

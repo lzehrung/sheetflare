@@ -16,6 +16,7 @@ import {
   type TableRequestContext,
   type TableDoResponse,
   type ResolvedTableConfigSnapshot,
+  type TableExternalChange,
   type TableValidationSummary,
   type TableValidationIssue
 } from '@sheetflare/contracts';
@@ -69,10 +70,17 @@ type SyncMeta = {
   lastSyncError: string | null;
 };
 
-type CacheStaleReason = 'fresh' | 'never-synced' | 'ttl-expired' | 'config-changed' | 'error';
+type CacheStaleReason = 'fresh' | 'never-synced' | 'ttl-expired' | 'config-changed' | 'external-change' | 'error';
 
 type CacheState = TableCacheStatus & {
   staleReason: CacheStaleReason;
+};
+
+const emptyExternalChangeState: TableExternalChange = {
+  pending: false,
+  lastChangedAt: null,
+  debounceUntil: null,
+  lastAutoReindexAt: null
 };
 
 type ResolvedTableConfig = GoogleSheetTableConfig & {
@@ -394,6 +402,11 @@ export class TableDO {
           type: 'table.cache.refresh.result',
           result: await this.refreshCacheIfStale(body.projectSlug, body.tableSlug, body.resolvedConfig, requestContext)
         };
+      case 'table.external-change.record':
+        return {
+          type: 'table.external-change.record.result',
+          result: await this.recordExternalChange(body.projectSlug, body.tableSlug, body.changedAt, body.debounceUntil)
+        };
       case 'table.reindex':
         return {
           type: 'table.reindex.result',
@@ -485,8 +498,8 @@ export class TableDO {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    const cacheState = await this.ensurePointOperationReady(config, requestContext);
-    let resolved = cacheState.staleReason === 'fresh' ? this.getCachedRow(rowId) : null;
+    const cacheState = await this.ensurePointReadReady(config, requestContext);
+    let resolved = this.canServePointReadFromCache(cacheState.staleReason) ? this.getCachedRow(rowId) : null;
     if (!resolved) {
       resolved = await this.resolveRowById(config, rowId);
     }
@@ -706,9 +719,21 @@ export class TableDO {
     };
   }
 
+  private async recordExternalChange(projectSlug: string, tableSlug: string, changedAt: string, debounceUntil: string | null) {
+    await this.getTableConfig(projectSlug, tableSlug);
+    this.setExternalChangeState({
+      ...this.getExternalChangeState(),
+      pending: true,
+      lastChangedAt: changedAt,
+      debounceUntil
+    });
+
+    return { ok: true as const };
+  }
+
   private async ensureQueryCacheReady(config: GoogleSheetTableConfig, requestContext?: TableRequestContext | null) {
     const cacheState = this.getCacheState(config);
-    if (cacheState.staleReason === 'fresh') {
+    if (cacheState.staleReason === 'fresh' || cacheState.staleReason === 'external-change') {
       return cacheState;
     }
 
@@ -716,6 +741,20 @@ export class TableDO {
       force: cacheState.staleReason === 'never-synced' || cacheState.staleReason === 'error',
       requestContext: requestContext ?? null
     });
+    return this.getCacheState(config);
+  }
+
+  private async ensurePointReadReady(config: GoogleSheetTableConfig, requestContext?: TableRequestContext | null) {
+    const cacheState = this.getCacheState(config);
+    if (
+      cacheState.staleReason === 'fresh' ||
+      cacheState.staleReason === 'ttl-expired' ||
+      cacheState.staleReason === 'external-change'
+    ) {
+      return cacheState;
+    }
+
+    await this.syncCache(config.projectSlug, config.tableSlug, { force: true, requestContext: requestContext ?? null });
     return this.getCacheState(config);
   }
 
@@ -730,6 +769,11 @@ export class TableDO {
   }
 
   private async ensureMutationValidationReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
+    if (this.getCacheState(config).staleReason === 'external-change') {
+      await this.syncCache(config.projectSlug, config.tableSlug, { force: true, requestContext: requestContext ?? null });
+      return this.getCacheState(config);
+    }
+
     if (this.hasUniqueFieldRules(config)) {
       return this.ensureQueryCacheReady(config, requestContext);
     }
@@ -813,6 +857,7 @@ export class TableDO {
       this.setMeta('schema', JSON.stringify(schema));
       this.setMeta('config.signature', buildCacheConfigSignature(config));
       this.setMeta('validation.summary', JSON.stringify(validation));
+      this.completeExternalChangeSync(completedAt, requestContext?.syncSource === 'external-change');
       this.setSyncMeta({
         status: 'ready',
         rowCount: rows.length,
@@ -1058,6 +1103,7 @@ export class TableDO {
 
   private getCacheState(config: GoogleSheetTableConfig & { googleCredentialRef?: string }): CacheState {
     const meta = this.getSyncMeta();
+    const externalChange = this.getExternalChangeState();
     const lastSyncMs = meta.lastSyncCompletedAt ? Date.parse(meta.lastSyncCompletedAt) : Number.NaN;
     const configSignature = 'googleCredentialRef' in config && config.googleCredentialRef
       ? buildCacheConfigSignature({
@@ -1081,7 +1127,9 @@ export class TableDO {
           ? 'never-synced'
           : !signatureMatches
             ? 'config-changed'
-            : Date.now() - lastSyncMs > config.cacheTtlSeconds * 1000
+            : externalChange.pending
+              ? 'external-change'
+              : Date.now() - lastSyncMs > config.cacheTtlSeconds * 1000
               ? 'ttl-expired'
               : 'fresh';
 
@@ -1094,7 +1142,8 @@ export class TableDO {
       lastSyncStartedAt: meta.lastSyncStartedAt,
       lastSyncCompletedAt: meta.lastSyncCompletedAt,
       lastSyncError: meta.lastSyncError,
-      validation: this.getValidationSummary()
+      validation: this.getValidationSummary(),
+      externalChange
     };
   }
 
@@ -1109,6 +1158,39 @@ export class TableDO {
     } catch {
       return emptyValidationSummary;
     }
+  }
+
+  private getExternalChangeState(): TableExternalChange {
+    const raw = this.getMeta('externalChange.state');
+    if (!raw) {
+      return emptyExternalChangeState;
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as Partial<TableExternalChange>;
+      return {
+        pending: parsed.pending === true,
+        lastChangedAt: parsed.lastChangedAt ?? null,
+        debounceUntil: parsed.debounceUntil ?? null,
+        lastAutoReindexAt: parsed.lastAutoReindexAt ?? null
+      };
+    } catch {
+      return emptyExternalChangeState;
+    }
+  }
+
+  private setExternalChangeState(state: TableExternalChange) {
+    this.setMeta('externalChange.state', JSON.stringify(state));
+  }
+
+  private completeExternalChangeSync(completedAt: string, automatic: boolean) {
+    const state = this.getExternalChangeState();
+    this.setExternalChangeState({
+      pending: false,
+      lastChangedAt: state.lastChangedAt,
+      debounceUntil: null,
+      lastAutoReindexAt: automatic ? completedAt : state.lastAutoReindexAt
+    });
   }
 
   private getMeta(key: string): string | null {
@@ -1165,7 +1247,8 @@ export class TableDO {
       lastSyncStartedAt: cacheState.lastSyncStartedAt,
       lastSyncCompletedAt: cacheState.lastSyncCompletedAt,
       lastSyncError: cacheState.lastSyncError,
-      validation: cacheState.validation
+      validation: cacheState.validation,
+      externalChange: cacheState.externalChange
     };
   }
 
@@ -1258,6 +1341,10 @@ export class TableDO {
 
   private invalidateSchemaMeta() {
     this.deleteMeta('schema');
+  }
+
+  private canServePointReadFromCache(staleReason: CacheStaleReason) {
+    return staleReason === 'fresh' || staleReason === 'external-change';
   }
 
   private countCachedRows(kind: 'live' | 'staging' = 'live') {
