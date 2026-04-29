@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ScriptError, getFirstEnv, requestJson, requireAdminCredential } from './runtime';
+import { ScriptError, getFirstEnv, redactSecret, requestJson, requireAdminCredential, shouldShowSecrets } from './runtime';
 
 describe('requestJson', () => {
   afterEach(() => {
@@ -83,5 +83,22 @@ describe('admin credential helpers', () => {
     expect(() => requireAdminCredential()).toThrow(
       'Missing required environment variable SHEETFLARE_ADMIN_CREDENTIAL (or legacy SHEETFLARE_ADMIN_BEARER).'
     );
+  });
+});
+
+describe('secret helpers', () => {
+  afterEach(() => {
+    delete process.env.SHEETFLARE_SHOW_SECRETS;
+  });
+
+  it('redacts secrets by default', () => {
+    expect(redactSecret('sfk_demo.secret')).toBe('sfk_...cret');
+    expect(shouldShowSecrets()).toBe(false);
+  });
+
+  it('honors the show-secrets env flag', () => {
+    process.env.SHEETFLARE_SHOW_SECRETS = 'true';
+
+    expect(shouldShowSecrets()).toBe(true);
   });
 });

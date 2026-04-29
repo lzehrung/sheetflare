@@ -3,9 +3,11 @@ import {
   logStep,
   logSuccess,
   readJsonEnv,
+  redactSecret,
   requestJson,
   requireAdminCredential,
-  requireEnv
+  requireEnv,
+  shouldShowSecrets
 } from './lib/runtime';
 import { parseBootstrapConfig, type BootstrapConfig } from './lib/bootstrap-config';
 
@@ -40,10 +42,10 @@ async function main() {
   const createdKeys: ApiKeyResponse[] = [];
 
   for (const project of config.projects) {
-    logStep(`Upserting project ${project.slug}`);
+    logStep(`Ensuring project ${project.slug}`);
     const projectResponse = await requestJson<ProjectResponse>({
       baseUrl,
-      path: '/v1/admin/projects',
+      path: '/v1/admin/projects?upsert=true',
       method: 'POST',
       bearer,
       expectedStatus: 201,
@@ -58,10 +60,10 @@ async function main() {
     logSuccess(`Project ready: ${assertPresent(projectResponse.data, 'Project creation returned an empty response body.').project.slug}`);
 
     for (const table of project.tables ?? []) {
-      logStep(`Upserting table ${project.slug}/${table.tableSlug}`);
+      logStep(`Ensuring table ${project.slug}/${table.tableSlug}`);
       const tableResponse = await requestJson<TableResponse>({
         baseUrl,
-        path: `/v1/admin/projects/${encodeURIComponent(project.slug)}/tables`,
+        path: `/v1/admin/projects/${encodeURIComponent(project.slug)}/tables?upsert=true`,
         method: 'POST',
         bearer,
         expectedStatus: 201,
@@ -95,8 +97,17 @@ async function main() {
     apiKeys: createdKeys
   };
 
-  console.log(JSON.stringify(output, null, 2));
-  console.log(`__SHEETFLARE_BOOTSTRAP_RESULT__=${JSON.stringify(output)}`);
+  console.log(JSON.stringify({
+    ...output,
+    apiKeys: output.apiKeys.map((apiKey) => ({
+      ...apiKey,
+      apiKey: shouldShowSecrets() ? apiKey.apiKey : redactSecret(apiKey.apiKey)
+    }))
+  }, null, 2));
+
+  if (process.env.SHEETFLARE_BOOTSTRAP_RESULT_MODE === 'full') {
+    console.log(`__SHEETFLARE_BOOTSTRAP_RESULT__=${JSON.stringify(output)}`);
+  }
 }
 
 void main().catch((error: unknown) => {

@@ -69,7 +69,8 @@ export function createBootstrapEnv(config: SetupConfig, baseUrl: string, adminCr
   return {
     SHEETFLARE_BASE_URL: baseUrl,
     SHEETFLARE_ADMIN_CREDENTIAL: adminCredential,
-    SHEETFLARE_BOOTSTRAP_CONFIG_JSON: JSON.stringify(createBootstrapConfigFromSetup(config))
+    SHEETFLARE_BOOTSTRAP_CONFIG_JSON: JSON.stringify(createBootstrapConfigFromSetup(config)),
+    SHEETFLARE_BOOTSTRAP_RESULT_MODE: 'full'
   } satisfies NodeJS.ProcessEnv;
 }
 

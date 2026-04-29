@@ -46,8 +46,8 @@ export type ControlPlaneDoResponse =
 export type ProjectDoRequest =
   | { type: 'project.get'; projectSlug: string }
   | { type: 'project.access.get'; projectSlug: string }
-  | { type: 'project.create'; input: CreateProjectInput }
-  | { type: 'project.table.create'; projectSlug: string; input: CreateTableInput }
+  | { type: 'project.create'; input: CreateProjectInput; allowExisting?: boolean }
+  | { type: 'project.table.create'; projectSlug: string; input: CreateTableInput; allowExisting?: boolean }
   | { type: 'project.table.list'; projectSlug: string }
   | { type: 'project.table.get'; projectSlug: string; tableSlug: string }
   | { type: 'project.table.resolve'; projectSlug: string; tableSlug: string }

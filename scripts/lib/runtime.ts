@@ -31,6 +31,19 @@ export function getFirstEnv(...names: string[]) {
   return null;
 }
 
+export function shouldShowSecrets() {
+  const raw = process.env.SHEETFLARE_SHOW_SECRETS?.trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes';
+}
+
+export function redactSecret(value: string) {
+  if (value.length <= 8) {
+    return `${value.slice(0, 2)}***`;
+  }
+
+  return `${value.slice(0, 4)}...${value.slice(-4)}`;
+}
+
 export function requireAdminCredential() {
   const credential = getFirstEnv('SHEETFLARE_ADMIN_CREDENTIAL', 'SHEETFLARE_ADMIN_BEARER');
   if (!credential) {

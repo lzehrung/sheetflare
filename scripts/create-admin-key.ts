@@ -1,4 +1,14 @@
-import { assertPresent, logStep, logSuccess, readJsonEnv, requestJson, requireAdminCredential, requireEnv } from './lib/runtime';
+import {
+  assertPresent,
+  logStep,
+  logSuccess,
+  readJsonEnv,
+  redactSecret,
+  requestJson,
+  requireAdminCredential,
+  requireEnv,
+  shouldShowSecrets
+} from './lib/runtime';
 
 type CreateApiKeyResponse = {
   apiKey: string;
@@ -39,7 +49,10 @@ async function main() {
   const responseData = assertPresent(data, 'Admin key creation returned an empty response body.');
 
   logSuccess(`Created key ${responseData.record.id}`);
-  console.log(JSON.stringify(responseData, null, 2));
+  console.log(JSON.stringify({
+    ...responseData,
+    apiKey: shouldShowSecrets() ? responseData.apiKey : redactSecret(responseData.apiKey)
+  }, null, 2));
 }
 
 void main().catch((error: unknown) => {

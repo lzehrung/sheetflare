@@ -130,6 +130,16 @@ const adminProjectsQuerySchema = z.object({
   })
 });
 
+const adminUpsertQuerySchema = z.object({
+  upsert: z.coerce.boolean().optional().openapi({
+    param: {
+      name: 'upsert',
+      in: 'query'
+    },
+    example: true
+  })
+});
+
 const listRowsQueryOpenApiSchema = z.object({
   limit: z.coerce.number().int().positive().max(500).optional().openapi({
     param: {
@@ -193,6 +203,39 @@ function jsonContent(schema: z.ZodTypeAny) {
       schema
     }
   };
+}
+
+function parseDurableRpcErrorResponse(error: DurableRpcError) {
+  try {
+    const parsed = JSON.parse(error.responseText) as {
+      error?: {
+        code?: string;
+        message?: string;
+        details?: unknown;
+      };
+    };
+
+    if (
+      parsed.error
+      && typeof parsed.error.code === 'string'
+      && typeof parsed.error.message === 'string'
+    ) {
+      return {
+        status: error.status,
+        body: {
+          error: {
+            code: parsed.error.code,
+            message: parsed.error.message,
+            details: parsed.error.details ?? null
+          }
+        }
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 const unauthorizedResponse = {
@@ -302,10 +345,8 @@ function getRateLimitConfiguration(env: Env) {
 }
 
 function getRateLimitPrincipal(c: { req: { header(name: string): string | undefined; method: string; path: string } ; env: Env }) {
-  const forwardedFor = c.req.header('cf-connecting-ip')
-    ?? c.req.header('x-forwarded-for')?.split(',')[0]?.trim()
-    ?? 'anonymous';
-  return `client:${forwardedFor}`;
+  const ipAddress = c.req.header('cf-connecting-ip')?.trim();
+  return ipAddress ? `client:${ipAddress}` : 'client:anonymous';
 }
 
 function getRateLimitRouteFamily(path: string) {
@@ -707,6 +748,7 @@ const adminCreateProjectRoute = createRoute({
   tags: ['Projects'],
   security: adminSecurity,
   request: {
+    query: adminUpsertQuerySchema,
     body: {
       content: jsonContent(createProjectInputSchema),
       description: 'Project definition'
@@ -714,8 +756,12 @@ const adminCreateProjectRoute = createRoute({
   },
   responses: {
     201: {
-      description: 'Created or updated project',
+      description: 'Created project',
       content: jsonContent(adminGetProjectResultSchema)
+    },
+    409: {
+      description: 'Project already exists. Repeat the request with upsert=true to replace it intentionally.',
+      content: jsonContent(errorResponseSchema)
     },
     400: badRequestResponse,
     401: unauthorizedResponse
@@ -785,6 +831,7 @@ const adminCreateTableRoute = createRoute({
   security: adminSecurity,
   request: {
     params: adminProjectParamsSchema,
+    query: adminUpsertQuerySchema,
     body: {
       content: jsonContent(createTableInputSchema),
       description: 'Table definition'
@@ -792,8 +839,12 @@ const adminCreateTableRoute = createRoute({
   },
   responses: {
     201: {
-      description: 'Created or updated table',
+      description: 'Created table',
       content: jsonContent(z.object({ data: tableConfigSchema }))
+    },
+    409: {
+      description: 'Table already exists. Repeat the request with upsert=true to replace it intentionally.',
+      content: jsonContent(errorResponseSchema)
     },
     400: badRequestResponse,
     401: unauthorizedResponse,
@@ -1085,7 +1136,8 @@ function createApp() {
         errorStack: error instanceof Error ? error.stack ?? null : null
       })
     );
-    const { status, body } = toErrorResponse(error);
+    const rpcErrorResponse = error instanceof DurableRpcError ? parseDurableRpcErrorResponse(error) : null;
+    const { status, body } = rpcErrorResponse ?? toErrorResponse(error);
     const response = new Response(JSON.stringify(body), {
       status,
       headers: {
@@ -1198,10 +1250,14 @@ function createApp() {
   app.openapi(adminCreateProjectRoute, async (c) => {
     const auth = await authenticateRequest(c);
     assertGlobalAdminScope(auth, 'admin:projects');
+    const { upsert } = adminUpsertQuerySchema.parse({
+      upsert: c.req.query('upsert')
+    });
     const input = await parseJsonBody(c, createProjectInputSchema) satisfies CreateProjectInput;
     const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, input.slug), {
       type: 'project.create',
-      input
+      input,
+      ...(upsert ? { allowExisting: true } : {})
     });
 
     return c.json((response as { type: 'project.create.result'; result: AdminGetProjectResult }).result, 201);
@@ -1258,11 +1314,15 @@ function createApp() {
     const auth = await authenticateRequest(c);
     const { project } = parsePathParams(c, adminProjectParamsSchema);
     assertProjectScope(auth, 'admin:projects', project);
+    const { upsert } = adminUpsertQuerySchema.parse({
+      upsert: c.req.query('upsert')
+    });
     const input = await parseJsonBody(c, createTableInputSchema) satisfies CreateTableInput;
     const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
       type: 'project.table.create',
       projectSlug: project,
-      input
+      input,
+      ...(upsert ? { allowExisting: true } : {})
     });
 
     return c.json(

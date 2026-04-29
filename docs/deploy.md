@@ -111,6 +111,8 @@ npm run deploy:api
 npm run deploy:admin
 ```
 
+Run deploys from a clean checked-out commit. Do not rely on dirty-worktree Pages deploys for release or rollback workflows.
+
 Or deploy both in sequence:
 
 ```powershell
