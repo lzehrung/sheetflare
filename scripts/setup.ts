@@ -6,7 +6,7 @@ import { createConsolePrompter, promptForSetup, type SetupPromptActions, type Se
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, type SetupPrereqResult } from './lib/setup-prereqs';
 import { createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './lib/setup-bootstrap';
 import { deployAdminPages, deployApiWorker, getApiWranglerConfigPath, getAdminPagesProjectName } from './lib/setup-deploy';
-import { applyAdminSecrets, applyApiSecrets, collectSetupSecrets } from './lib/setup-secrets';
+import { applyAdminSecrets, applyApiSecrets, collectAdminSiteSecrets, collectSetupSecrets } from './lib/setup-secrets';
 import { createSmokeEnv } from './lib/setup-smoke';
 import {
   createSetupLocalState,
@@ -15,7 +15,7 @@ import {
   type SetupLocalState,
   writeSetupLocalState
 } from './lib/setup-state';
-import { resolveSetupRuntimeState, summarizeSetupSecrets } from './lib/setup-runtime';
+import { resolvePreferredSmokeAdminCredential, resolveSetupRuntimeState, summarizeSetupSecrets } from './lib/setup-runtime';
 import { getCommandName, runCommand } from './lib/process';
 import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
 
@@ -250,20 +250,28 @@ async function main() {
       logSuccess(`API deployed at ${apiUrl}`);
 
       if (config.deploy.admin) {
+        if (!adminUiUsername || !adminUiPassword) {
+          const adminSiteSecrets = await collectAdminSiteSecrets({
+            prompter,
+            defaultAdminUiUsername: adminUiUsername,
+            defaultAdminUiPassword: adminUiPassword
+          });
+          adminUiUsername = adminSiteSecrets.adminUiUsername;
+          adminUiPassword = adminSiteSecrets.adminUiPassword;
+        }
+
         logStep('Deploying admin Pages site');
         const adminDeploy = await deployAdminPages(apiUrl);
         adminUrl = adminDeploy.url;
         logSuccess(`Admin deployed at ${adminUrl}`);
 
-        if (adminUiUsername && adminUiPassword) {
-          logStep('Applying admin Pages site secrets');
-          await applyAdminSecrets({
-            pagesProjectName: getAdminPagesProjectName(),
-            username: adminUiUsername,
-            password: adminUiPassword
-          });
-          logSuccess('Admin site secrets applied');
-        }
+        logStep('Applying admin Pages site secrets');
+        await applyAdminSecrets({
+          pagesProjectName: getAdminPagesProjectName(),
+          username: adminUiUsername,
+          password: adminUiPassword
+        });
+        logSuccess('Admin site secrets applied');
       }
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
@@ -331,7 +339,11 @@ async function main() {
         throw new ScriptError('API base URL is required for smoke.');
       }
 
-      if (!adminApiKey) {
+      let smokeAdminCredential = resolvePreferredSmokeAdminCredential({
+        adminApiKey,
+        adminBearerToken
+      });
+      if (!smokeAdminCredential) {
         if (!prompter) {
           throw new ScriptError('Smoke requires an admin API key or admin credential from local setup state or environment.');
         }
@@ -339,6 +351,7 @@ async function main() {
           message: 'Admin API key for smoke',
           envName: 'SHEETFLARE_ADMIN_CREDENTIAL'
         })).trim();
+        smokeAdminCredential = adminApiKey;
       }
       if (!privateReadKey) {
         if (!prompter) {
@@ -361,7 +374,7 @@ async function main() {
       await runSmoke(createSmokeEnv({
         config,
         baseUrl: apiUrl,
-        adminCredential: adminApiKey,
+        adminCredential: smokeAdminCredential,
         privateReadKey,
         mutationKey
       }));

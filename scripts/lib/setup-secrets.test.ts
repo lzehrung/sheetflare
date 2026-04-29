@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
-import { buildAdminSecretCommands, buildApiSecretCommands, collectSetupSecrets } from './setup-secrets';
+import { buildAdminSecretCommands, buildApiSecretCommands, collectAdminSiteSecrets, collectSetupSecrets } from './setup-secrets';
 
 const tempDirs: string[] = [];
 
@@ -77,6 +77,26 @@ describe('setup secret command builders', () => {
       includeAdminUiSecrets: false
     })).rejects.toThrow(
       'Applying secrets without a TTY requires GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY, or GOOGLE_APPLICATION_CREDENTIALS pointing at a service-account JSON file.'
+    );
+  });
+
+  it('collects admin site secrets noninteractively from existing values', async () => {
+    process.env.ADMIN_UI_USERNAME = 'operator';
+    process.env.ADMIN_UI_PASSWORD = 'secret-password';
+
+    await expect(collectAdminSiteSecrets({
+      prompter: null
+    })).resolves.toEqual({
+      adminUiUsername: 'operator',
+      adminUiPassword: 'secret-password'
+    });
+  });
+
+  it('fails clearly when admin site secrets are missing for noninteractive deploy', async () => {
+    await expect(collectAdminSiteSecrets({
+      prompter: null
+    })).rejects.toThrow(
+      'Admin UI deploy requires ADMIN_UI_USERNAME and ADMIN_UI_PASSWORD from local setup state or the environment.'
     );
   });
 });

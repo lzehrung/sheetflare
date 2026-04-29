@@ -17,6 +17,11 @@ export type SetupSecrets = {
   adminUiPassword: string | null;
 };
 
+export type AdminSiteSecrets = {
+  adminUiUsername: string;
+  adminUiPassword: string;
+};
+
 function generateSecretToken(byteLength = 32) {
   return randomBytes(byteLength).toString('base64url');
 }
@@ -48,6 +53,48 @@ async function readServiceAccountFile(path: string) {
   }
 
   return parsed as ServiceAccountCredentials;
+}
+
+export async function collectAdminSiteSecrets(options: {
+  prompter: SetupPrompter | null;
+  defaultAdminUiUsername?: string | null;
+  defaultAdminUiPassword?: string | null;
+}) : Promise<AdminSiteSecrets> {
+  const defaultAdminUiUsername = readEnvValue('ADMIN_UI_USERNAME')
+    ?? options.defaultAdminUiUsername?.trim()
+    ?? null;
+  const defaultAdminUiPassword = readEnvValue('ADMIN_UI_PASSWORD')
+    ?? options.defaultAdminUiPassword?.trim()
+    ?? null;
+
+  if (!options.prompter) {
+    if (!defaultAdminUiUsername || !defaultAdminUiPassword) {
+      throw new ScriptError(
+        'Admin UI deploy requires ADMIN_UI_USERNAME and ADMIN_UI_PASSWORD from local setup state or the environment. Run npm run setup -- --apply-secrets first, or set those environment variables before deploying the admin UI.'
+      );
+    }
+
+    return {
+      adminUiUsername: defaultAdminUiUsername,
+      adminUiPassword: defaultAdminUiPassword
+    };
+  }
+
+  const adminUiUsername = await options.prompter.text({
+    message: 'Admin UI site username',
+    ...(defaultAdminUiUsername ? { defaultValue: defaultAdminUiUsername } : {}),
+    validate: (value) => value.trim().length > 0 ? null : 'Admin UI username must not be blank.'
+  });
+  const adminUiPasswordInput = await options.prompter.text({
+    message: 'Admin UI site password (leave blank to generate)',
+    ...(defaultAdminUiPassword ? { defaultValue: defaultAdminUiPassword } : {})
+  });
+  const adminUiPassword = adminUiPasswordInput.trim().length > 0 ? adminUiPasswordInput : generateSecretToken(24);
+
+  return {
+    adminUiUsername: adminUiUsername.trim(),
+    adminUiPassword
+  };
 }
 
 export async function collectSetupSecrets(options: {
@@ -105,35 +152,18 @@ export async function collectSetupSecrets(options: {
       adminUiPassword: null
     };
   }
-
-  const defaultAdminUiUsername = readEnvValue('ADMIN_UI_USERNAME')
-    ?? options.defaultAdminUiUsername?.trim()
-    ?? 'admin';
-  const defaultAdminUiPassword = readEnvValue('ADMIN_UI_PASSWORD')
-    ?? options.defaultAdminUiPassword?.trim()
-    ?? null;
-
-  const adminUiUsername = options.prompter
-    ? await options.prompter.text({
-        message: 'Admin UI site username',
-        defaultValue: defaultAdminUiUsername,
-        validate: (value) => value.trim().length > 0 ? null : 'Admin UI username must not be blank.'
-      })
-    : defaultAdminUiUsername;
-  const adminUiPasswordInput = options.prompter
-    ? await options.prompter.text({
-        message: 'Admin UI site password (leave blank to generate)',
-        ...(defaultAdminUiPassword ? { defaultValue: defaultAdminUiPassword } : {})
-      })
-    : defaultAdminUiPassword ?? '';
-  const adminUiPassword = adminUiPasswordInput.trim().length > 0 ? adminUiPasswordInput : generateSecretToken(24);
+  const adminSiteSecrets = await collectAdminSiteSecrets({
+    prompter: options.prompter,
+    defaultAdminUiUsername: options.defaultAdminUiUsername ?? 'admin',
+    ...(options.defaultAdminUiPassword !== undefined ? { defaultAdminUiPassword: options.defaultAdminUiPassword } : {})
+  });
 
   return {
     googleClientEmail,
     googlePrivateKey,
     adminBearerToken,
-    adminUiUsername: adminUiUsername.trim(),
-    adminUiPassword
+    adminUiUsername: adminSiteSecrets.adminUiUsername,
+    adminUiPassword: adminSiteSecrets.adminUiPassword
   };
 }
 
