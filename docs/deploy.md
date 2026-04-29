@@ -34,6 +34,11 @@ npm run setup -- --bootstrap
 npm run setup -- --smoke
 ```
 
+Rerun notes:
+
+- `npm run setup -- --deploy` requires admin-site auth secrets for the admin Pages deploy. Setup reuses `.sheetflare.setup.local.json` when available, or falls back to `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD`.
+- `npm run setup -- --smoke` accepts either a scoped admin API key or the bootstrap admin credential through local setup state or `SHEETFLARE_ADMIN_CREDENTIAL`.
+
 `.sheetflare.setup.local.json` is secret material. It is gitignored and intended to stay local to the operator machine.
 
 Use the rest of this document when:

@@ -88,6 +88,11 @@ npm run setup -- --bootstrap
 npm run setup -- --smoke
 ```
 
+Notes for reruns:
+
+- `npm run setup -- --deploy` will redeploy the admin UI only when `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD` are available from local setup state or the environment.
+- `npm run setup -- --smoke` can use either a scoped admin API key or the bootstrap admin credential from local setup state or `SHEETFLARE_ADMIN_CREDENTIAL`.
+
 ## 4. What setup still expects from you
 
 Setup does not automate:

@@ -10,10 +10,10 @@ describe('handleAuthenticatedRequest', () => {
     const response = await handleAuthenticatedRequest({
       env: {
         ADMIN_UI_PASSWORD: 'secret-password',
-        ADMIN_UI_USERNAME: 'staging-admin'
+        ADMIN_UI_USERNAME: 'admin-user'
       },
       next: async () => new Response('ok'),
-      request: new Request('https://sheetflare-staging-admin.pages.dev/')
+      request: new Request('https://sheetflare-admin.example.pages.dev/')
     });
 
     expect(response.status).toBe(401);
@@ -27,15 +27,15 @@ describe('handleAuthenticatedRequest', () => {
     const response = await handleAuthenticatedRequest({
       env: {
         ADMIN_UI_PASSWORD: 'secret-password',
-        ADMIN_UI_USERNAME: 'staging-admin'
+        ADMIN_UI_USERNAME: 'admin-user'
       },
       next: async () => {
         nextCalled = true;
         return new Response('ok');
       },
-      request: new Request('https://sheetflare-staging-admin.pages.dev/', {
+      request: new Request('https://sheetflare-admin.example.pages.dev/', {
         headers: {
-          authorization: createBasicAuthorizationHeader('staging-admin', 'wrong-password')
+          authorization: createBasicAuthorizationHeader('admin-user', 'wrong-password')
         }
       })
     });
@@ -48,7 +48,7 @@ describe('handleAuthenticatedRequest', () => {
     const response = await handleAuthenticatedRequest({
       env: {},
       next: async () => new Response('ok'),
-      request: new Request('https://sheetflare-staging-admin.pages.dev/')
+      request: new Request('https://sheetflare-admin.example.pages.dev/')
     });
 
     expect(response.status).toBe(500);
@@ -59,7 +59,7 @@ describe('handleAuthenticatedRequest', () => {
     const response = await handleAuthenticatedRequest({
       env: {
         ADMIN_UI_PASSWORD: 'secret-password',
-        ADMIN_UI_USERNAME: 'staging-admin'
+        ADMIN_UI_USERNAME: 'admin-user'
       },
       next: async () =>
         new Response('<html><body>Sheetflare Admin</body></html>', {
@@ -67,9 +67,9 @@ describe('handleAuthenticatedRequest', () => {
             'content-type': 'text/html; charset=utf-8'
           }
         }),
-      request: new Request('https://sheetflare-staging-admin.pages.dev/', {
+      request: new Request('https://sheetflare-admin.example.pages.dev/', {
         headers: {
-          authorization: createBasicAuthorizationHeader('staging-admin', 'secret-password')
+          authorization: createBasicAuthorizationHeader('admin-user', 'secret-password')
         }
       })
     });
