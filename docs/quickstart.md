@@ -288,8 +288,9 @@ Healthy output should show:
 - `status: "ready"`
 - `staleReason: "fresh"` after healthy activity or reindex
 - `lastSyncError: null`
+- `validation.status: "ok"` unless the last full sync detected direct sheet drift against configured `fieldRules`
 
-`lastSyncStartedAt` and `lastSyncCompletedAt` refer to the last full rebuild from Google Sheets, not the most recent successful point mutation.
+`lastSyncStartedAt`, `lastSyncCompletedAt`, and `validation` refer to the last full rebuild from Google Sheets, not the most recent successful point mutation.
 
 ## 10. Useful operator commands
 

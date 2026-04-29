@@ -171,7 +171,7 @@ describe('GoogleSheetsService.readAllRows', () => {
       clientEmail: 'service@example.com',
       privateKey: testPrivateKey,
       fetch: async (input) => {
-        const url = String(input);
+        const url = decodeURIComponent(String(input));
         if (url.includes('oauth2.googleapis.com/token')) {
           return Response.json({
             access_token: 'token',
@@ -179,10 +179,15 @@ describe('GoogleSheetsService.readAllRows', () => {
           });
         }
 
-        if (url.includes('/values/')) {
+        if (url.includes("/values/'Users'!2:2")) {
+          return Response.json({
+            values: [['_id', 'name']]
+          });
+        }
+
+        if (url.includes("/values/'Users'!A2:B")) {
           return Response.json({
             values: [
-              ['intro'],
               ['_id', 'name'],
               ['row-1', 'Ada'],
               ['row-2', 'Grace']
@@ -232,6 +237,63 @@ describe('GoogleSheetsService.readAllRows', () => {
         }
       }
     ]);
+  });
+
+  it('bounds table snapshot reads to the declared header width instead of reading the full tab', async () => {
+    const requestedUrls: string[] = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = decodeURIComponent(String(input));
+        requestedUrls.push(url);
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes("/values/'Users'!1:1")) {
+          return Response.json({
+            values: [['_id', 'name', 'status']]
+          });
+        }
+
+        if (url.includes("/values/'Users'!A1:C")) {
+          return Response.json({
+            values: [
+              ['_id', 'name', 'status'],
+              ['row-1', 'Ada', 'active']
+            ]
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    const rows = await service.readAllRows({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(requestedUrls.some((url) => url.includes("/values/'Users'!A1:C"))).toBe(true);
+    expect(requestedUrls.every((url) => !url.endsWith("/values/'Users'"))).toBe(true);
   });
 
   it('rejects rows with blank managed ids instead of fabricating row-number ids', async () => {
@@ -339,7 +401,7 @@ describe('GoogleSheetsService.readAllRows', () => {
       updatedAt: '2026-04-26T00:00:00.000Z'
     });
 
-    expect(valueFetchCount).toBe(2);
+    expect(valueFetchCount).toBe(3);
     expect(rows).toHaveLength(1);
   });
 

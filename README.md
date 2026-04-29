@@ -104,6 +104,7 @@ Bootstrap and deployment steps are documented in [docs/quickstart.md](./docs/qui
 - Mutation lookup uses a narrow scan of the managed ID column plus targeted row reads instead of rescanning full row payloads, which reduces write-path cost on larger sheets while preserving correctness.
 - Read-only columns are never targeted by API writes, which lets a sheet expose formula-derived or operator-managed values without API updates flattening them.
 - `fieldRules` are enforced on API writes. They do not prevent direct Google Sheets edits from introducing invalid or duplicate values later.
+- Cache status now includes `validation`, which summarizes field-rule drift found during the last full sync without blocking normal reads.
 
 ## Cache And Sync
 
@@ -117,9 +118,10 @@ Bootstrap and deployment steps are documented in [docs/quickstart.md](./docs/qui
   - cached headers
   - sync metadata
 - Writes update the cache immediately after successful upstream mutation.
-- Deletes normally repair cached row numbers through a narrow managed-ID scan instead of forcing a full row-data resync.
-- If the post-delete row reference scan does not match the local cache shape, the table falls back to a full sync for safety.
+- If a create fails after the initial row append, the API attempts to delete that partial upstream row before returning the failure.
+- Deletes normally repair cached row numbers locally after successful API deletes. If the live header layout has drifted or the cache is already stale, the table falls back to a full sync for safety.
 - Table config changes that affect cache shape, indexing, or sheet layout automatically mark the cache stale and force a resync on the next read or write.
+- Full syncs now bound Google Sheets reads to the declared header width instead of reading the entire tab width.
 
 Operational procedures for reindex, cache inspection, and failure handling live in [docs/operator-runbook.md](./docs/operator-runbook.md).
 
@@ -196,7 +198,8 @@ Performance notes:
 - Rate limits are bucketed by route family and operation key, for example `admin.projects.list`, `rows.list`, and `admin.cache.reindex`, so hot endpoints do not starve unrelated calls from the same principal.
 - Rate-limit principals are derived only from verified credentials; unverified API-key-shaped strings fall back to the anonymous/IP bucket.
 - Request logs now include the applied rate-limit principal, route family, operation key, and limit/remaining/reset fields so `429` analysis lines up with the actual bucket selection.
-- `npm run build`, `npm run typecheck`, and `npm test` all pass from the repo root.
+- `table.sync.complete` logs include validation status and issue counts from the same sync pass.
+- `npm run check` now runs lint, typecheck, test, and build from the repo root.
 
 ## Local End-To-End Checks
 

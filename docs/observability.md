@@ -45,6 +45,8 @@ Emitted by `TableDO`:
 - `projectSlug`
 - `tableSlug`
 - `rowCount`
+- `validationStatus`
+- `validationIssueCount`
 - `durationMs`
 - `requestId`
 - `route`
@@ -89,6 +91,9 @@ Alert on these conditions before broad production use:
 6. Row-count jumps or drops
    Review `table.sync.complete.rowCount` per table and alert on unexpected deltas after sync.
 
+7. Validation drift warnings
+   Alert when `table.sync.complete.validationStatus == "warning"` for critical tables, or when `validationIssueCount` rises unexpectedly after a sync.
+
 ## Executable Health Check
 
 Set a list of critical tables:
@@ -119,6 +124,9 @@ Use these exact predicates in your chosen log platform:
 
 - row-count anomaly review:
   - `event == "table.sync.complete"` grouped by `projectSlug, tableSlug`
+
+- validation drift review:
+  - `event == "table.sync.complete" and validationStatus == "warning"`
 
 ## Tested Failure Workflow
 

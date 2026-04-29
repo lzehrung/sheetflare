@@ -11,7 +11,7 @@
     "lint": "eslint .",
     "typecheck": "npm run -ws typecheck && tsc -p tsconfig.scripts.json --noEmit",
     "test": "npm run -ws test && vitest run --config vitest.config.ts",
-    "check": "npm run typecheck && npm run test",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build",
     "dev:api": "npm --workspace @sheetflare/api run dev",
     "dev:admin": "npm --workspace @sheetflare/admin run dev",
     "e2e:browser": "tsx scripts/admin-browser-e2e.ts",
