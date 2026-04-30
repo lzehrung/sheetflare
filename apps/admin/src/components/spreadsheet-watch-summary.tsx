@@ -4,11 +4,11 @@ type SpreadsheetWatchSummaryProps = {
   watch: SpreadsheetWatch;
 };
 
-function formatTimestamp(value: string | null) {
+export function formatSpreadsheetWatchTimestamp(value: string | null) {
   return value ? new Date(value).toLocaleString() : 'Not yet';
 }
 
-function getWatchStatus(watch: SpreadsheetWatch) {
+export function getSpreadsheetWatchStatus(watch: SpreadsheetWatch) {
   if (watch.lastWatchError) {
     return 'error';
   }
@@ -20,24 +20,28 @@ function getWatchStatus(watch: SpreadsheetWatch) {
   return 'active';
 }
 
+export function getSpreadsheetWatchStatusSummary(watch: SpreadsheetWatch) {
+  return `${getSpreadsheetWatchStatus(watch)} / expires ${formatSpreadsheetWatchTimestamp(watch.expirationAt)}`;
+}
+
 export function SpreadsheetWatchSummary({ watch }: SpreadsheetWatchSummaryProps) {
   return (
     <>
       <div>
         <dt>Status</dt>
-        <dd>{getWatchStatus(watch)}</dd>
+        <dd>{getSpreadsheetWatchStatus(watch)}</dd>
       </div>
       <div>
         <dt>Expires</dt>
-        <dd>{formatTimestamp(watch.expirationAt)}</dd>
+        <dd>{formatSpreadsheetWatchTimestamp(watch.expirationAt)}</dd>
       </div>
       <div>
         <dt>Last Notification</dt>
-        <dd>{formatTimestamp(watch.lastNotificationAt)}</dd>
+        <dd>{formatSpreadsheetWatchTimestamp(watch.lastNotificationAt)}</dd>
       </div>
       <div>
         <dt>Last Auto Reindex</dt>
-        <dd>{formatTimestamp(watch.lastReindexCompletedAt)}</dd>
+        <dd>{formatSpreadsheetWatchTimestamp(watch.lastReindexCompletedAt)}</dd>
       </div>
       <div>
         <dt>Projects</dt>
@@ -46,13 +50,13 @@ export function SpreadsheetWatchSummary({ watch }: SpreadsheetWatchSummaryProps)
       {watch.pendingChangedAt ? (
         <div>
           <dt>Pending Change</dt>
-          <dd>{formatTimestamp(watch.pendingChangedAt)}</dd>
+          <dd>{formatSpreadsheetWatchTimestamp(watch.pendingChangedAt)}</dd>
         </div>
       ) : null}
       {watch.debounceUntil ? (
         <div>
           <dt>Debounce Until</dt>
-          <dd>{formatTimestamp(watch.debounceUntil)}</dd>
+          <dd>{formatSpreadsheetWatchTimestamp(watch.debounceUntil)}</dd>
         </div>
       ) : null}
       {watch.lastWatchError ? (

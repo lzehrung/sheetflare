@@ -61,6 +61,11 @@ type SpreadsheetWatchRow = {
   updated_at: string;
 };
 
+type SpreadsheetWatchRenewalRow = Pick<
+  SpreadsheetWatchRow,
+  'spreadsheet_id' | 'expiration_at' | 'expiration_duration_ms' | 'last_watch_error' | 'updated_at'
+>;
+
 function getProjectStub(env: CloudflareEnv, projectSlug: string) {
   return env.PROJECT_DO.get(env.PROJECT_DO.idFromName(`project:${projectSlug}`));
 }
@@ -653,9 +658,10 @@ export class ControlPlaneDO {
   }
 
   private listSpreadsheetWatchesForAdmin(): AdminListSpreadsheetWatchesResult {
+    const projectSlugsBySpreadsheetId = this.getProjectSlugsBySpreadsheetId();
     return {
       data: this.listSpreadsheetWatches().map((row) =>
-        this.mapSpreadsheetWatch(row, this.getProjectSlugsForSpreadsheet(row.spreadsheet_id))
+        this.mapSpreadsheetWatch(row, projectSlugsBySpreadsheetId.get(row.spreadsheet_id) ?? [])
       )
     };
   }
@@ -841,6 +847,29 @@ export class ControlPlaneDO {
     ).map((row) => row.slug);
   }
 
+  private getProjectSlugsBySpreadsheetId() {
+    const rows = this.selectRows<{ spreadsheet_id: string; slug: string }>(
+      `
+      SELECT spreadsheet_id, slug
+      FROM project_registry
+      ORDER BY spreadsheet_id ASC, slug ASC
+      `
+    );
+
+    const projectSlugsBySpreadsheetId = new Map<string, string[]>();
+    for (const row of rows) {
+      const existing = projectSlugsBySpreadsheetId.get(row.spreadsheet_id);
+      if (existing) {
+        existing.push(row.slug);
+        continue;
+      }
+
+      projectSlugsBySpreadsheetId.set(row.spreadsheet_id, [row.slug]);
+    }
+
+    return projectSlugsBySpreadsheetId;
+  }
+
   private async listProjectTables(projectSlug: string): Promise<TableConfig[]> {
     const response = await doRpc<ProjectDoResponse>(getProjectStub(this.env, projectSlug), {
       type: 'project.table.list',
@@ -854,21 +883,9 @@ export class ControlPlaneDO {
   }
 
   private async scheduleNextAlarm() {
-    let nextAlarmAtMs: number | null = null;
-
-    for (const watch of this.listSpreadsheetWatches()) {
-      if (watch.pending_changed_at && watch.debounce_until) {
-        const debounceAtMs = Date.parse(watch.debounce_until);
-        if (!Number.isNaN(debounceAtMs)) {
-          nextAlarmAtMs = nextAlarmAtMs === null ? debounceAtMs : Math.min(nextAlarmAtMs, debounceAtMs);
-        }
-      }
-
-      const renewAtMs = this.getWatchRenewAtMs(watch);
-      if (renewAtMs !== null) {
-        nextAlarmAtMs = nextAlarmAtMs === null ? renewAtMs : Math.min(nextAlarmAtMs, renewAtMs);
-      }
-    }
+    const nextDebounceAtMs = this.getNextDebounceAlarmAtMs();
+    const nextRenewalAtMs = this.getNextRenewalAlarmAtMs();
+    const nextAlarmAtMs = this.getEarlierAlarmAtMs(nextDebounceAtMs, nextRenewalAtMs);
 
     if (nextAlarmAtMs === null) {
       await this.ctx.storage.deleteAlarm();
@@ -892,13 +909,13 @@ export class ControlPlaneDO {
     return comparison !== null && comparison <= 0;
   }
 
-  private getWatchDurationMs(watch: SpreadsheetWatchRow) {
+  private getWatchDurationMs(watch: Pick<SpreadsheetWatchRow, 'expiration_duration_ms'>) {
     return watch.expiration_duration_ms && watch.expiration_duration_ms > 0
       ? watch.expiration_duration_ms
       : defaultWatchDurationMs;
   }
 
-  private getWatchRenewAtMs(watch: SpreadsheetWatchRow) {
+  private getWatchRenewAtMs(watch: SpreadsheetWatchRenewalRow) {
     if (!watch.expiration_at) {
       return null;
     }
@@ -927,6 +944,60 @@ export class ControlPlaneDO {
       maxWatchRenewLeadMs,
       Math.max(minWatchRenewLeadMs, Math.floor(durationMs / 4))
     );
+  }
+
+  private getNextDebounceAlarmAtMs() {
+    const next = this.selectOptionalRow<{ debounce_until: string }>(
+      `
+      SELECT debounce_until
+      FROM spreadsheet_watches
+      WHERE pending_changed_at IS NOT NULL
+        AND debounce_until IS NOT NULL
+      ORDER BY debounce_until ASC
+      LIMIT 1
+      `
+    );
+
+    if (!next?.debounce_until) {
+      return null;
+    }
+
+    const debounceAtMs = Date.parse(next.debounce_until);
+    return Number.isNaN(debounceAtMs) ? null : debounceAtMs;
+  }
+
+  private getNextRenewalAlarmAtMs() {
+    let nextRenewalAtMs: number | null = null;
+
+    for (const watch of this.selectRows<SpreadsheetWatchRenewalRow>(
+      `
+      SELECT spreadsheet_id, expiration_at, expiration_duration_ms, last_watch_error, updated_at
+      FROM spreadsheet_watches
+      WHERE expiration_at IS NOT NULL
+      ORDER BY expiration_at ASC, spreadsheet_id ASC
+      `
+    )) {
+      const renewAtMs = this.getWatchRenewAtMs(watch);
+      if (renewAtMs === null) {
+        continue;
+      }
+
+      nextRenewalAtMs = nextRenewalAtMs === null ? renewAtMs : Math.min(nextRenewalAtMs, renewAtMs);
+    }
+
+    return nextRenewalAtMs;
+  }
+
+  private getEarlierAlarmAtMs(left: number | null, right: number | null) {
+    if (left === null) {
+      return right;
+    }
+
+    if (right === null) {
+      return left;
+    }
+
+    return Math.min(left, right);
   }
 
   private recordWatchError(spreadsheetId: string, message: string) {
