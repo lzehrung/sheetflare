@@ -78,6 +78,7 @@ const defaultWatchDurationMs = 7 * 24 * 60 * 60 * 1000;
 const minWatchRenewLeadMs = 5 * 60 * 1000;
 const maxWatchRenewLeadMs = 24 * 60 * 60 * 1000;
 const watchRenewRetryMs = 5 * 60 * 1000;
+const watchRenewConfigRetryMs = 60 * 60 * 1000;
 
 export class ControlPlaneDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
@@ -937,7 +938,7 @@ export class ControlPlaneDO {
       return renewalDueAtMs;
     }
 
-    return Math.max(renewalDueAtMs, updatedAtMs + watchRenewRetryMs);
+    return Math.max(renewalDueAtMs, updatedAtMs + getWatchRenewRetryDelayMs(watch.last_watch_error));
   }
 
   private getWatchRenewLeadMs(durationMs: number) {
@@ -1089,4 +1090,15 @@ function compareMessageNumbers(left: string | null, right: string | null) {
 
 function normalizeMessageNumber(value: string | null) {
   return value && /^\d+$/.test(value) ? value : null;
+}
+
+function getWatchRenewRetryDelayMs(lastWatchError: string | null) {
+  return isNonRetriableWatchConfigurationError(lastWatchError)
+    ? watchRenewConfigRetryMs
+    : watchRenewRetryMs;
+}
+
+function isNonRetriableWatchConfigurationError(lastWatchError: string | null) {
+  return lastWatchError === 'Spreadsheet watch is missing its stored webhook URL.'
+    || lastWatchError === 'GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.';
 }

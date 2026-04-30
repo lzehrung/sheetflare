@@ -59,8 +59,11 @@ function createDurableObjectState() {
         alarmTimestamp = null;
         return Promise.resolve();
       }
+    },
+    getAlarmTimestamp() {
+      return alarmTimestamp;
     }
-  } as DurableObjectState;
+  };
 }
 
 export type DurableObjectClass<TEnv> = new (state: DurableObjectState, env: TEnv) => {
@@ -79,7 +82,10 @@ class LocalDurableObjectStub {
 }
 
 class LocalDurableObjectNamespace<TEnv> {
-  private readonly instances = new Map<string, { fetch(request: Request): Promise<Response>; alarm?(): Promise<void> | void }>();
+  private readonly instances = new Map<string, {
+    instance: { fetch(request: Request): Promise<Response>; alarm?(): Promise<void> | void };
+    __state: ReturnType<typeof createDurableObjectState>;
+  }>();
 
   constructor(
     private readonly env: TEnv,
@@ -91,22 +97,30 @@ class LocalDurableObjectNamespace<TEnv> {
   }
 
   get(name: string) {
-    let instance = this.instances.get(name);
-    if (!instance) {
-      instance = new this.durableObjectClass(createDurableObjectState(), this.env);
-      this.instances.set(name, instance);
+    let entry = this.instances.get(name);
+    if (!entry) {
+      const state = createDurableObjectState();
+      entry = {
+        instance: new this.durableObjectClass(state as DurableObjectState, this.env),
+        __state: state
+      };
+      this.instances.set(name, entry);
     }
 
-    return new LocalDurableObjectStub(instance);
+    return new LocalDurableObjectStub(entry.instance);
   }
 
   async triggerAlarm(name: string) {
-    const instance = this.instances.get(name);
-    if (!instance?.alarm) {
+    const entry = this.instances.get(name);
+    if (!entry?.instance.alarm) {
       throw new Error(`Durable object ${name} does not define an alarm handler.`);
     }
 
-    await instance.alarm();
+    await entry.instance.alarm();
+  }
+
+  getAlarm(name: string) {
+    return this.instances.get(name)?.__state.getAlarmTimestamp() ?? null;
   }
 }
 

@@ -933,4 +933,81 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
 
     vi.useRealTimers();
   });
+
+  it('uses a longer renewal retry window for persistent watch configuration errors', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    vi.stubGlobal('fetch', createSheetsAndDriveFetch(sheet));
+    const { env, controlPlaneNamespace } = createTestEnv({
+      GOOGLE_DRIVE_WEBHOOK_SECRET: undefined
+    });
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30,
+      expirationMs: Date.parse('2026-04-29T10:10:00.000Z')
+    });
+
+    vi.setSystemTime(new Date('2026-04-29T10:05:01.000Z'));
+    await (controlPlaneNamespace as { triggerAlarm(name: string): Promise<void>; getAlarm(name: string): number | null }).triggerAlarm('control-plane');
+
+    const response = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.list'
+    });
+
+    expect((response as {
+      type: 'control.spreadsheet-watches.list.result';
+      result: {
+        data: Array<{
+          spreadsheetId: string;
+          lastWatchError: string | null;
+        }>;
+      };
+    }).result.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        lastWatchError: 'GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.'
+      })
+    ]);
+
+    expect(
+      (controlPlaneNamespace as { getAlarm(name: string): number | null }).getAlarm('control-plane')
+    ).toBe(Date.parse('2026-04-29T11:05:01.000Z'));
+
+    vi.useRealTimers();
+  });
 });

@@ -16,6 +16,24 @@ function createJsonResponse(body: unknown, status = 200) {
   });
 }
 
+function createDeferred<T>() {
+  let resolvePromise: ((value: T | PromiseLike<T>) => void) | null = null;
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+
+  return {
+    promise,
+    resolve(value: T) {
+      if (!resolvePromise) {
+        throw new Error('Deferred promise resolver was not initialized.');
+      }
+
+      resolvePromise(value);
+    }
+  };
+}
+
 function createSpreadsheetWatchStatusResponse(url: string) {
   if (url !== '/v1/admin/system/google/drive/watches') {
     return null;
@@ -440,6 +458,93 @@ describe('App', () => {
       expect(screen.queryAllByText('ready / fresh / 3 rows')).toHaveLength(0);
       expect(screen.getAllByText('ready / fresh / 1 rows').length).toBeGreaterThan(0);
     });
+  });
+
+  it('clears stale spreadsheet watch status while switching projects', async () => {
+    const prodProjectResponse = createDeferred<Response>();
+
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: 0,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            },
+            {
+              slug: 'prod',
+              name: 'Prod',
+              spreadsheetId: 'sheet-2',
+              tableCount: 0,
+              updatedAt: '2026-04-27T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: []
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=prod') {
+        return prodProjectResponse.promise;
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys?project=prod' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByText(/active \/ expires/i);
+    fireEvent.click(screen.getByTestId('project-card-prod'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Loading project details...')).toBeTruthy();
+      expect(screen.queryByText(/active \/ expires/i)).toBeNull();
+    });
+
+    prodProjectResponse.resolve(createJsonResponse({
+      project: {
+        slug: 'prod',
+        name: 'Prod',
+        spreadsheetId: 'sheet-2',
+        googleCredentialRef: 'default',
+        defaultAuthMode: 'private',
+        createdAt: '2026-04-27T00:00:00.000Z',
+        updatedAt: '2026-04-27T00:00:00.000Z'
+      },
+      tables: []
+    }));
+
+    await screen.findByText('Prod');
   });
 
   it('auto-loads cache status, links to the spreadsheet, and refreshes stale tables on demand', async () => {
