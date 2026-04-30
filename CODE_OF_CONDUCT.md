@@ -21,7 +21,3 @@ Examples of unacceptable behavior:
 ## Enforcement
 
 Project maintainers may remove comments, issues, pull requests, or contributors that violate this code of conduct.
-
-For conduct concerns, email:
-
-- `conduct@lukezehrung.com`
