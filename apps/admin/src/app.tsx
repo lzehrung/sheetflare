@@ -323,13 +323,16 @@ export function App() {
   }, [credential, selectedProjectSlug]);
 
   useEffect(() => {
-    if (!credential || projectDetailState.status !== 'ready') {
-      if (!credential || !selectedProjectSlug) {
-        setSpreadsheetWatchState({
-          status: 'idle',
-          message: 'Select a project to inspect spreadsheet watch status.'
-        });
-      }
+    if (!credential || !selectedProjectSlug) {
+      setSpreadsheetWatchState({
+        status: 'idle',
+        message: 'Select a project to inspect spreadsheet watch status.'
+      });
+      return;
+    }
+
+    if (projectDetailState.status !== 'ready') {
+      setSpreadsheetWatchState({ status: 'loading' });
       return;
     }
 
