@@ -70,7 +70,7 @@ function readFieldRuleKeys(value: string) {
   }
 
   try {
-    const parsed = JSON.parse(normalized) as unknown;
+    const parsed: unknown = JSON.parse(normalized);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return [];
     }
@@ -527,6 +527,12 @@ export function SelectedProjectPanel({
                           <dd>{cache.status} / {cache.staleReason} / {cache.rowCount} rows</dd>
                         </div>
                       ) : null}
+                      {cache ? (
+                        <div>
+                          <dt>Validation</dt>
+                          <dd>{cache.validation.status} / {cache.validation.issueCount} issues</dd>
+                        </div>
+                      ) : null}
                     </dl>
 
                     {cache ? (
@@ -534,7 +540,7 @@ export function SelectedProjectPanel({
                         <summary className="disclosureSummary">
                           <div>
                             <h3>Diagnostics</h3>
-                            <p className="muted compact">Timestamps, freshness, and last sync error.</p>
+                            <p className="muted compact">Timestamps, freshness, validation drift, and last sync error.</p>
                           </div>
                         </summary>
                         <dl className="facts compactFacts">

@@ -7,6 +7,8 @@ import {
   adminCreateApiKeyResultSchema,
   adminGetProjectResultSchema,
   adminInspectSpreadsheetTabResultSchema,
+  adminRegisterSpreadsheetWatchesInputSchema,
+  adminRegisterSpreadsheetWatchesResultSchema,
   adminListApiKeysResultSchema,
   adminListProjectsResultSchema,
   adminListSpreadsheetTabsResultSchema,
@@ -29,6 +31,7 @@ import {
   rowParamsSchema,
   tableConfigSchema,
   BadRequestError,
+  ServiceUnavailableError,
   toErrorResponse,
   UnauthorizedError,
   updateRowInputSchema,
@@ -38,6 +41,8 @@ import {
   type AdminListApiKeysResult,
   type AdminListProjectsResult,
   type AdminInspectSpreadsheetTabResult,
+  type AdminRegisterSpreadsheetWatchesInput,
+  type AdminRegisterSpreadsheetWatchesResult,
   type AdminListSpreadsheetTabsResult,
   type ApiKeyPrincipal,
   type ApiScope,
@@ -77,6 +82,11 @@ type AppVariables = {
     limit: number;
     remaining: number;
     resetAtMs: number;
+  };
+  rateLimitContext?: {
+    principal: string;
+    routeFamily: string;
+    operationKey: string;
   };
 };
 
@@ -128,6 +138,20 @@ const adminProjectsQuerySchema = z.object({
     },
     example: 'demo'
   })
+});
+
+const adminUpsertQuerySchema = z.object({
+  upsert: z
+    .enum(['true', 'false'])
+    .transform((value) => value === 'true')
+    .optional()
+    .openapi({
+      param: {
+        name: 'upsert',
+        in: 'query'
+      },
+      example: true
+    })
 });
 
 const listRowsQueryOpenApiSchema = z.object({
@@ -193,6 +217,39 @@ function jsonContent(schema: z.ZodTypeAny) {
       schema
     }
   };
+}
+
+function parseDurableRpcErrorResponse(error: DurableRpcError) {
+  try {
+    const parsed = JSON.parse(error.responseText) as {
+      error?: {
+        code?: string;
+        message?: string;
+        details?: unknown;
+      };
+    };
+
+    if (
+      parsed.error
+      && typeof parsed.error.code === 'string'
+      && typeof parsed.error.message === 'string'
+    ) {
+      return {
+        status: error.status,
+        body: {
+          error: {
+            code: parsed.error.code,
+            message: parsed.error.message,
+            details: parsed.error.details ?? null
+          }
+        }
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 const unauthorizedResponse = {
@@ -302,13 +359,15 @@ function getRateLimitConfiguration(env: Env) {
 }
 
 function getRateLimitPrincipal(c: { req: { header(name: string): string | undefined; method: string; path: string } ; env: Env }) {
-  const forwardedFor = c.req.header('cf-connecting-ip')
-    ?? c.req.header('x-forwarded-for')?.split(',')[0]?.trim()
-    ?? 'anonymous';
-  return `client:${forwardedFor}`;
+  const ipAddress = c.req.header('cf-connecting-ip')?.trim();
+  return ipAddress ? `client:${ipAddress}` : 'client:anonymous';
 }
 
 function getRateLimitRouteFamily(path: string) {
+  if (path.startsWith('/v1/system/')) {
+    return 'system';
+  }
+
   if (path.startsWith('/v1/admin/')) {
     return 'admin';
   }
@@ -364,6 +423,14 @@ function getRateLimitOperationKey(
 
   if (path.startsWith('/v1/admin/projects/') && path.endsWith('/reindex') && normalizedMethod === 'POST') {
     return 'admin.cache.reindex';
+  }
+
+  if (path === '/v1/admin/system/google/drive/watches/register' && normalizedMethod === 'POST') {
+    return 'admin.system.drive-watches.register';
+  }
+
+  if (path === '/v1/system/google/drive/notifications' && normalizedMethod === 'POST') {
+    return 'system.google.drive.notifications';
   }
 
   if (path.startsWith('/v1/admin/keys/') && normalizedMethod === 'DELETE') {
@@ -440,11 +507,17 @@ async function enforceRateLimit(c: AppContext) {
     remaining: result.remaining,
     resetAtMs: result.resetAtMs
   });
+  c.set('rateLimitContext', {
+    principal,
+    routeFamily,
+    operationKey
+  });
 
   if (!result.allowed) {
     throw new TooManyRequestsError('Rate limit exceeded.', {
       principal,
       routeFamily,
+      operationKey,
       maxRequests: config.maxRequests,
       windowSeconds: config.windowSeconds,
       resetAt: new Date(result.resetAtMs).toISOString()
@@ -707,15 +780,24 @@ const adminCreateProjectRoute = createRoute({
   tags: ['Projects'],
   security: adminSecurity,
   request: {
+    query: adminUpsertQuerySchema,
     body: {
       content: jsonContent(createProjectInputSchema),
       description: 'Project definition'
     }
   },
   responses: {
-    201: {
-      description: 'Created or updated project',
+    200: {
+      description: 'Replaced existing project through explicit upsert',
       content: jsonContent(adminGetProjectResultSchema)
+    },
+    201: {
+      description: 'Created project',
+      content: jsonContent(adminGetProjectResultSchema)
+    },
+    409: {
+      description: 'Project already exists. Repeat the request with upsert=true to replace it intentionally.',
+      content: jsonContent(errorResponseSchema)
     },
     400: badRequestResponse,
     401: unauthorizedResponse
@@ -785,15 +867,24 @@ const adminCreateTableRoute = createRoute({
   security: adminSecurity,
   request: {
     params: adminProjectParamsSchema,
+    query: adminUpsertQuerySchema,
     body: {
       content: jsonContent(createTableInputSchema),
       description: 'Table definition'
     }
   },
   responses: {
-    201: {
-      description: 'Created or updated table',
+    200: {
+      description: 'Replaced existing table through explicit upsert',
       content: jsonContent(z.object({ data: tableConfigSchema }))
+    },
+    201: {
+      description: 'Created table',
+      content: jsonContent(z.object({ data: tableConfigSchema }))
+    },
+    409: {
+      description: 'Table already exists. Repeat the request with upsert=true to replace it intentionally.',
+      content: jsonContent(errorResponseSchema)
     },
     400: badRequestResponse,
     401: unauthorizedResponse,
@@ -892,6 +983,40 @@ const refreshTableCacheRoute = createRoute({
     },
     401: unauthorizedResponse,
     404: notFoundResponse
+  }
+});
+
+const registerSpreadsheetWatchesRoute = createRoute({
+  method: 'post',
+  path: '/v1/admin/system/google/drive/watches/register',
+  tags: ['System'],
+  security: adminSecurity,
+  request: {
+    body: {
+      content: jsonContent(adminRegisterSpreadsheetWatchesInputSchema),
+      description: 'Drive watch registration options'
+    }
+  },
+  responses: {
+    200: {
+      description: 'Register or renew Google Drive spreadsheet watches',
+      content: jsonContent(adminRegisterSpreadsheetWatchesResultSchema)
+    },
+    400: badRequestResponse,
+    401: unauthorizedResponse
+  }
+});
+
+const googleDriveNotificationRoute = createRoute({
+  method: 'post',
+  path: '/v1/system/google/drive/notifications',
+  tags: ['System'],
+  responses: {
+    204: {
+      description: 'Accept a Google Drive webhook notification'
+    },
+    400: badRequestResponse,
+    401: unauthorizedResponse
   }
 });
 
@@ -1047,6 +1172,7 @@ function createApp() {
 
     c.res.headers.set('x-request-id', c.get('requestId'));
     const rateLimit = c.get('rateLimit');
+    const rateLimitContext = c.get('rateLimitContext');
     if (rateLimit) {
       c.res.headers.set('x-ratelimit-limit', String(rateLimit.limit));
       c.res.headers.set('x-ratelimit-remaining', String(rateLimit.remaining));
@@ -1061,17 +1187,30 @@ function createApp() {
         status: c.res.status,
         durationMs: Date.now() - startedAt,
         requestId: c.get('requestId'),
-        principal: c.get('authPrincipal') ?? 'anonymous'
+        principal: c.get('authPrincipal') ?? 'anonymous',
+        rateLimitPrincipal: rateLimitContext?.principal ?? null,
+        rateLimitRouteFamily: rateLimitContext?.routeFamily ?? null,
+        rateLimitOperationKey: rateLimitContext?.operationKey ?? null,
+        rateLimitLimit: rateLimit?.limit ?? null,
+        rateLimitRemaining: rateLimit?.remaining ?? null,
+        rateLimitResetAt: rateLimit ? new Date(rateLimit.resetAtMs).toISOString() : null
       })
     );
   });
 
   app.use('/v1/*', async (c, next) => {
+    if (c.req.path === '/v1/system/google/drive/notifications') {
+      await next();
+      return;
+    }
+
     await enforceRateLimit(c);
     await next();
   });
 
   app.onError((error, c) => {
+    const rateLimitContext = c.get('rateLimitContext');
+    const rateLimit = c.get('rateLimit');
     console.error(
       JSON.stringify({
         event: 'request.error',
@@ -1079,13 +1218,20 @@ function createApp() {
         path: c.req.path,
         requestId: c.get('requestId'),
         principal: c.get('authPrincipal') ?? 'anonymous',
+        rateLimitPrincipal: rateLimitContext?.principal ?? null,
+        rateLimitRouteFamily: rateLimitContext?.routeFamily ?? null,
+        rateLimitOperationKey: rateLimitContext?.operationKey ?? null,
+        rateLimitLimit: rateLimit?.limit ?? null,
+        rateLimitRemaining: rateLimit?.remaining ?? null,
+        rateLimitResetAt: rateLimit ? new Date(rateLimit.resetAtMs).toISOString() : null,
         errorName: error instanceof Error ? error.name : 'UnknownError',
         errorMessage: error instanceof Error ? error.message : String(error),
         errorDetails: error instanceof AppError ? error.details ?? null : null,
         errorStack: error instanceof Error ? error.stack ?? null : null
       })
     );
-    const { status, body } = toErrorResponse(error);
+    const rpcErrorResponse = error instanceof DurableRpcError ? parseDurableRpcErrorResponse(error) : null;
+    const { status, body } = rpcErrorResponse ?? toErrorResponse(error);
     const response = new Response(JSON.stringify(body), {
       status,
       headers: {
@@ -1093,7 +1239,6 @@ function createApp() {
         'x-request-id': c.get('requestId')
       }
     });
-    const rateLimit = c.get('rateLimit');
     if (rateLimit) {
       response.headers.set('x-ratelimit-limit', String(rateLimit.limit));
       response.headers.set('x-ratelimit-remaining', String(rateLimit.remaining));
@@ -1198,13 +1343,21 @@ function createApp() {
   app.openapi(adminCreateProjectRoute, async (c) => {
     const auth = await authenticateRequest(c);
     assertGlobalAdminScope(auth, 'admin:projects');
+    const { upsert } = adminUpsertQuerySchema.parse({
+      upsert: c.req.query('upsert')
+    });
     const input = await parseJsonBody(c, createProjectInputSchema) satisfies CreateProjectInput;
     const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, input.slug), {
       type: 'project.create',
-      input
+      input,
+      ...(upsert ? { allowExisting: true } : {})
     });
 
-    return c.json((response as { type: 'project.create.result'; result: AdminGetProjectResult }).result, 201);
+    const result = (response as {
+      type: 'project.create.result';
+      result: { data: AdminGetProjectResult; created: boolean };
+    }).result;
+    return c.json(result.data, result.created ? 201 : 200);
   });
 
   app.openapi(adminListSpreadsheetTabsRoute, async (c) => {
@@ -1258,16 +1411,24 @@ function createApp() {
     const auth = await authenticateRequest(c);
     const { project } = parsePathParams(c, adminProjectParamsSchema);
     assertProjectScope(auth, 'admin:projects', project);
+    const { upsert } = adminUpsertQuerySchema.parse({
+      upsert: c.req.query('upsert')
+    });
     const input = await parseJsonBody(c, createTableInputSchema) satisfies CreateTableInput;
     const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
       type: 'project.table.create',
       projectSlug: project,
-      input
+      input,
+      ...(upsert ? { allowExisting: true } : {})
     });
 
+    const result = (response as {
+      type: 'project.table.create.result';
+      result: { data: UpsertTableResult['data']; created: boolean };
+    }).result;
     return c.json(
-      (response as { type: 'project.table.create.result'; result: UpsertTableResult }).result,
-      201
+      { data: result.data },
+      result.created ? 201 : 200
     );
   });
 
@@ -1354,6 +1515,67 @@ function createApp() {
     });
 
     return c.json((response as { type: 'table.reindex.result'; result: ReindexTableResult }).result);
+  });
+
+  app.openapi(registerSpreadsheetWatchesRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    assertGlobalAdminScope(auth, 'admin:projects');
+    const input = await parseJsonBody(c, adminRegisterSpreadsheetWatchesInputSchema) satisfies AdminRegisterSpreadsheetWatchesInput;
+    const webhookToken = c.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim();
+    if (!webhookToken) {
+      throw new ServiceUnavailableError('GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.');
+    }
+
+    const webhookUrl = new URL('/v1/system/google/drive/notifications', c.req.url).toString();
+    const debounceSeconds = input.debounceSeconds ?? 30;
+    const expirationHours = input.expirationHours ?? 24 * 7;
+    const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl,
+      webhookToken,
+      debounceSeconds,
+      expirationMs: Date.now() + expirationHours * 60 * 60 * 1000
+    });
+
+    return c.json(
+      (response as {
+        type: 'control.spreadsheet-watches.register.result';
+        result: AdminRegisterSpreadsheetWatchesResult;
+      }).result
+    );
+  });
+
+  app.openapi(googleDriveNotificationRoute, async (c) => {
+    const webhookToken = c.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim();
+    if (!webhookToken) {
+      throw new ServiceUnavailableError('GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.');
+    }
+
+    const channelId = c.req.header('x-goog-channel-id')?.trim();
+    const resourceId = c.req.header('x-goog-resource-id')?.trim();
+    const resourceState = c.req.header('x-goog-resource-state')?.trim();
+    const providedToken = c.req.header('x-goog-channel-token')?.trim();
+
+    if (!channelId || !resourceId || !resourceState) {
+      throw new BadRequestError('Missing required Google Drive notification headers.');
+    }
+
+    if (providedToken !== webhookToken) {
+      throw new UnauthorizedError('Invalid Google Drive webhook token.');
+    }
+
+    c.set('authPrincipal', 'system:google-drive');
+    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+      type: 'control.spreadsheet-watch.notify',
+      channelId,
+      resourceId,
+      resourceState,
+      messageNumber: c.req.header('x-goog-message-number')?.trim() ?? null,
+      changedAt: new Date().toISOString(),
+      channelExpiration: c.req.header('x-goog-channel-expiration')?.trim() ?? null
+    });
+
+    return new Response(null, { status: 204 });
   });
 
   app.openapi(getRowRoute, async (c) => {

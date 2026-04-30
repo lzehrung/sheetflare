@@ -17,6 +17,17 @@ It assumes:
 
 ## Bootstrap Setup
 
+Preferred first-run path:
+
+```powershell
+npm run setup
+```
+
+That command can write `sheetflare.setup.json`, deploy, bootstrap, and smoke-check the first project.
+It also keeps local reusable secret state in `.sheetflare.setup.local.json`; treat that file as secret material and keep it on the operator machine only.
+
+Manual fallback:
+
 1. Set the base URL:
 
 ```powershell
@@ -150,6 +161,9 @@ Important fields:
 - `lastSyncStartedAt`
 - `lastSyncCompletedAt`
 - `lastSyncError`
+- `validation`
+
+`lastSyncStartedAt`, `lastSyncCompletedAt`, and `validation` describe the last full cache rebuild from Google Sheets. Successful point mutations update the cache in place but do not rewrite those sync timestamps.
 
 Interpretation:
 
@@ -157,7 +171,17 @@ Interpretation:
 - `never-synced`: table has not completed its first sync
 - `ttl-expired`: cache is old but point reads and mutations can still use narrow repair behavior
 - `config-changed`: table config changed in a way that requires resync
+- `external-change`: Google Drive reported a spreadsheet update and a debounced auto-reindex is pending
 - `error`: last sync failed and needs investigation
+
+Validation interpretation:
+
+- `validation.status: "ok"`: the last full sync did not detect field-rule drift
+- `validation.status: "warning"`: the last full sync found rows that violate configured `fieldRules`, for example duplicates after normalization or invalid enum/type values
+- `validation.issues`: a capped sample for operator triage, not an exhaustive dump
+- `externalChange.pending`: Drive notification arrived and the debounce window has not completed yet
+- `externalChange.debounceUntil`: when the queued automatic reindex is due
+- `externalChange.lastAutoReindexAt`: when the last Drive-triggered automatic reindex completed
 
 For critical tables, automate this check:
 
@@ -167,6 +191,36 @@ npm run ops:cache:health
 ```
 
 This exits non-zero when a critical table is not healthy.
+
+## Register Drive Watches
+
+Automatic debounced reindexing requires one Drive watch per spreadsheet.
+
+Prerequisites:
+
+- `GOOGLE_DRIVE_WEBHOOK_SECRET` is configured on the API Worker
+- the Google Drive API is enabled for the same Google Cloud project as the service account
+- the deployed Worker URL is reachable from Google
+
+Register or renew all spreadsheet watches currently known to Sheetflare:
+
+```powershell
+npm run ops:watch:drive
+```
+
+Optional overrides:
+
+```powershell
+$env:SHEETFLARE_DRIVE_WATCH_DEBOUNCE_SECONDS = "45"
+$env:SHEETFLARE_DRIVE_WATCH_EXPIRATION_HOURS = "168"
+npm run ops:watch:drive
+```
+
+Re-run this after:
+
+- rotating `GOOGLE_DRIVE_WEBHOOK_SECRET`
+- changing the deployed API base URL
+- onboarding new spreadsheets
 
 ## Force Reindex
 
@@ -280,7 +334,7 @@ Use [google-service-accounts.md](./google-service-accounts.md) if you need the e
 Set the required environment variables documented in [deploy.md](./deploy.md), then run:
 
 ```powershell
-npm run smoke:staging
+npm run smoke
 ```
 
 The smoke script verifies:
@@ -289,16 +343,19 @@ The smoke script verifies:
 - admin route access
 - private-table anonymous rejection
 - private-table keyed reads
-- public-read anonymous access
-- public-read anonymous write rejection
 - cache status `staleReason`
 - create/get/update/delete on a smoke row
 - admin reindex
 
+When `SHEETFLARE_PUBLIC_PROJECT` and `SHEETFLARE_PUBLIC_TABLE` are set, it also verifies:
+
+- public-read anonymous access
+- public-read anonymous write rejection
+
 If you are validating for broader external use, also run:
 
 ```powershell
-npm run load:staging
+npm run load
 ```
 
 Use [benchmarking.md](./benchmarking.md) and [observability.md](./observability.md) for the reporting and alerting workflow around those runs.

@@ -39,16 +39,21 @@ export function inferTableSchema(headers: readonly string[], rows: readonly RowE
     for (const [name, value] of Object.entries(row.values)) {
       const entry = fieldState.get(name);
       const inferredType = inferScalarType(value);
+      const nullable = value === null || value === undefined;
 
       if (!entry) {
         fieldState.set(name, {
-          inferredType,
-          nullable: value === null
+          inferredType: nullable ? 'unknown' : inferredType,
+          nullable
         });
         continue;
       }
 
-      entry.nullable ||= value === null;
+      entry.nullable ||= nullable;
+      if (nullable) {
+        continue;
+      }
+
       if (entry.inferredType !== inferredType) {
         entry.inferredType = entry.inferredType === 'unknown' ? inferredType : 'json';
       }

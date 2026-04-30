@@ -6,3 +6,6 @@ coverage/
 Thumbs.db
 *.log
 *.tsbuildinfo
+.sheetflare.setup.local.json
+.wrangler-staging-secrets.json
+*.setup-*.jsonc

@@ -11,8 +11,11 @@ import {
 import { parseManagedRowId } from '@sheetflare/domain';
 
 const googleSheetsScope = 'https://www.googleapis.com/auth/spreadsheets';
+const googleDriveMetadataScope = 'https://www.googleapis.com/auth/drive.metadata.readonly';
+const googleApiScopes = `${googleSheetsScope} ${googleDriveMetadataScope}`;
 const defaultOauthTokenUrl = 'https://oauth2.googleapis.com/token';
 const defaultSheetsApiBaseUrl = 'https://sheets.googleapis.com/v4/spreadsheets';
+const defaultDriveApiBaseUrl = 'https://www.googleapis.com/drive/v3';
 const defaultRequestTimeoutMs = 15_000;
 const defaultRetryCount = 2;
 
@@ -47,6 +50,13 @@ type GoogleSpreadsheetMetadataResponse = {
   }>;
 };
 
+type GoogleDriveChannelResponse = {
+  id?: string;
+  resourceId?: string;
+  resourceUri?: string;
+  expiration?: string;
+};
+
 export type GoogleSheetTableConfig = TableConfig & {
   spreadsheetId: string;
 };
@@ -76,7 +86,7 @@ type HeaderLayoutEntry = {
   columnNumber: number;
 };
 
-type HeaderLayout = {
+export type GoogleSheetHeaderLayout = {
   headers: string[];
   entries: HeaderLayoutEntry[];
   idColumnNumber: number;
@@ -88,8 +98,22 @@ export interface GoogleServiceAccountConfig {
   fetch?: FetchLike;
   oauthTokenUrl?: string;
   sheetsApiBaseUrl?: string;
+  driveApiBaseUrl?: string;
   now?: () => number;
   delay?: (ms: number) => Promise<void>;
+}
+
+export interface GoogleDriveWatchRequest {
+  webhookUrl: string;
+  token: string;
+  expirationMs?: number | null;
+}
+
+export interface GoogleDriveWatch {
+  channelId: string;
+  resourceId: string;
+  resourceUri: string | null;
+  expirationAt: string | null;
 }
 
 export function serializeSheetCell(value: RowRecord[string]): string | number | boolean {
@@ -161,13 +185,18 @@ function columnNumberToA1(columnNumber: number): string {
   return result;
 }
 
+function buildBoundedTableRange(headerRow: number, lastColumnNumber: number) {
+  const lastColumn = columnNumberToA1(lastColumnNumber);
+  return `A${headerRow}:${lastColumn}`;
+}
+
 type ColumnValueSegment = {
   startColumnNumber: number;
   values: Array<string | number | boolean>;
 };
 
 function buildColumnValueSegments(
-  layout: HeaderLayout,
+  layout: GoogleSheetHeaderLayout,
   values: Partial<RowRecord>
 ): ColumnValueSegment[] {
   const segments: ColumnValueSegment[] = [];
@@ -248,7 +277,7 @@ function extractHeaderEntries(headerRow: readonly string[] | undefined): HeaderL
   return entries;
 }
 
-function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: string): HeaderLayout {
+function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: string): GoogleSheetHeaderLayout {
   const entries = extractHeaderEntries(headerRow);
 
   const idEntry = entries.find((entry) => entry.name === idColumn);
@@ -265,7 +294,7 @@ function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: s
   };
 }
 
-function buildRowEnvelope(config: GoogleSheetTableConfig, layout: HeaderLayout, rowNumber: number, cells: readonly string[]): RowEnvelope {
+function buildRowEnvelope(config: GoogleSheetTableConfig, layout: GoogleSheetHeaderLayout, rowNumber: number, cells: readonly string[]): RowEnvelope {
   const values: RowRecord = {};
 
   for (const entry of layout.entries) {
@@ -305,6 +334,7 @@ export class GoogleSheetsService {
   private readonly fetchImpl: FetchLike;
   private readonly oauthTokenUrl: string;
   private readonly sheetsApiBaseUrl: string;
+  private readonly driveApiBaseUrl: string;
   private readonly now: () => number;
   private readonly delay: (ms: number) => Promise<void>;
   private tokenCache: { value: string; expiresAtMs: number } | null = null;
@@ -313,11 +343,12 @@ export class GoogleSheetsService {
     this.fetchImpl = config.fetch ?? ((input, init) => fetch(input, init));
     this.oauthTokenUrl = config.oauthTokenUrl ?? defaultOauthTokenUrl;
     this.sheetsApiBaseUrl = config.sheetsApiBaseUrl ?? defaultSheetsApiBaseUrl;
+    this.driveApiBaseUrl = config.driveApiBaseUrl ?? defaultDriveApiBaseUrl;
     this.now = config.now ?? Date.now;
     this.delay = config.delay ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
-  private async readHeaderLayout(config: GoogleSheetTableConfig): Promise<HeaderLayout> {
+  private async readHeaderLayout(config: GoogleSheetTableConfig): Promise<GoogleSheetHeaderLayout> {
     const values = await this.readValues(
       config.spreadsheetId,
       `${escapeSheetName(config.sheetTabName)}!${config.headerRow}:${config.headerRow}`
@@ -329,6 +360,10 @@ export class GoogleSheetsService {
   async readHeaders(config: GoogleSheetTableConfig): Promise<string[]> {
     const layout = await this.readHeaderLayout(config);
     return layout.headers;
+  }
+
+  async getHeaderLayout(config: GoogleSheetTableConfig): Promise<GoogleSheetHeaderLayout> {
+    return this.readHeaderLayout(config);
   }
 
   async readHeaderNames(spreadsheetId: string, sheetTabName: string, headerRow: number): Promise<string[]> {
@@ -366,11 +401,12 @@ export class GoogleSheetsService {
   }
 
   async readTableSnapshot(config: GoogleSheetTableConfig): Promise<TableSnapshot> {
-    const range = `${escapeSheetName(config.sheetTabName)}`;
-    const values = await this.readValues(config.spreadsheetId, range);
-    const headerIndex = Math.max(config.headerRow - 1, 0);
-    const dataIndex = Math.max(config.dataStartRow - 1, headerIndex + 1);
-    const layout = buildHeaderLayout(values[headerIndex], config.idColumn);
+    const layout = await this.readHeaderLayout(config);
+    const values = await this.readValues(
+      config.spreadsheetId,
+      `${escapeSheetName(config.sheetTabName)}!${buildBoundedTableRange(config.headerRow, layout.entries.at(-1)?.columnNumber ?? 1)}`
+    );
+    const dataIndex = Math.max(config.dataStartRow - config.headerRow, 1);
 
     return {
       headers: layout.headers,
@@ -389,10 +425,10 @@ export class GoogleSheetsService {
     config: GoogleSheetTableConfig,
     rowId: string,
     rowNumberHint?: number | null,
-    options?: { verifyUnique?: boolean }
+    options?: { verifyUnique?: boolean; layout?: GoogleSheetHeaderLayout }
   ): Promise<RowLookupResult | null> {
     const verifyUnique = options?.verifyUnique ?? true;
-    const layout = await this.readHeaderLayout(config);
+    const layout = options?.layout ?? await this.readHeaderLayout(config);
     let hintedRow: RowEnvelope | null = null;
     if (rowNumberHint) {
       hintedRow = await this.readSingleRow(config, rowNumberHint, layout).catch(() => null);
@@ -431,7 +467,7 @@ export class GoogleSheetsService {
 
   async readRowReferences(
     config: GoogleSheetTableConfig,
-    layout?: HeaderLayout
+    layout?: GoogleSheetHeaderLayout
   ): Promise<RowReference[]> {
     const resolvedLayout = layout ?? await this.readHeaderLayout(config);
     const idColumnLetter = columnNumberToA1(resolvedLayout.idColumnNumber);
@@ -454,7 +490,7 @@ export class GoogleSheetsService {
   async readSingleRow(
     config: GoogleSheetTableConfig,
     rowNumber: number,
-    layout?: HeaderLayout
+    layout?: GoogleSheetHeaderLayout
   ): Promise<RowEnvelope> {
     const [resolvedLayout, values] = await Promise.all([
       layout ? Promise.resolve(layout) : this.readHeaderLayout(config),
@@ -494,10 +530,14 @@ export class GoogleSheetsService {
     return parseUpdatedRangeRowNumber(body.updates?.updatedRange);
   }
 
-  async appendRowSkeleton(config: GoogleSheetTableConfig, rowId: string): Promise<number> {
-    const layout = await this.readHeaderLayout(config);
+  async appendRowSkeleton(
+    config: GoogleSheetTableConfig,
+    rowId: string,
+    layout?: GoogleSheetHeaderLayout
+  ): Promise<number> {
+    const resolvedLayout = layout ?? await this.readHeaderLayout(config);
     const accessToken = await this.getAccessToken();
-    const idColumnLetter = columnNumberToA1(layout.idColumnNumber);
+    const idColumnLetter = columnNumberToA1(resolvedLayout.idColumnNumber);
     const range = `${escapeSheetName(config.sheetTabName)}!${idColumnLetter}${config.dataStartRow}:${idColumnLetter}`;
     const response = await this.authorizedRequest(
       `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
@@ -549,10 +589,11 @@ export class GoogleSheetsService {
   async writeRowPatch(
     config: GoogleSheetTableConfig,
     rowNumber: number,
-    values: Partial<RowRecord>
+    values: Partial<RowRecord>,
+    layout?: GoogleSheetHeaderLayout
   ): Promise<void> {
-    const layout = await this.readHeaderLayout(config);
-    const segments = buildColumnValueSegments(layout, values);
+    const resolvedLayout = layout ?? await this.readHeaderLayout(config);
+    const segments = buildColumnValueSegments(resolvedLayout, values);
     if (segments.length === 0) {
       return;
     }
@@ -615,6 +656,70 @@ export class GoogleSheetsService {
       },
       {
         operation: `delete row for ${config.projectSlug}/${config.tableSlug}`,
+        maxRetries: 0
+      }
+    );
+
+    await this.parseJson(response);
+  }
+
+  async watchSpreadsheetFile(spreadsheetId: string, request: GoogleDriveWatchRequest): Promise<GoogleDriveWatch> {
+    const accessToken = await this.getAccessToken();
+    const channelId = crypto.randomUUID();
+    const response = await this.authorizedRequest(
+      `${this.driveApiBaseUrl}/files/${encodeURIComponent(spreadsheetId)}/watch?supportsAllDrives=true`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          id: channelId,
+          type: 'web_hook',
+          address: request.webhookUrl,
+          token: request.token,
+          ...(request.expirationMs ? { expiration: String(request.expirationMs) } : {})
+        })
+      },
+      {
+        operation: `watch spreadsheet file ${spreadsheetId}`,
+        maxRetries: 0
+      }
+    );
+
+    const body = await this.parseJson<GoogleDriveChannelResponse>(response);
+    if (!body.id || !body.resourceId) {
+      throw new ServiceUnavailableError('Google Drive watch response did not include a channel id and resource id.', {
+        spreadsheetId
+      });
+    }
+
+    return {
+      channelId: body.id,
+      resourceId: body.resourceId,
+      resourceUri: body.resourceUri ?? null,
+      expirationAt: body.expiration ? new Date(Number(body.expiration)).toISOString() : null
+    };
+  }
+
+  async stopDriveChannel(channelId: string, resourceId: string): Promise<void> {
+    const accessToken = await this.getAccessToken();
+    const response = await this.authorizedRequest(
+      `${this.driveApiBaseUrl}/channels/stop`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          id: channelId,
+          resourceId
+        })
+      },
+      {
+        operation: `stop drive channel ${channelId}`,
         maxRetries: 0
       }
     );
@@ -711,7 +816,7 @@ export class GoogleSheetsService {
     const payload = base64UrlEncode(
       JSON.stringify({
         iss: this.config.clientEmail,
-        scope: googleSheetsScope,
+        scope: googleApiScopes,
         aud: this.oauthTokenUrl,
         exp: expiresAt,
         iat: issuedAt

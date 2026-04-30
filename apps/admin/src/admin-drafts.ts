@@ -168,7 +168,7 @@ function parseJsonObject(value: string, fieldLabel: string) {
   }
 
   try {
-    const parsed = JSON.parse(normalized) as unknown;
+    const parsed: unknown = JSON.parse(normalized);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
       return {
         value: undefined,

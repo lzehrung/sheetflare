@@ -40,12 +40,24 @@ class SqlStorageHarness {
 
 function createDurableObjectState() {
   const database = new Database(':memory:');
+  let alarmTimestamp: number | null = null;
   return {
     storage: {
       sql: new SqlStorageHarness(database),
       transactionSync<T>(callback: () => T) {
         const transaction = database.transaction(callback);
         return transaction();
+      },
+      getAlarm() {
+        return Promise.resolve(alarmTimestamp);
+      },
+      setAlarm(scheduledTime: number | Date) {
+        alarmTimestamp = scheduledTime instanceof Date ? scheduledTime.getTime() : scheduledTime;
+        return Promise.resolve();
+      },
+      deleteAlarm() {
+        alarmTimestamp = null;
+        return Promise.resolve();
       }
     }
   } as DurableObjectState;
@@ -53,6 +65,7 @@ function createDurableObjectState() {
 
 export type DurableObjectClass<TEnv> = new (state: DurableObjectState, env: TEnv) => {
   fetch(request: Request): Promise<Response>;
+  alarm?(): Promise<void> | void;
 };
 
 class LocalDurableObjectStub {
@@ -66,7 +79,7 @@ class LocalDurableObjectStub {
 }
 
 class LocalDurableObjectNamespace<TEnv> {
-  private readonly instances = new Map<string, { fetch(request: Request): Promise<Response> }>();
+  private readonly instances = new Map<string, { fetch(request: Request): Promise<Response>; alarm?(): Promise<void> | void }>();
 
   constructor(
     private readonly env: TEnv,
@@ -86,6 +99,15 @@ class LocalDurableObjectNamespace<TEnv> {
 
     return new LocalDurableObjectStub(instance);
   }
+
+  async triggerAlarm(name: string) {
+    const instance = this.instances.get(name);
+    if (!instance?.alarm) {
+      throw new Error(`Durable object ${name} does not define an alarm handler.`);
+    }
+
+    await instance.alarm();
+  }
 }
 
 export function createDurableObjectNamespace<TEnv>(
@@ -93,4 +115,11 @@ export function createDurableObjectNamespace<TEnv>(
   durableObjectClass: DurableObjectClass<TEnv>
 ) {
   return new LocalDurableObjectNamespace(env, durableObjectClass);
+}
+
+export async function triggerDurableObjectAlarm<TEnv>(
+  namespace: ReturnType<typeof createDurableObjectNamespace<TEnv>>,
+  name: string
+) {
+  await namespace.triggerAlarm(name);
 }

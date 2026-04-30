@@ -81,13 +81,13 @@ type ScenarioReport = {
 };
 
 type LoadReport = {
-  kind: 'staging-load';
+  kind: 'load';
   status: 'passed' | 'failed';
   startedAt: string;
   finishedAt: string;
   baseUrl: string;
   privateTable: string;
-  publicTable: string;
+  publicTable: string | null;
   rowCountBefore: number | null;
   rowCountAfter: number | null;
   scenarios: ScenarioReport[];
@@ -172,14 +172,14 @@ async function timedRequest<T>(options: Parameters<typeof requestJson<T>>[0]) {
 
 function renderLoadReportMarkdown(report: LoadReport) {
   const lines = [
-    '# Staging Load Report',
+    '# Load Report',
     '',
     `- status: ${report.status}`,
     `- startedAt: ${report.startedAt}`,
     `- finishedAt: ${report.finishedAt}`,
     `- baseUrl: ${report.baseUrl}`,
     `- privateTable: ${report.privateTable}`,
-    `- publicTable: ${report.publicTable}`,
+    `- publicTable: ${report.publicTable ?? 'not configured'}`,
     `- rowCountBefore: ${report.rowCountBefore ?? 'unknown'}`,
     `- rowCountAfter: ${report.rowCountAfter ?? 'unknown'}`,
     ''
@@ -233,13 +233,13 @@ async function main() {
   const scenarios: ScenarioReport[] = [];
 
   const report: LoadReport = {
-    kind: 'staging-load',
+    kind: 'load',
     status: 'failed',
     startedAt,
     finishedAt: startedAt,
     baseUrl: config.baseUrl,
     privateTable: `${config.privateProject}/${config.privateTable}`,
-    publicTable: `${config.publicProject}/${config.publicTable}`,
+    publicTable: config.publicProject && config.publicTable ? `${config.publicProject}/${config.publicTable}` : null,
     rowCountBefore: null,
     rowCountAfter: null,
     scenarios,
@@ -492,6 +492,32 @@ async function main() {
         }
       }
 
+      if (!config.publicProject || !config.publicTable) {
+        const combined = [...samePrincipalAttempts];
+        return {
+          status: 'skipped',
+          durationMs: Number(combined.reduce((sum, attempt) => sum + attempt.durationMs, 0).toFixed(2)),
+          ...summarizeAttempts(combined),
+          notes: [
+            first429At ? `samePrincipalFirst429At=${first429At}` : 'samePrincipalFirst429At=not-hit',
+            'public-read coverage not configured'
+          ],
+          samples: [
+            {
+              request: {
+                method: 'GET',
+                path: adminPath,
+                auth: 'admin'
+              },
+              response: {
+                status: samePrincipalAttempts[0]?.status ?? 0,
+                excerpt: summarizeJson(samePrincipalAttempts[0]?.body ?? null)
+              }
+            }
+          ]
+        } satisfies Omit<ScenarioReport, 'name'>;
+      }
+
       const publicPath = `/v1/projects/${encodeURIComponent(config.publicProject)}/tables/${encodeURIComponent(config.publicTable)}/rows?limit=1`;
       const distributedAttempts = await runConcurrent(
         config.rateLimitPrincipalCount * config.rateLimitRequestsPerPrincipal,
@@ -664,7 +690,7 @@ async function main() {
     report.finishedAt = new Date().toISOString();
 
     if (report.status === 'passed') {
-      console.log('\n[done] staging load checks passed');
+      console.log('\n[done] load checks passed');
     } else {
       throw new ScriptError('One or more load scenarios failed.');
     }

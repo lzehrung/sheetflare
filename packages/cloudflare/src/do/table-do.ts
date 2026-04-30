@@ -3,6 +3,7 @@ import {
   BadRequestError,
   ConflictError,
   ForbiddenError,
+  ServiceUnavailableError,
   type RefreshTableCacheResult,
   type GetTableCacheStatusResult,
   type GetSchemaResult,
@@ -14,7 +15,10 @@ import {
   type TableDoRequest,
   type TableRequestContext,
   type TableDoResponse,
-  type ResolvedTableConfigSnapshot
+  type ResolvedTableConfigSnapshot,
+  type TableExternalChange,
+  type TableValidationSummary,
+  type TableValidationIssue
 } from '@sheetflare/contracts';
 import {
   applyFieldRuleNormalization,
@@ -37,7 +41,11 @@ import {
   pickKnownColumns,
   validateFieldRules
 } from '@sheetflare/domain';
-import { GoogleSheetsService, type GoogleSheetTableConfig } from '@sheetflare/google-sheets';
+import {
+  GoogleSheetsService,
+  type GoogleSheetHeaderLayout,
+  type GoogleSheetTableConfig
+} from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from '../types';
 import { getMaxFullScanRows } from '../config';
 import { doRpc } from '../rpc';
@@ -62,10 +70,17 @@ type SyncMeta = {
   lastSyncError: string | null;
 };
 
-type CacheStaleReason = 'fresh' | 'never-synced' | 'ttl-expired' | 'config-changed' | 'error';
+type CacheStaleReason = 'fresh' | 'never-synced' | 'ttl-expired' | 'config-changed' | 'external-change' | 'error';
 
 type CacheState = TableCacheStatus & {
   staleReason: CacheStaleReason;
+};
+
+const emptyExternalChangeState: TableExternalChange = {
+  pending: false,
+  lastChangedAt: null,
+  debounceUntil: null,
+  lastAutoReindexAt: null
 };
 
 type ResolvedTableConfig = GoogleSheetTableConfig & {
@@ -84,6 +99,19 @@ function assertWritableFields(
       readOnlyFields
     });
   }
+}
+
+function assertManagedIdFieldIsNotWritten(
+  values: Partial<RowRecord>,
+  idColumn: string
+) {
+  if (!Object.prototype.hasOwnProperty.call(values, idColumn)) {
+    return;
+  }
+
+  throw new BadRequestError(`Write payload cannot update managed row id column ${idColumn}.`, {
+    idColumn
+  });
 }
 
 function normalizePartialRowValues(input: Partial<RowRecord>): RowRecord {
@@ -185,6 +213,12 @@ function buildCacheConfigSignature(config: {
   });
 }
 
+const emptyValidationSummary: TableValidationSummary = {
+  status: 'ok',
+  issueCount: 0,
+  issues: []
+};
+
 function getProjectStub(env: CloudflareEnv, projectSlug: string) {
   return env.PROJECT_DO.get(env.PROJECT_DO.idFromName(`project:${projectSlug}`));
 }
@@ -192,7 +226,6 @@ function getProjectStub(env: CloudflareEnv, projectSlug: string) {
 export class TableDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
   private activeSync: Promise<TableCacheStatus> | null = null;
-  private currentRequestContext: TableRequestContext | null = null;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -327,63 +360,64 @@ export class TableDO {
   }
 
   private async handle(body: TableDoRequest): Promise<TableDoResponse> {
-    this.currentRequestContext = body.requestContext ?? null;
-    try {
-      switch (body.type) {
-        case 'table.rows.list':
-          return {
-            type: 'table.rows.list.result',
-            result: await this.listRows(body.projectSlug, body.tableSlug, body.query, body.resolvedConfig)
-          };
-        case 'table.row.get':
-          return {
-            type: 'table.row.get.result',
-            result: await this.getRow(body.projectSlug, body.tableSlug, body.rowId, body.resolvedConfig)
-          };
-        case 'table.row.create':
-          return {
-            type: 'table.row.create.result',
-            result: await this.createRow(body.projectSlug, body.tableSlug, body.input.values)
-          };
-        case 'table.row.update':
-          return {
-            type: 'table.row.update.result',
-            result: await this.updateRow(body.projectSlug, body.tableSlug, body.rowId, body.input.values)
-          };
-        case 'table.row.delete':
-          return {
-            type: 'table.row.delete.result',
-            result: await this.deleteRow(body.projectSlug, body.tableSlug, body.rowId)
-          };
-        case 'table.schema.get':
-          return {
-            type: 'table.schema.get.result',
-            result: await this.getSchema(body.projectSlug, body.tableSlug, body.resolvedConfig)
-          };
-        case 'table.cache.get':
-          return {
-            type: 'table.cache.get.result',
-            result: await this.getCacheStatus(body.projectSlug, body.tableSlug, body.resolvedConfig)
-          };
-        case 'table.cache.refresh':
-          return {
-            type: 'table.cache.refresh.result',
-            result: await this.refreshCacheIfStale(body.projectSlug, body.tableSlug, body.resolvedConfig)
-          };
-        case 'table.reindex':
-          return {
-            type: 'table.reindex.result',
-            result: await this.syncCache(
-              body.projectSlug,
-              body.tableSlug,
-              body.resolvedConfig
-                ? { force: true, resolvedConfig: body.resolvedConfig }
-                : { force: true }
-            )
-          };
-      }
-    } finally {
-      this.currentRequestContext = null;
+    const requestContext = body.requestContext ?? null;
+    switch (body.type) {
+      case 'table.rows.list':
+        return {
+          type: 'table.rows.list.result',
+          result: await this.listRows(body.projectSlug, body.tableSlug, body.query, body.resolvedConfig, requestContext)
+        };
+      case 'table.row.get':
+        return {
+          type: 'table.row.get.result',
+          result: await this.getRow(body.projectSlug, body.tableSlug, body.rowId, body.resolvedConfig, requestContext)
+        };
+      case 'table.row.create':
+        return {
+          type: 'table.row.create.result',
+          result: await this.createRow(body.projectSlug, body.tableSlug, body.input.values, requestContext)
+        };
+      case 'table.row.update':
+        return {
+          type: 'table.row.update.result',
+          result: await this.updateRow(body.projectSlug, body.tableSlug, body.rowId, body.input.values, requestContext)
+        };
+      case 'table.row.delete':
+        return {
+          type: 'table.row.delete.result',
+          result: await this.deleteRow(body.projectSlug, body.tableSlug, body.rowId, requestContext)
+        };
+      case 'table.schema.get':
+        return {
+          type: 'table.schema.get.result',
+          result: await this.getSchema(body.projectSlug, body.tableSlug, body.resolvedConfig, requestContext)
+        };
+      case 'table.cache.get':
+        return {
+          type: 'table.cache.get.result',
+          result: await this.getCacheStatus(body.projectSlug, body.tableSlug, body.resolvedConfig)
+        };
+      case 'table.cache.refresh':
+        return {
+          type: 'table.cache.refresh.result',
+          result: await this.refreshCacheIfStale(body.projectSlug, body.tableSlug, body.resolvedConfig, requestContext)
+        };
+      case 'table.external-change.record':
+        return {
+          type: 'table.external-change.record.result',
+          result: await this.recordExternalChange(body.projectSlug, body.tableSlug, body.changedAt, body.debounceUntil)
+        };
+      case 'table.reindex':
+        return {
+          type: 'table.reindex.result',
+          result: await this.syncCache(
+            body.projectSlug,
+            body.tableSlug,
+            body.resolvedConfig
+              ? { force: true, resolvedConfig: body.resolvedConfig, requestContext }
+              : { force: true, requestContext }
+          )
+        };
     }
   }
 
@@ -433,14 +467,15 @@ export class TableDO {
     projectSlug: string,
     tableSlug: string,
     rawQuery: ListRowsQuery,
-    resolvedConfig?: ResolvedTableConfigSnapshot
+    resolvedConfig?: ResolvedTableConfigSnapshot,
+    requestContext?: TableRequestContext | null
   ) {
     const config = await this.getTableConfig(projectSlug, tableSlug, resolvedConfig);
     if (!config.readEnabled) {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensureQueryCacheReady(config);
+    await this.ensureQueryCacheReady(config, requestContext);
     const headers = await this.getHeaders(config);
     this.assertRequestedFields(rawQuery.fields ?? null, headers);
     const result = this.queryCachedRows(config, rawQuery);
@@ -455,15 +490,16 @@ export class TableDO {
     projectSlug: string,
     tableSlug: string,
     rowId: string,
-    resolvedConfig?: ResolvedTableConfigSnapshot
+    resolvedConfig?: ResolvedTableConfigSnapshot,
+    requestContext?: TableRequestContext | null
   ) {
     const config = await this.getTableConfig(projectSlug, tableSlug, resolvedConfig);
     if (!config.readEnabled) {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    const cacheState = await this.ensurePointOperationReady(config);
-    let resolved = cacheState.staleReason === 'fresh' ? this.getCachedRow(rowId) : null;
+    const cacheState = await this.ensurePointReadReady(config, requestContext);
+    let resolved = this.canServePointReadFromCache(cacheState.staleReason) ? this.getCachedRow(rowId) : null;
     if (!resolved) {
       resolved = await this.resolveRowById(config, rowId);
     }
@@ -477,18 +513,18 @@ export class TableDO {
     };
   }
 
-  private async createRow(projectSlug: string, tableSlug: string, input: RowRecord) {
+  private async createRow(projectSlug: string, tableSlug: string, input: RowRecord, requestContext?: TableRequestContext | null) {
     const config = await this.getTableConfig(projectSlug, tableSlug);
     if (!config.createEnabled) {
       throw new ForbiddenError(`Creates are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensureMutationValidationReady(config);
+    const cacheState = await this.ensureMutationValidationReady(config, requestContext);
     const normalizedInput = normalizeRowValues(input);
     assertWritableFields(normalizedInput, config.readOnlyFields);
-    const headers = await this.getHeaders(config, {
-      bypassCache: true
-    });
+    const sheets = this.getSheetsClient(config);
+    const layout = await sheets.getHeaderLayout(config);
+    const headers = layout.headers;
     const hasProvidedId = Object.prototype.hasOwnProperty.call(normalizedInput, config.idColumn);
     const parsedManagedRowId = parseManagedRowId(normalizedInput[config.idColumn]);
     if (hasProvidedId && !parsedManagedRowId.ok) {
@@ -501,12 +537,14 @@ export class TableDO {
     }
 
     const rowId = parsedManagedRowId.ok ? parsedManagedRowId.rowId : generateRowId();
-    const existingRow = await this.resolveRowById(config, rowId);
-    if (existingRow) {
-      throw new BadRequestError(`Row ${rowId} already exists.`, {
-        rowId,
-        idColumn: config.idColumn
-      });
+    if (parsedManagedRowId.ok || cacheState.staleReason !== 'fresh') {
+      const existingRow = await this.resolveRowById(config, rowId, { layout });
+      if (existingRow) {
+        throw new BadRequestError(`Row ${rowId} already exists.`, {
+          rowId,
+          idColumn: config.idColumn
+        });
+      }
     }
 
     const normalizedValues = normalizeRowValues({
@@ -519,18 +557,27 @@ export class TableDO {
     normalizedCandidate[config.idColumn] = rowId;
     this.assertFieldRules(normalizedCandidate, config);
     this.assertUniqueFieldRules(normalizedCandidate, config);
-    const sheets = this.getSheetsClient(config);
-    const rowNumber = await sheets.appendRowSkeleton(config, rowId);
-    const writableValues = Object.fromEntries(
-      Object.entries(normalizedCandidate).filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
-    ) as Partial<RowRecord>;
-    await sheets.writeRowPatch(config, rowNumber, writableValues);
-    const liveRow = await sheets.readSingleRow(config, rowNumber);
+    let rowNumber: number | null = null;
+    let liveRow: RowEnvelope;
+    try {
+      rowNumber = await sheets.appendRowSkeleton(config, rowId, layout);
+      const writableValues = Object.fromEntries(
+        Object.entries(normalizedCandidate).filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
+      ) as Partial<RowRecord>;
+      await sheets.writeRowPatch(config, rowNumber, writableValues, layout);
+      liveRow = await sheets.readSingleRow(config, rowNumber, layout);
+    } catch (error) {
+      if (rowNumber !== null) {
+        await this.rollbackAppendedCreateRow(config, rowId, rowNumber, layout, error);
+      }
+
+      throw error;
+    }
 
     this.upsertRowIndex(rowId, rowNumber);
     this.upsertCachedRow(liveRow);
     this.upsertCachedCells(config, liveRow);
-    this.refreshSchemaMeta(headers);
+    this.invalidateSchemaMeta();
     this.markCacheFreshAfterMutation(config, headers);
 
     return {
@@ -539,26 +586,25 @@ export class TableDO {
     };
   }
 
-  private async updateRow(projectSlug: string, tableSlug: string, rowId: string, patch: Partial<RowRecord>) {
+  private async updateRow(projectSlug: string, tableSlug: string, rowId: string, patch: Partial<RowRecord>, requestContext?: TableRequestContext | null) {
     const config = await this.getTableConfig(projectSlug, tableSlug);
     if (!config.updateEnabled) {
       throw new ForbiddenError(`Updates are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensureMutationValidationReady(config);
-    const headers = await this.getHeaders(config, {
-      bypassCache: true
-    });
-    assertWritableFields(patch, config.readOnlyFields);
-    const existingRow = await this.resolveRowById(config, rowId);
+    await this.ensureMutationValidationReady(config, requestContext);
+    const sheets = this.getSheetsClient(config);
+    const layout = await sheets.getHeaderLayout(config);
+    const headers = layout.headers;
+    const normalizedPatch = normalizePartialRowValues(patch);
+    assertManagedIdFieldIsNotWritten(normalizedPatch, config.idColumn);
+    assertWritableFields(normalizedPatch, config.readOnlyFields);
+    const existingRow = await this.resolveRowById(config, rowId, { layout });
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
 
-    const patchValues = Object.fromEntries(
-      Object.entries(patch).filter((entry): entry is [string, RowRecord[string]] => entry[1] !== undefined)
-    );
-    const { values, ignoredKeys } = pickKnownColumns(normalizePartialRowValues(patchValues), headers);
+    const { values, ignoredKeys } = pickKnownColumns(normalizedPatch, headers);
     assertKnownWriteColumns(ignoredKeys, headers);
     const normalizedCandidate = applyFieldRuleNormalization(normalizeRowValues({
       ...existingRow.values,
@@ -573,13 +619,12 @@ export class TableDO {
         .filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
         .map(([fieldName]) => [fieldName, normalizedCandidate[fieldName]])
     ) as Partial<RowRecord>;
-    const sheets = this.getSheetsClient(config);
-    await sheets.writeRowPatch(config, existingRow.rowNumber, writableValues);
-    const liveRow = await sheets.readSingleRow(config, existingRow.rowNumber);
+    await sheets.writeRowPatch(config, existingRow.rowNumber, writableValues, layout);
+    const liveRow = await sheets.readSingleRow(config, existingRow.rowNumber, layout);
     this.upsertRowIndex(rowId, existingRow.rowNumber);
     this.upsertCachedRow(liveRow);
     this.upsertCachedCells(config, liveRow);
-    this.refreshSchemaMeta(headers);
+    this.invalidateSchemaMeta();
     this.markCacheFreshAfterMutation(config, headers);
 
     return {
@@ -588,28 +633,32 @@ export class TableDO {
     };
   }
 
-  private async deleteRow(projectSlug: string, tableSlug: string, rowId: string) {
+  private async deleteRow(projectSlug: string, tableSlug: string, rowId: string, requestContext?: TableRequestContext | null) {
     const config = await this.getTableConfig(projectSlug, tableSlug);
     if (!config.deleteEnabled) {
       throw new ForbiddenError(`Deletes are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensurePointOperationReady(config);
+    const cacheState = await this.ensurePointOperationReady(config, requestContext);
     const cachedHeaders = this.getMeta('headers');
-    const headers = await this.getHeaders(config, {
-      bypassCache: true
-    });
-    const existingRow = await this.resolveRowById(config, rowId);
+    const sheets = this.getSheetsClient(config);
+    const layout = await sheets.getHeaderLayout(config);
+    const headers = layout.headers;
+    const existingRow = await this.resolveRowById(config, rowId, { layout });
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
 
-    await this.getSheetsClient(config).deleteRow(config, existingRow.rowNumber);
+    await sheets.deleteRow(config, existingRow.rowNumber);
     this.deleteRowIndex(rowId);
     this.deleteCachedRow(rowId);
-    await this.refreshCachedRowNumbersAfterDelete(config, headers, cachedHeaders);
-    this.refreshSchemaMeta(headers);
-    this.markCacheFreshAfterMutation(config, headers);
+    if (cacheState.staleReason === 'fresh' && cachedHeaders === JSON.stringify(headers)) {
+      this.shiftCachedRowNumbersAfterDelete(existingRow.rowNumber);
+      this.invalidateSchemaMeta();
+      this.markCacheFreshAfterMutation(config, headers);
+    } else {
+      await this.syncCache(projectSlug, tableSlug, { force: true, resolvedConfig: config, requestContext: requestContext ?? null });
+    }
 
     return {
       ok: true as const,
@@ -620,14 +669,15 @@ export class TableDO {
   private async getSchema(
     projectSlug: string,
     tableSlug: string,
-    resolvedConfig?: ResolvedTableConfigSnapshot
+    resolvedConfig?: ResolvedTableConfigSnapshot,
+    requestContext?: TableRequestContext | null
   ): Promise<GetSchemaResult> {
     const config = await this.getTableConfig(projectSlug, tableSlug, resolvedConfig);
     if (!config.readEnabled) {
       throw new ForbiddenError(`Reads are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensureQueryCacheReady(config);
+    await this.ensureQueryCacheReady(config, requestContext);
     return {
       data: this.getSchemaMeta(await this.getHeaders(config))
     };
@@ -647,7 +697,8 @@ export class TableDO {
   private async refreshCacheIfStale(
     projectSlug: string,
     tableSlug: string,
-    resolvedConfig?: ResolvedTableConfigSnapshot
+    resolvedConfig?: ResolvedTableConfigSnapshot,
+    requestContext?: TableRequestContext | null
   ): Promise<RefreshTableCacheResult> {
     const config = await this.getTableConfig(projectSlug, tableSlug, resolvedConfig);
     const cacheState = this.getCacheState(config);
@@ -655,7 +706,8 @@ export class TableDO {
     if (cacheState.staleReason !== 'fresh') {
       await this.syncCache(projectSlug, tableSlug, {
         force: cacheState.staleReason === 'never-synced' || cacheState.staleReason === 'error',
-        resolvedConfig: config
+        resolvedConfig: config,
+        requestContext: requestContext ?? null
       });
     }
 
@@ -667,41 +719,72 @@ export class TableDO {
     };
   }
 
-  private async ensureQueryCacheReady(config: GoogleSheetTableConfig) {
+  private async recordExternalChange(projectSlug: string, tableSlug: string, changedAt: string, debounceUntil: string | null) {
+    await this.getTableConfig(projectSlug, tableSlug);
+    this.setExternalChangeState({
+      ...this.getExternalChangeState(),
+      pending: true,
+      lastChangedAt: changedAt,
+      debounceUntil
+    });
+
+    return { ok: true as const };
+  }
+
+  private async ensureQueryCacheReady(config: GoogleSheetTableConfig, requestContext?: TableRequestContext | null) {
     const cacheState = this.getCacheState(config);
-    if (cacheState.staleReason === 'fresh') {
+    if (cacheState.staleReason === 'fresh' || cacheState.staleReason === 'external-change') {
       return cacheState;
     }
 
     await this.syncCache(config.projectSlug, config.tableSlug, {
-      force: cacheState.staleReason === 'never-synced' || cacheState.staleReason === 'error'
+      force: cacheState.staleReason === 'never-synced' || cacheState.staleReason === 'error',
+      requestContext: requestContext ?? null
     });
     return this.getCacheState(config);
   }
 
-  private async ensurePointOperationReady(config: GoogleSheetTableConfig) {
+  private async ensurePointReadReady(config: GoogleSheetTableConfig, requestContext?: TableRequestContext | null) {
+    const cacheState = this.getCacheState(config);
+    if (
+      cacheState.staleReason === 'fresh' ||
+      cacheState.staleReason === 'ttl-expired' ||
+      cacheState.staleReason === 'external-change'
+    ) {
+      return cacheState;
+    }
+
+    await this.syncCache(config.projectSlug, config.tableSlug, { force: true, requestContext: requestContext ?? null });
+    return this.getCacheState(config);
+  }
+
+  private async ensurePointOperationReady(config: GoogleSheetTableConfig, requestContext?: TableRequestContext | null) {
     const cacheState = this.getCacheState(config);
     if (cacheState.staleReason === 'fresh' || cacheState.staleReason === 'ttl-expired') {
       return cacheState;
     }
 
-    await this.syncCache(config.projectSlug, config.tableSlug, { force: true });
+    await this.syncCache(config.projectSlug, config.tableSlug, { force: true, requestContext: requestContext ?? null });
     return this.getCacheState(config);
   }
 
-  private async ensureMutationValidationReady(config: ResolvedTableConfig) {
-    if (this.hasUniqueFieldRules(config)) {
-      await this.ensureQueryCacheReady(config);
-      return;
+  private async ensureMutationValidationReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
+    if (this.getCacheState(config).staleReason === 'external-change') {
+      await this.syncCache(config.projectSlug, config.tableSlug, { force: true, requestContext: requestContext ?? null });
+      return this.getCacheState(config);
     }
 
-    await this.ensurePointOperationReady(config);
+    if (this.hasUniqueFieldRules(config)) {
+      return this.ensureQueryCacheReady(config, requestContext);
+    }
+
+    return this.ensurePointOperationReady(config, requestContext);
   }
 
   private async syncCache(
     projectSlug: string,
     tableSlug: string,
-    options: { force: boolean; resolvedConfig?: ResolvedTableConfigSnapshot }
+    options: { force: boolean; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext | null | undefined }
   ) {
     if (this.activeSync) {
       const cache = await this.activeSync;
@@ -724,7 +807,7 @@ export class TableDO {
       };
     }
 
-    const syncPromise = this.performSync(config);
+    const syncPromise = this.performSync(config, options.requestContext ?? null);
     this.activeSync = syncPromise;
 
     try {
@@ -741,7 +824,7 @@ export class TableDO {
     }
   }
 
-  private async performSync(config: ResolvedTableConfig): Promise<TableCacheStatus> {
+  private async performSync(config: ResolvedTableConfig, requestContext: TableRequestContext | null): Promise<TableCacheStatus> {
     const startedAt = new Date().toISOString();
     const syncStartedAtMs = Date.now();
     this.setSyncMeta({
@@ -758,6 +841,7 @@ export class TableDO {
       const rows = snapshot.rows;
       assertUniqueManagedRowIds(rows, config.idColumn);
       const schema = inferTableSchema(headers, rows);
+      const validation = this.buildValidationSummary(rows, config);
       this.clearCacheTables('staging');
 
       for (const row of rows) {
@@ -772,6 +856,8 @@ export class TableDO {
       this.setMeta('headers', JSON.stringify(headers));
       this.setMeta('schema', JSON.stringify(schema));
       this.setMeta('config.signature', buildCacheConfigSignature(config));
+      this.setMeta('validation.summary', JSON.stringify(validation));
+      this.completeExternalChangeSync(completedAt, requestContext?.syncSource === 'external-change');
       this.setSyncMeta({
         status: 'ready',
         rowCount: rows.length,
@@ -784,10 +870,12 @@ export class TableDO {
         projectSlug: config.projectSlug,
         tableSlug: config.tableSlug,
         rowCount: rows.length,
+        validationStatus: validation.status,
+        validationIssueCount: validation.issueCount,
         durationMs: Date.now() - syncStartedAtMs,
-        requestId: this.currentRequestContext?.requestId ?? null,
-        route: this.currentRequestContext?.route ?? null,
-        principal: this.currentRequestContext?.principal ?? null
+        requestId: requestContext?.requestId ?? null,
+        route: requestContext?.route ?? null,
+        principal: requestContext?.principal ?? null
       }));
 
       return this.computeCacheStatus(config);
@@ -807,9 +895,9 @@ export class TableDO {
         errorMessage: error instanceof Error ? error.message : 'Unknown sync error',
         errorDetails: error instanceof AppError ? error.details ?? null : null,
         errorStack: error instanceof Error ? error.stack ?? null : null,
-        requestId: this.currentRequestContext?.requestId ?? null,
-        route: this.currentRequestContext?.route ?? null,
-        principal: this.currentRequestContext?.principal ?? null
+        requestId: requestContext?.requestId ?? null,
+        route: requestContext?.route ?? null,
+        principal: requestContext?.principal ?? null
       }));
       throw error;
     }
@@ -818,7 +906,7 @@ export class TableDO {
   private async resolveRowById(
     config: ResolvedTableConfig,
     rowId: string,
-    options?: { verifyUnique?: boolean }
+    options?: { verifyUnique?: boolean; layout?: GoogleSheetHeaderLayout }
   ): Promise<RowEnvelope | null> {
     const cached = this.getCachedRow(rowId);
     const rowNumberHint = cached?.rowNumber ?? this.lookupRowNumber(rowId);
@@ -842,53 +930,59 @@ export class TableDO {
     return result.row;
   }
 
-  private async refreshCachedRowNumbersAfterDelete(
+  private async rollbackAppendedCreateRow(
     config: ResolvedTableConfig,
-    headers: string[],
-    cachedHeaders: string | null
+    rowId: string,
+    appendedRowNumber: number,
+    layout: GoogleSheetHeaderLayout,
+    createError: unknown
   ) {
-    if (cachedHeaders !== JSON.stringify(headers)) {
-      await this.syncCache(config.projectSlug, config.tableSlug, { force: true });
-      return;
-    }
+    try {
+      const rollbackTarget = await this.getSheetsClient(config).findRowById(
+        config,
+        rowId,
+        appendedRowNumber,
+        { layout, verifyUnique: true }
+      );
 
-    const references = await this.getSheetsClient(config).readRowReferences(config);
-    if (!this.canRepairDeleteFromRowReferences(references)) {
-      await this.syncCache(config.projectSlug, config.tableSlug, { force: true });
-      return;
-    }
+      if (!rollbackTarget) {
+        throw new Error(`Appended row ${rowId} could not be found for rollback.`);
+      }
 
-    for (const reference of references) {
-      this.updateCachedRowNumber(reference.rowId, reference.rowNumber);
+      if (rollbackTarget.duplicateCount !== 1) {
+        throw new Error(`Appended row ${rowId} is no longer uniquely identifiable for rollback.`);
+      }
+
+      await this.getSheetsClient(config).deleteRow(config, rollbackTarget.row.rowNumber);
+    } catch (rollbackError) {
+      throw new ServiceUnavailableError('Create failed after Google Sheets row append and automatic rollback could not safely remove the partial row.', {
+        rowId,
+        appendedRowNumber,
+        createError: createError instanceof Error ? createError.message : String(createError),
+        rollbackError: rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+      });
     }
   }
 
-  private canRepairDeleteFromRowReferences(
-    references: Array<{ rowId: string; rowNumber: number }>
-  ) {
-    const cachedRows = this.listCachedRows();
-    if (cachedRows.length !== references.length) {
-      return false;
-    }
-
-    const cachedRowIds = new Set(cachedRows.map((row) => row.id));
-    if (cachedRowIds.size !== cachedRows.length) {
-      return false;
-    }
-
-    const seenRowIds = new Set<string>();
-    for (const reference of references) {
-      if (seenRowIds.has(reference.rowId)) {
-        return false;
-      }
-
-      seenRowIds.add(reference.rowId);
-      if (!cachedRowIds.has(reference.rowId)) {
-        return false;
-      }
-    }
-
-    return true;
+  private shiftCachedRowNumbersAfterDelete(deletedRowNumber: number) {
+    this.ctx.storage.sql.exec(
+      `
+      UPDATE cached_rows
+      SET row_number = row_number - 1
+      WHERE row_number > ?
+      `,
+      deletedRowNumber
+    );
+    this.ctx.storage.sql.exec(
+      `
+      UPDATE row_index
+      SET row_number = row_number - 1,
+          updated_at = ?
+      WHERE row_number > ?
+      `,
+      new Date().toISOString(),
+      deletedRowNumber
+    );
   }
 
   private listCachedRows(): RowEnvelope[] {
@@ -1009,6 +1103,7 @@ export class TableDO {
 
   private getCacheState(config: GoogleSheetTableConfig & { googleCredentialRef?: string }): CacheState {
     const meta = this.getSyncMeta();
+    const externalChange = this.getExternalChangeState();
     const lastSyncMs = meta.lastSyncCompletedAt ? Date.parse(meta.lastSyncCompletedAt) : Number.NaN;
     const configSignature = 'googleCredentialRef' in config && config.googleCredentialRef
       ? buildCacheConfigSignature({
@@ -1032,7 +1127,9 @@ export class TableDO {
           ? 'never-synced'
           : !signatureMatches
             ? 'config-changed'
-            : Date.now() - lastSyncMs > config.cacheTtlSeconds * 1000
+            : externalChange.pending
+              ? 'external-change'
+              : Date.now() - lastSyncMs > config.cacheTtlSeconds * 1000
               ? 'ttl-expired'
               : 'fresh';
 
@@ -1044,8 +1141,56 @@ export class TableDO {
       rowCount: meta.rowCount,
       lastSyncStartedAt: meta.lastSyncStartedAt,
       lastSyncCompletedAt: meta.lastSyncCompletedAt,
-      lastSyncError: meta.lastSyncError
+      lastSyncError: meta.lastSyncError,
+      validation: this.getValidationSummary(),
+      externalChange
     };
+  }
+
+  private getValidationSummary(): TableValidationSummary {
+    const raw = this.getMeta('validation.summary');
+    if (!raw) {
+      return emptyValidationSummary;
+    }
+
+    try {
+      return JSON.parse(raw) as TableValidationSummary;
+    } catch {
+      return emptyValidationSummary;
+    }
+  }
+
+  private getExternalChangeState(): TableExternalChange {
+    const raw = this.getMeta('externalChange.state');
+    if (!raw) {
+      return emptyExternalChangeState;
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as Partial<TableExternalChange>;
+      return {
+        pending: parsed.pending === true,
+        lastChangedAt: parsed.lastChangedAt ?? null,
+        debounceUntil: parsed.debounceUntil ?? null,
+        lastAutoReindexAt: parsed.lastAutoReindexAt ?? null
+      };
+    } catch {
+      return emptyExternalChangeState;
+    }
+  }
+
+  private setExternalChangeState(state: TableExternalChange) {
+    this.setMeta('externalChange.state', JSON.stringify(state));
+  }
+
+  private completeExternalChangeSync(completedAt: string, automatic: boolean) {
+    const state = this.getExternalChangeState();
+    this.setExternalChangeState({
+      pending: false,
+      lastChangedAt: state.lastChangedAt,
+      debounceUntil: null,
+      lastAutoReindexAt: automatic ? completedAt : state.lastAutoReindexAt
+    });
   }
 
   private getMeta(key: string): string | null {
@@ -1101,25 +1246,105 @@ export class TableDO {
       rowCount: cacheState.rowCount,
       lastSyncStartedAt: cacheState.lastSyncStartedAt,
       lastSyncCompletedAt: cacheState.lastSyncCompletedAt,
-      lastSyncError: cacheState.lastSyncError
+      lastSyncError: cacheState.lastSyncError,
+      validation: cacheState.validation,
+      externalChange: cacheState.externalChange
     };
   }
 
   private markCacheFreshAfterMutation(config: ResolvedTableConfig, headers: string[]) {
-    const now = new Date().toISOString();
+    const syncMeta = this.getSyncMeta();
     this.setMeta('headers', JSON.stringify(headers));
     this.setMeta('config.signature', buildCacheConfigSignature(config));
+    if (Object.keys(config.fieldRules).length === 0) {
+      this.setMeta('validation.summary', JSON.stringify(emptyValidationSummary));
+    } else {
+      this.setMeta('validation.summary', JSON.stringify(this.buildValidationSummary(this.listCachedRows(), config)));
+    }
     this.setSyncMeta({
       status: 'ready',
       rowCount: this.countCachedRows(),
-      lastSyncStartedAt: now,
-      lastSyncCompletedAt: now,
+      lastSyncStartedAt: syncMeta.lastSyncStartedAt,
+      lastSyncCompletedAt: syncMeta.lastSyncCompletedAt,
       lastSyncError: null
     });
   }
 
-  private refreshSchemaMeta(headers: string[]) {
-    this.setMeta('schema', JSON.stringify(inferTableSchema(headers, this.listCachedRows())));
+  private buildValidationSummary(rows: readonly RowEnvelope[], config: ResolvedTableConfig): TableValidationSummary {
+    if (Object.keys(config.fieldRules).length === 0) {
+      return emptyValidationSummary;
+    }
+
+    const maxIssues = 10;
+    const issues: TableValidationIssue[] = [];
+    let issueCount = 0;
+
+    const uniqueValueOwners = new Map<string, { rowId: string; rowNumber: number }>();
+
+    for (const row of rows) {
+      const normalizedValues = applyFieldRuleNormalization(row.values, config.fieldRules);
+      const violations = validateFieldRules(normalizedValues, config.fieldRules);
+      for (const violation of violations) {
+        issueCount += 1;
+        if (issues.length < maxIssues) {
+          issues.push({
+            rowId: row.id,
+            rowNumber: row.rowNumber,
+            field: violation.field,
+            code: violation.code,
+            message: violation.message
+          });
+        }
+      }
+
+      for (const [fieldName, rule] of Object.entries(config.fieldRules)) {
+        if (!rule.unique) {
+          continue;
+        }
+
+        const value = normalizedValues[fieldName];
+        if (value === undefined || value === null || (typeof value === 'string' && value.length === 0) || Array.isArray(value)) {
+          continue;
+        }
+
+        const uniqueKey = `${fieldName}:${typeof value}:${String(value)}`;
+        const existingOwner = uniqueValueOwners.get(uniqueKey);
+        if (!existingOwner) {
+          uniqueValueOwners.set(uniqueKey, {
+            rowId: row.id,
+            rowNumber: row.rowNumber
+          });
+          continue;
+        }
+
+        issueCount += 1;
+        if (issues.length < maxIssues) {
+          issues.push({
+            rowId: row.id,
+            rowNumber: row.rowNumber,
+            field: fieldName,
+            code: 'UNIQUE',
+            message: `${fieldName} duplicates row ${existingOwner.rowId}.`
+          });
+        }
+      }
+    }
+
+    return issueCount === 0
+      ? emptyValidationSummary
+      : {
+          status: 'warning',
+          issueCount,
+          issues
+        };
+  }
+
+  private invalidateSchemaMeta() {
+    this.deleteMeta('schema');
+  }
+
+  private canServePointReadFromCache(staleReason: CacheStaleReason) {
+    return staleReason === 'fresh' || staleReason === 'external-change';
   }
 
   private countCachedRows(kind: 'live' | 'staging' = 'live') {
