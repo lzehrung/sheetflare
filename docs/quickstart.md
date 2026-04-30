@@ -331,6 +331,12 @@ This requires:
 - the Google Drive API enabled for the same service-account project
 - the deployed API URL to be reachable by Google
 
+Inspect current watch state, including expiration and any last watch error:
+
+```powershell
+npm run ops:watch:drive:status
+```
+
 Run the load and churn harness:
 
 ```powershell

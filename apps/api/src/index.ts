@@ -7,6 +7,7 @@ import {
   adminCreateApiKeyResultSchema,
   adminGetProjectResultSchema,
   adminInspectSpreadsheetTabResultSchema,
+  adminListSpreadsheetWatchesResultSchema,
   adminRegisterSpreadsheetWatchesInputSchema,
   adminRegisterSpreadsheetWatchesResultSchema,
   adminListApiKeysResultSchema,
@@ -41,6 +42,7 @@ import {
   type AdminListApiKeysResult,
   type AdminListProjectsResult,
   type AdminInspectSpreadsheetTabResult,
+  type AdminListSpreadsheetWatchesResult,
   type AdminRegisterSpreadsheetWatchesInput,
   type AdminRegisterSpreadsheetWatchesResult,
   type AdminListSpreadsheetTabsResult,
@@ -109,6 +111,7 @@ const readyResponseSchema = z.object({
     controlPlane: z.literal('ok'),
     rateLimit: z.literal('ok'),
     defaultGoogleCredential: z.enum(['configured', 'missing']),
+    googleDriveWebhookSecret: z.enum(['configured', 'missing']),
     bootstrapAdmin: z.enum(['configured', 'missing'])
   }),
   notes: z.array(z.string())
@@ -427,6 +430,10 @@ function getRateLimitOperationKey(
 
   if (path === '/v1/admin/system/google/drive/watches/register' && normalizedMethod === 'POST') {
     return 'admin.system.drive-watches.register';
+  }
+
+  if (path === '/v1/admin/system/google/drive/watches' && normalizedMethod === 'GET') {
+    return 'admin.system.drive-watches.list';
   }
 
   if (path === '/v1/system/google/drive/notifications' && normalizedMethod === 'POST') {
@@ -1007,6 +1014,20 @@ const registerSpreadsheetWatchesRoute = createRoute({
   }
 });
 
+const listSpreadsheetWatchesRoute = createRoute({
+  method: 'get',
+  path: '/v1/admin/system/google/drive/watches',
+  tags: ['System'],
+  security: adminSecurity,
+  responses: {
+    200: {
+      description: 'List Google Drive spreadsheet watches',
+      content: jsonContent(adminListSpreadsheetWatchesResultSchema)
+    },
+    401: unauthorizedResponse
+  }
+});
+
 const googleDriveNotificationRoute = createRoute({
   method: 'post',
   path: '/v1/system/google/drive/notifications',
@@ -1268,6 +1289,7 @@ function createApp() {
     const hasDefaultGoogleCredential = Boolean(
       c.env.GOOGLE_CLIENT_EMAIL?.trim() && c.env.GOOGLE_PRIVATE_KEY?.trim()
     );
+    const hasDriveWebhookSecret = Boolean(c.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim());
     const hasBootstrapAdmin = Boolean(c.env.ADMIN_BEARER_TOKEN?.trim());
     const notes: string[] = [];
 
@@ -1279,6 +1301,10 @@ function createApp() {
       notes.push('Bootstrap admin bearer token is not configured. Admin access must use API keys.');
     }
 
+    if (!hasDriveWebhookSecret) {
+      notes.push('GOOGLE_DRIVE_WEBHOOK_SECRET is not configured. Automatic Drive-watch reindexing is unavailable.');
+    }
+
     notes.push('This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.');
 
     return c.json({
@@ -1288,6 +1314,7 @@ function createApp() {
         controlPlane: 'ok',
         rateLimit: 'ok',
         defaultGoogleCredential: hasDefaultGoogleCredential ? 'configured' : 'missing',
+        googleDriveWebhookSecret: hasDriveWebhookSecret ? 'configured' : 'missing',
         bootstrapAdmin: hasBootstrapAdmin ? 'configured' : 'missing'
       },
       notes
@@ -1541,6 +1568,21 @@ function createApp() {
       (response as {
         type: 'control.spreadsheet-watches.register.result';
         result: AdminRegisterSpreadsheetWatchesResult;
+      }).result
+    );
+  });
+
+  app.openapi(listSpreadsheetWatchesRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    assertGlobalAdminScope(auth, 'admin:projects');
+    const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+      type: 'control.spreadsheet-watches.list'
+    });
+
+    return c.json(
+      (response as {
+        type: 'control.spreadsheet-watches.list.result';
+        result: AdminListSpreadsheetWatchesResult;
       }).result
     );
   });

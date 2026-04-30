@@ -64,6 +64,7 @@ function columnLettersToIndex(columnLetters: string) {
 }
 
 function createSheetsAndDriveFetch(sheet: SheetState) {
+  const watchCounts = new Map<string, number>();
   return async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
 
@@ -77,11 +78,20 @@ function createSheetsAndDriveFetch(sheet: SheetState) {
     const watchMatch = url.match(/\/drive\/v3\/files\/([^/]+)\/watch/);
     if (watchMatch) {
       const spreadsheetId = decodeURIComponent(watchMatch[1] ?? '');
+      const watchCount = (watchCounts.get(spreadsheetId) ?? 0) + 1;
+      watchCounts.set(spreadsheetId, watchCount);
+      const channelSuffix = watchCount === 1 ? '' : `-${watchCount}`;
+      const expirationValue = init?.body
+        ? (JSON.parse(String(init.body)) as { expiration?: string }).expiration ?? null
+        : null;
+      const expirationMs = expirationValue && /^\d+$/.test(expirationValue)
+        ? Number.parseInt(expirationValue, 10)
+        : Date.parse(expirationValue ?? '2026-05-01T00:00:00.000Z');
       return Response.json({
-        id: `channel-${spreadsheetId}`,
-        resourceId: `resource-${spreadsheetId}`,
+        id: `channel-${spreadsheetId}${channelSuffix}`,
+        resourceId: `resource-${spreadsheetId}${channelSuffix}`,
         resourceUri: `https://www.googleapis.com/drive/v3/files/${spreadsheetId}`,
-        expiration: String(Date.parse('2026-05-01T00:00:00.000Z'))
+        expiration: String(expirationMs)
       });
     }
 
@@ -203,6 +213,7 @@ function createTestEnv(overrides?: Partial<CloudflareEnv>) {
     GOOGLE_CLIENT_EMAIL: 'default@example.com',
     GOOGLE_PRIVATE_KEY: testPrivateKey,
     GOOGLE_CREDENTIALS_JSON: JSON.stringify({}),
+    GOOGLE_DRIVE_WEBHOOK_SECRET: 'secret-token',
     ...overrides
   };
 
@@ -285,6 +296,7 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
         resourceId: 'resource-sheet-1',
         resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
         expirationAt: '2026-05-01T00:00:00.000Z',
+        lastWatchError: null,
         lastNotificationAt: null,
         pendingChangedAt: null,
         debounceUntil: null,
@@ -296,6 +308,75 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     ]);
   });
 
+  it('lists spreadsheet watch status for operators', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    vi.stubGlobal('fetch', createSheetsAndDriveFetch(sheet));
+    const { env } = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await doRpc<ControlPlaneDoResponse>(
+      env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane')),
+      {
+        type: 'control.spreadsheet-watches.register',
+        webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+        webhookToken: 'secret-token',
+        debounceSeconds: 30
+      }
+    );
+
+    const response = await doRpc<ControlPlaneDoResponse>(
+      env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane')),
+      {
+        type: 'control.spreadsheet-watches.list'
+      }
+    );
+
+    expect((response as {
+      type: 'control.spreadsheet-watches.list.result';
+      result: {
+        data: Array<{
+          spreadsheetId: string;
+          lastWatchError: string | null;
+          projectSlugs: string[];
+        }>;
+      };
+    }).result.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        lastWatchError: null,
+        projectSlugs: ['demo']
+      })
+    ]);
+  });
+
   it('removes obsolete spreadsheet watches when the project registry no longer references them', async () => {
     const sheet: SheetState = {
       rows: [
@@ -304,6 +385,7 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       ]
     };
     const stopRequests: Array<{ id: string; resourceId: string }> = [];
+    const fetchHandler = createSheetsAndDriveFetch(sheet);
     vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
 
@@ -315,7 +397,7 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
         });
       }
 
-      return createSheetsAndDriveFetch(sheet)(input, init);
+      return fetchHandler(input, init);
     });
     const { env } = createTestEnv();
     const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
@@ -476,6 +558,28 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       debounceUntil: '2026-04-29T15:01:30.000Z'
     });
 
+    const duplicateResponse = await doRpc<ControlPlaneDoResponse>(
+      env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane')),
+      {
+        type: 'control.spreadsheet-watch.notify',
+        channelId: 'channel-sheet-1',
+        resourceId: 'resource-sheet-1',
+        resourceState: 'update',
+        messageNumber: '2',
+        changedAt: '2026-04-29T15:01:10.000Z',
+        channelExpiration: 'Fri, 01 May 2026 00:00:00 GMT'
+      }
+    );
+
+    expect((duplicateResponse as {
+      type: 'control.spreadsheet-watch.notify.result';
+      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
+    }).result).toEqual({
+      accepted: true,
+      spreadsheetId: 'sheet-1',
+      debounceUntil: '2026-04-29T15:01:30.000Z'
+    });
+
     const cacheAfterNotify = await doRpc<TableDoResponse>(
       env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
       {
@@ -545,6 +649,100 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       type: 'table.row.get.result';
       result: { data: { values: { status: string } } };
     }).result.data.values.status).toBe('active');
+
+    vi.useRealTimers();
+  });
+
+  it('renews expiring spreadsheet watches from the control-plane alarm before they lapse', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    const stopRequests: Array<{ id: string; resourceId: string }> = [];
+    const fetchHandler = createSheetsAndDriveFetch(sheet);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.endsWith('/drive/v3/channels/stop')) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { id?: string; resourceId?: string };
+        stopRequests.push({
+          id: body.id ?? '',
+          resourceId: body.resourceId ?? ''
+        });
+      }
+
+      return fetchHandler(input, init);
+    });
+    const { env, controlPlaneNamespace } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30,
+      expirationMs: Date.parse('2026-04-29T10:10:00.000Z')
+    });
+
+    vi.setSystemTime(new Date('2026-04-29T10:05:01.000Z'));
+    await (controlPlaneNamespace as { triggerAlarm(name: string): Promise<void> }).triggerAlarm('control-plane');
+
+    const response = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.list'
+    });
+
+    expect((response as {
+      type: 'control.spreadsheet-watches.list.result';
+      result: {
+        data: Array<{
+          spreadsheetId: string;
+          channelId: string;
+          resourceId: string;
+          lastWatchError: string | null;
+        }>;
+      };
+    }).result.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        channelId: 'channel-sheet-1-2',
+        resourceId: 'resource-sheet-1-2',
+        lastWatchError: null
+      })
+    ]);
+
+    expect(stopRequests).toContainEqual({
+      id: 'channel-sheet-1',
+      resourceId: 'resource-sheet-1'
+    });
 
     vi.useRealTimers();
   });
