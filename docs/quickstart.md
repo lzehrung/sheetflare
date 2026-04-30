@@ -325,11 +325,19 @@ Register or renew Google Drive watches for automatic debounced reindexing:
 npm run ops:watch:drive
 ```
 
+If you used `npm run setup` with deploy or bootstrap actions, setup now runs this registration step automatically when it has the API URL and an admin credential.
+
 This requires:
 
 - `GOOGLE_DRIVE_WEBHOOK_SECRET` deployed on the API Worker
 - the Google Drive API enabled for the same service-account project
 - the deployed API URL to be reachable by Google
+
+Inspect current watch state, including expiration and any last watch error:
+
+```powershell
+npm run ops:watch:drive:status
+```
 
 Run the load and churn harness:
 

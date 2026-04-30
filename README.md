@@ -41,6 +41,8 @@ npm run smoke
 - `npm run ops:bootstrap`
 - `npm run ops:cache`
 - `npm run ops:cache:health`
+- `npm run ops:watch:drive`
+- `npm run ops:watch:drive:status`
 - `npm run ops:reindex`
 - `npm run e2e:browser`
 - `npm run e2e:local`
@@ -58,7 +60,7 @@ For the normal setup flow:
 4. Use [docs/deploy.md](./docs/deploy.md) for CI deployment details, manual fallback commands, and Cloudflare token scopes.
 5. Use [docs/operator-runbook.md](./docs/operator-runbook.md) for day-2 operations and failure handling.
 
-`npm run setup` writes `sheetflare.setup.json`, keeps reusable local secret state in `.sheetflare.setup.local.json`, can apply secrets, can deploy, can bootstrap the first project and keys, and can run smoke validation. The local state file is secret material, stays untracked, and should not be shared. For reruns from an existing config:
+`npm run setup` writes `sheetflare.setup.json`, keeps reusable local secret state in `.sheetflare.setup.local.json`, can apply secrets, can deploy, can bootstrap the first project and keys, automatically registers Google Drive watches when deploy or bootstrap provide enough context, and can run smoke validation. The local state file is secret material, stays untracked, and should not be shared. For reruns from an existing config:
 
 - `npm run setup -- --apply-secrets`
 - `npm run setup -- --deploy`

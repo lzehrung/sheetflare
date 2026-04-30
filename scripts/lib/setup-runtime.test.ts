@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { resolvePreferredSmokeAdminCredential, resolveSetupRuntimeState, summarizeSetupSecrets } from './setup-runtime';
+import {
+  resolvePreferredAdminCredential,
+  resolveSetupRuntimeState,
+  summarizeSetupSecrets
+} from './setup-runtime';
 
 afterEach(() => {
   delete process.env.GOOGLE_CLIENT_EMAIL;
@@ -47,16 +51,16 @@ describe('resolveSetupRuntimeState', () => {
   });
 });
 
-describe('resolvePreferredSmokeAdminCredential', () => {
-  it('prefers a scoped admin api key for smoke when available', () => {
-    expect(resolvePreferredSmokeAdminCredential({
+describe('resolvePreferredAdminCredential', () => {
+  it('prefers a scoped admin api key when available', () => {
+    expect(resolvePreferredAdminCredential({
       adminApiKey: 'sfk_admin.secret',
       adminBearerToken: 'bootstrap.secret'
     })).toBe('sfk_admin.secret');
   });
 
   it('falls back to the bootstrap admin credential when no admin api key exists', () => {
-    expect(resolvePreferredSmokeAdminCredential({
+    expect(resolvePreferredAdminCredential({
       adminApiKey: null,
       adminBearerToken: 'bootstrap.secret'
     })).toBe('bootstrap.secret');

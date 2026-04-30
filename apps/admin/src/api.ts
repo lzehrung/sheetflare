@@ -4,6 +4,7 @@ import type {
   AdminGetProjectResult,
   AdminInspectSpreadsheetTabResult,
   AdminListProjectsResult,
+  AdminListSpreadsheetWatchesResult,
   AdminListSpreadsheetTabsResult,
   ApiKeyPrincipal,
   CreateProjectInput,
@@ -84,14 +85,14 @@ async function requestAdminJson<T>(
     headers
   });
 
-  if (response.status === 401) {
-    throw new Error('The configured admin credential was rejected.');
-  }
-
   const text = await response.text();
   const parsed = parseJsonResponse(text);
 
   if (!response.ok) {
+    if (response.status === 401 && getApiErrorMessage(parsed) === null) {
+      throw new Error('The configured admin credential was rejected.');
+    }
+
     throw new Error(formatRequestError(response, parsed, text));
   }
 
@@ -131,6 +132,13 @@ export function listSpreadsheetTabs(credential: string, projectSlug: string) {
   return requestAdminJson<AdminListSpreadsheetTabsResult>(
     credential,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/spreadsheet/tabs`
+  );
+}
+
+export function listSpreadsheetWatches(credential: string) {
+  return requestAdminJson<AdminListSpreadsheetWatchesResult>(
+    credential,
+    '/v1/admin/system/google/drive/watches'
   );
 }
 

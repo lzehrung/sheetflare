@@ -87,6 +87,19 @@ type ResolvedTableConfig = GoogleSheetTableConfig & {
   googleCredentialRef: string;
 };
 
+function canServeExternalChangeCache(externalChange: TableExternalChange) {
+  if (!externalChange.pending) {
+    return false;
+  }
+
+  if (!externalChange.debounceUntil) {
+    return false;
+  }
+
+  const debounceUntilMs = Date.parse(externalChange.debounceUntil);
+  return !Number.isNaN(debounceUntilMs) && debounceUntilMs > Date.now();
+}
+
 function assertWritableFields(
   values: Partial<RowRecord>,
   readOnlyFields: readonly string[]
@@ -733,7 +746,10 @@ export class TableDO {
 
   private async ensureQueryCacheReady(config: GoogleSheetTableConfig, requestContext?: TableRequestContext | null) {
     const cacheState = this.getCacheState(config);
-    if (cacheState.staleReason === 'fresh' || cacheState.staleReason === 'external-change') {
+    if (
+      cacheState.staleReason === 'fresh' ||
+      (cacheState.staleReason === 'external-change' && canServeExternalChangeCache(cacheState.externalChange))
+    ) {
       return cacheState;
     }
 
@@ -749,7 +765,7 @@ export class TableDO {
     if (
       cacheState.staleReason === 'fresh' ||
       cacheState.staleReason === 'ttl-expired' ||
-      cacheState.staleReason === 'external-change'
+      (cacheState.staleReason === 'external-change' && canServeExternalChangeCache(cacheState.externalChange))
     ) {
       return cacheState;
     }

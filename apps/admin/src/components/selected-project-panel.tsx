@@ -1,6 +1,7 @@
-import type { ProjectConfig, SpreadsheetTab, TableCacheStatus, TableConfig } from '@sheetflare/contracts';
+import type { ProjectConfig, SpreadsheetTab, SpreadsheetWatch, TableCacheStatus, TableConfig } from '@sheetflare/contracts';
 import type { CreateTableDraft } from '../admin-drafts';
 import { CacheStatusSummary } from './cache-status-summary';
+import { getSpreadsheetWatchStatusSummary, SpreadsheetWatchSummary } from './spreadsheet-watch-summary';
 
 type ProjectDetailState =
   | { status: 'idle'; message: string }
@@ -19,6 +20,12 @@ type TabInspectionState =
   | { status: 'loading'; tabName: string; headerRow: number }
   | { status: 'ready'; data: { tab: SpreadsheetTab; headerRow: number; headers: string[] } }
   | { status: 'error'; message: string; tabName: string; headerRow: number };
+
+type SpreadsheetWatchState =
+  | { status: 'idle'; message: string }
+  | { status: 'loading' }
+  | { status: 'ready'; watch: SpreadsheetWatch | null }
+  | { status: 'error'; message: string };
 
 type ProjectHealthSummary = {
   healthy: number;
@@ -39,6 +46,7 @@ type SelectedProjectPanelProps = {
   cacheStatusLoadingByTable: Record<string, boolean>;
   spreadsheetTabsState: SpreadsheetTabsState;
   tabInspectionState: TabInspectionState;
+  spreadsheetWatchState: SpreadsheetWatchState;
   tableSetupOpen: boolean;
   onTableSetupOpenChange: (next: boolean) => void;
   onCreateTableDraftChange: (next: CreateTableDraft) => void;
@@ -199,6 +207,7 @@ export function SelectedProjectPanel({
   cacheStatusLoadingByTable,
   spreadsheetTabsState,
   tabInspectionState,
+  spreadsheetWatchState,
   tableSetupOpen,
   onTableSetupOpenChange,
   onCreateTableDraftChange,
@@ -267,6 +276,19 @@ export function SelectedProjectPanel({
                 <dt>Google Credential Ref</dt>
                 <dd>{detailState.project.googleCredentialRef}</dd>
               </div>
+              <div>
+                <dt>Drive Watch</dt>
+                <dd>
+                  {spreadsheetWatchState.status === 'loading' ? 'Loading watch status...' : null}
+                  {spreadsheetWatchState.status === 'idle' ? spreadsheetWatchState.message : null}
+                  {spreadsheetWatchState.status === 'error' ? <span className="error">{spreadsheetWatchState.message}</span> : null}
+                  {spreadsheetWatchState.status === 'ready'
+                    ? spreadsheetWatchState.watch
+                      ? getSpreadsheetWatchStatusSummary(spreadsheetWatchState.watch)
+                      : 'No watch registered yet.'
+                    : null}
+                </dd>
+              </div>
             </dl>
             {projectHealthSummary ? (
               <div className="healthSummary">
@@ -282,6 +304,20 @@ export function SelectedProjectPanel({
               </div>
             ) : null}
           </div>
+
+          {spreadsheetWatchState.status === 'ready' && spreadsheetWatchState.watch ? (
+            <details className="disclosureCard subtleDisclosure compactDisclosure">
+              <summary className="disclosureSummary">
+                <div>
+                  <h3>Spreadsheet Watch</h3>
+                  <p className="muted compact">Drive webhook status, renewal timing, and automatic reindex diagnostics.</p>
+                </div>
+              </summary>
+              <dl className="facts compactFacts">
+                <SpreadsheetWatchSummary watch={spreadsheetWatchState.watch} />
+              </dl>
+            </details>
+          ) : null}
 
           <details
             className="disclosureCard"

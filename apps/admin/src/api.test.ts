@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { adminCredentialHeaderName } from './auth';
-import { inspectSpreadsheetTab, listApiKeys, listProjects, listSpreadsheetTabs, refreshTableCache, revokeApiKey } from './api';
+import { inspectSpreadsheetTab, listApiKeys, listProjects, listSpreadsheetTabs, listSpreadsheetWatches, refreshTableCache, revokeApiKey } from './api';
 
 describe('admin api helpers', () => {
   afterEach(() => {
@@ -165,6 +165,49 @@ describe('admin api helpers', () => {
     );
   });
 
+  it('lists spreadsheet watch status through the admin api', async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        data: [
+          {
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            channelId: 'channel-sheet-1',
+            resourceId: 'resource-sheet-1',
+            resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+            expirationAt: '2026-05-03T00:00:00.000Z',
+            lastWatchError: null,
+            lastNotificationAt: '2026-04-26T00:00:00.000Z',
+            pendingChangedAt: null,
+            debounceUntil: null,
+            lastReindexStartedAt: null,
+            lastReindexCompletedAt: '2026-04-26T00:00:10.000Z',
+            lastReindexError: null,
+            projectSlugs: ['demo']
+          }
+        ]
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(listSpreadsheetWatches('secret')).resolves.toEqual({
+      data: [
+        expect.objectContaining({
+          spreadsheetId: 'sheet-1',
+          lastWatchError: null
+        })
+      ]
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/v1/admin/system/google/drive/watches',
+      expect.objectContaining({
+        headers: {
+          [adminCredentialHeaderName]: 'secret'
+        }
+      })
+    );
+  });
+
   it('inspects a spreadsheet tab header row through the admin api', async () => {
     const fetchMock = vi.fn(async () =>
       Response.json({
@@ -197,6 +240,33 @@ describe('admin api helpers', () => {
           [adminCredentialHeaderName]: 'secret'
         }
       })
+    );
+  });
+
+  it('surfaces specific 401 messages instead of always reporting a rejected credential', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json(
+          {
+            error: {
+              code: 'UNAUTHORIZED',
+              message: 'This operation requires a global admin key.',
+              details: null
+            }
+          },
+          {
+            status: 401,
+            headers: {
+              'x-request-id': 'req-401'
+            }
+          }
+        )
+      )
+    );
+
+    await expect(listSpreadsheetWatches('secret')).rejects.toThrow(
+      'This operation requires a global admin key. requestId=req-401'
     );
   });
 });
