@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import type { SpreadsheetWatch } from '@sheetflare/contracts';
-import { SpreadsheetWatchSummary } from './spreadsheet-watch-summary';
+import { getSpreadsheetWatchStatusSummary, SpreadsheetWatchSummary } from './spreadsheet-watch-summary';
 
 function createSpreadsheetWatch(overrides?: Partial<SpreadsheetWatch>): SpreadsheetWatch {
   return {
@@ -25,6 +25,17 @@ function createSpreadsheetWatch(overrides?: Partial<SpreadsheetWatch>): Spreadsh
 }
 
 describe('SpreadsheetWatchSummary', () => {
+  it('builds a shared one-line status summary', () => {
+    expect(getSpreadsheetWatchStatusSummary(createSpreadsheetWatch())).toMatch(/^active \/ expires /i);
+    expect(
+      getSpreadsheetWatchStatusSummary(
+        createSpreadsheetWatch({
+          pendingChangedAt: '2026-04-26T00:01:00.000Z'
+        })
+      )
+    ).toMatch(/^pending reindex \/ expires /i);
+  });
+
   it('renders an active watch summary', () => {
     render(
       <dl>

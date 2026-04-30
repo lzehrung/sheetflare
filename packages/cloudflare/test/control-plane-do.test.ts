@@ -377,6 +377,97 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     ]);
   });
 
+  it('lists a shared spreadsheet watch once with every linked project slug', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    vi.stubGlobal('fetch', createSheetsAndDriveFetch(sheet));
+    const { env } = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:prod')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'prod',
+          name: 'Prod',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:prod')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'prod',
+        input: {
+          tableSlug: 'members',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await doRpc<ControlPlaneDoResponse>(
+      env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane')),
+      {
+        type: 'control.spreadsheet-watches.register',
+        webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+        webhookToken: 'secret-token',
+        debounceSeconds: 30
+      }
+    );
+
+    const response = await doRpc<ControlPlaneDoResponse>(
+      env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane')),
+      {
+        type: 'control.spreadsheet-watches.list'
+      }
+    );
+
+    expect((response as {
+      type: 'control.spreadsheet-watches.list.result';
+      result: {
+        data: Array<{
+          spreadsheetId: string;
+          projectSlugs: string[];
+        }>;
+      };
+    }).result.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        projectSlugs: ['demo', 'prod']
+      })
+    ]);
+  });
+
   it('removes obsolete spreadsheet watches when the project registry no longer references them', async () => {
     const sheet: SheetState = {
       rows: [

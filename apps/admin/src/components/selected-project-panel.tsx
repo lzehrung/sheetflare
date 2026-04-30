@@ -1,7 +1,7 @@
 import type { ProjectConfig, SpreadsheetTab, SpreadsheetWatch, TableCacheStatus, TableConfig } from '@sheetflare/contracts';
 import type { CreateTableDraft } from '../admin-drafts';
 import { CacheStatusSummary } from './cache-status-summary';
-import { SpreadsheetWatchSummary } from './spreadsheet-watch-summary';
+import { getSpreadsheetWatchStatusSummary, SpreadsheetWatchSummary } from './spreadsheet-watch-summary';
 
 type ProjectDetailState =
   | { status: 'idle'; message: string }
@@ -62,10 +62,6 @@ type SelectedProjectPanelProps = {
 
 function renderFieldError(message: string | undefined) {
   return message ? <p className="fieldMessage error">{message}</p> : null;
-}
-
-function formatTimestamp(value: string | null) {
-  return value ? new Date(value).toLocaleString() : 'Not yet';
 }
 
 function parseCsv(value: string) {
@@ -288,7 +284,7 @@ export function SelectedProjectPanel({
                   {spreadsheetWatchState.status === 'error' ? <span className="error">{spreadsheetWatchState.message}</span> : null}
                   {spreadsheetWatchState.status === 'ready'
                     ? spreadsheetWatchState.watch
-                      ? `${spreadsheetWatchState.watch.lastWatchError ? 'error' : spreadsheetWatchState.watch.pendingChangedAt ? 'pending reindex' : 'active'} / expires ${formatTimestamp(spreadsheetWatchState.watch.expirationAt)}`
+                      ? getSpreadsheetWatchStatusSummary(spreadsheetWatchState.watch)
                       : 'No watch registered yet.'
                     : null}
                 </dd>
