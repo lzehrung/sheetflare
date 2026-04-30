@@ -97,6 +97,9 @@ Alert on these conditions before broad production use:
 8. External-change reindex backlog
    Alert when critical tables remain in `staleReason: "external-change"` beyond the intended debounce window, which usually means Drive notifications are arriving but automatic reindex is failing or blocked.
 
+9. Drive watch renewal health
+   Inspect `npm run ops:watch:drive:status` and alert when `expirationAt` is in the past or `lastWatchError` remains non-null for critical spreadsheets.
+
 ## Executable Health Check
 
 Set a list of critical tables:

@@ -208,6 +208,12 @@ Register or renew all spreadsheet watches currently known to Sheetflare:
 npm run ops:watch:drive
 ```
 
+Inspect current watch status:
+
+```powershell
+npm run ops:watch:drive:status
+```
+
 Optional overrides:
 
 ```powershell
@@ -221,6 +227,12 @@ Re-run this after:
 - rotating `GOOGLE_DRIVE_WEBHOOK_SECRET`
 - changing the deployed API base URL
 - onboarding new spreadsheets
+
+Operational notes:
+
+- Sheetflare renews existing Drive watches before they expire when the control-plane alarm is healthy
+- `expirationAt` and `lastWatchError` from `npm run ops:watch:drive:status` are the primary signals for renewal health
+- if a watch has expired or `lastWatchError` remains non-null, rerun `npm run ops:watch:drive` and investigate Worker logs
 
 ## Force Reindex
 

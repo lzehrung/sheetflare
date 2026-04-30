@@ -1,5 +1,6 @@
 import { ServiceUnavailableError } from '@sheetflare/contracts';
 import type {
+  AdminListSpreadsheetWatchesResult,
   AdminRegisterSpreadsheetWatchesResult,
   AdminCreateApiKeyResult,
   AdminListApiKeysResult,
@@ -45,7 +46,11 @@ type SpreadsheetWatchRow = {
   channel_id: string;
   resource_id: string;
   resource_uri: string | null;
+  webhook_url: string | null;
   expiration_at: string | null;
+  expiration_duration_ms: number | null;
+  last_message_number: string | null;
+  last_watch_error: string | null;
   debounce_seconds: number;
   last_notification_at: string | null;
   pending_changed_at: string | null;
@@ -56,6 +61,11 @@ type SpreadsheetWatchRow = {
   updated_at: string;
 };
 
+type SpreadsheetWatchRenewalRow = Pick<
+  SpreadsheetWatchRow,
+  'spreadsheet_id' | 'expiration_at' | 'expiration_duration_ms' | 'last_watch_error' | 'updated_at'
+>;
+
 function getProjectStub(env: CloudflareEnv, projectSlug: string) {
   return env.PROJECT_DO.get(env.PROJECT_DO.idFromName(`project:${projectSlug}`));
 }
@@ -63,6 +73,12 @@ function getProjectStub(env: CloudflareEnv, projectSlug: string) {
 function getTableStub(env: CloudflareEnv, projectSlug: string, tableSlug: string) {
   return env.TABLE_DO.get(env.TABLE_DO.idFromName(`table:${projectSlug}:${tableSlug}`));
 }
+
+const defaultWatchDurationMs = 7 * 24 * 60 * 60 * 1000;
+const minWatchRenewLeadMs = 5 * 60 * 1000;
+const maxWatchRenewLeadMs = 24 * 60 * 60 * 1000;
+const watchRenewRetryMs = 5 * 60 * 1000;
+const watchRenewConfigRetryMs = 60 * 60 * 1000;
 
 export class ControlPlaneDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
@@ -114,7 +130,11 @@ export class ControlPlaneDO {
         channel_id TEXT NOT NULL,
         resource_id TEXT NOT NULL,
         resource_uri TEXT,
+        webhook_url TEXT,
         expiration_at TEXT,
+        expiration_duration_ms INTEGER,
+        last_message_number TEXT,
+        last_watch_error TEXT,
         debounce_seconds INTEGER NOT NULL,
         last_notification_at TEXT,
         pending_changed_at TEXT,
@@ -135,6 +155,21 @@ export class ControlPlaneDO {
       CREATE INDEX IF NOT EXISTS idx_spreadsheet_watches_debounce_until
       ON spreadsheet_watches(debounce_until)
     `);
+
+    this.ensureSpreadsheetWatchColumn('webhook_url', 'TEXT');
+    this.ensureSpreadsheetWatchColumn('expiration_duration_ms', 'INTEGER');
+    this.ensureSpreadsheetWatchColumn('last_message_number', 'TEXT');
+    this.ensureSpreadsheetWatchColumn('last_watch_error', 'TEXT');
+  }
+
+  private ensureSpreadsheetWatchColumn(columnName: string, definition: string) {
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE spreadsheet_watches ADD COLUMN ${columnName} ${definition}`);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('duplicate column name')) {
+        throw error;
+      }
+    }
   }
 
   private async hashApiKeySecret(secret: string): Promise<string> {
@@ -165,6 +200,11 @@ export class ControlPlaneDO {
         return {
           type: 'control.project.upsert.result',
           result: { ok: true }
+        };
+      case 'control.spreadsheet-watches.list':
+        return {
+          type: 'control.spreadsheet-watches.list.result',
+          result: this.listSpreadsheetWatchesForAdmin()
         };
       case 'control.spreadsheet-watches.register':
         return {
@@ -251,6 +291,7 @@ export class ControlPlaneDO {
   }
 
   async alarm() {
+    const nowMs = Date.now();
     const dueWatches = this.ctx.storage.sql.exec(
       `
       SELECT *
@@ -260,8 +301,16 @@ export class ControlPlaneDO {
         AND debounce_until <= ?
       ORDER BY debounce_until ASC, spreadsheet_id ASC
       `,
-      new Date().toISOString()
+      new Date(nowMs).toISOString()
     ).toArray() as SpreadsheetWatchRow[];
+    const dueRenewals = this.listSpreadsheetWatches().filter((watch) => {
+      const renewAtMs = this.getWatchRenewAtMs(watch);
+      return renewAtMs !== null && renewAtMs <= nowMs;
+    });
+
+    for (const watch of dueRenewals) {
+      await this.renewSpreadsheetWatch(watch);
+    }
 
     for (const watch of dueWatches) {
       await this.reindexSpreadsheetWatch(watch);
@@ -390,6 +439,9 @@ export class ControlPlaneDO {
     expirationMs: number | null
   ): Promise<AdminRegisterSpreadsheetWatchesResult> {
     const now = new Date().toISOString();
+    const expirationDurationMs = expirationMs === null
+      ? defaultWatchDurationMs
+      : Math.max(expirationMs - Date.now(), minWatchRenewLeadMs);
     const registrations = this.getSpreadsheetRegistrations();
     const activeSpreadsheetIds = new Set(registrations.map((registration) => registration.spreadsheetId));
     const existingWatches = new Map(
@@ -414,14 +466,19 @@ export class ControlPlaneDO {
         `
         INSERT INTO spreadsheet_watches (
           spreadsheet_id, google_credential_ref, channel_id, resource_id, resource_uri, expiration_at, debounce_seconds,
+          webhook_url, expiration_duration_ms, last_message_number, last_watch_error,
           last_notification_at, pending_changed_at, debounce_until, last_reindex_started_at, last_reindex_completed_at, last_reindex_error, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(spreadsheet_id) DO UPDATE SET
           google_credential_ref = excluded.google_credential_ref,
           channel_id = excluded.channel_id,
           resource_id = excluded.resource_id,
           resource_uri = excluded.resource_uri,
+          webhook_url = excluded.webhook_url,
           expiration_at = excluded.expiration_at,
+          expiration_duration_ms = excluded.expiration_duration_ms,
+          last_message_number = excluded.last_message_number,
+          last_watch_error = excluded.last_watch_error,
           debounce_seconds = excluded.debounce_seconds,
           updated_at = excluded.updated_at
         `,
@@ -432,6 +489,10 @@ export class ControlPlaneDO {
         watch.resourceUri,
         watch.expirationAt,
         debounceSeconds,
+        webhookUrl,
+        expirationDurationMs,
+        null,
+        null,
         existing?.last_notification_at ?? null,
         existing?.pending_changed_at ?? null,
         existing?.debounce_until ?? null,
@@ -463,11 +524,11 @@ export class ControlPlaneDO {
     changedAt: string,
     channelExpiration: string | null
   ) {
-    void messageNumber;
     const watch = this.selectOptionalRow<SpreadsheetWatchRow>(
       `SELECT * FROM spreadsheet_watches WHERE channel_id = ?`,
       channelId
     );
+    const nextMessageNumber = normalizeMessageNumber(messageNumber);
 
     if (!watch || watch.resource_id !== resourceId) {
       return {
@@ -477,19 +538,33 @@ export class ControlPlaneDO {
       };
     }
 
+    if (this.shouldIgnoreNotification(watch, messageNumber)) {
+      return {
+        accepted: true,
+        spreadsheetId: watch.spreadsheet_id,
+        debounceUntil: watch.debounce_until
+      };
+    }
+
     const parsedExpiration = this.parseDriveNotificationExpiration(channelExpiration);
     if (resourceState === 'sync') {
       this.ctx.storage.sql.exec(
         `
         UPDATE spreadsheet_watches
-        SET last_notification_at = ?, expiration_at = COALESCE(?, expiration_at), updated_at = ?
+        SET last_notification_at = ?,
+            expiration_at = COALESCE(?, expiration_at),
+            last_message_number = COALESCE(?, last_message_number),
+            last_watch_error = NULL,
+            updated_at = ?
         WHERE spreadsheet_id = ?
         `,
         changedAt,
         parsedExpiration,
+        nextMessageNumber,
         changedAt,
         watch.spreadsheet_id
       );
+      await this.scheduleNextAlarm();
       return {
         accepted: true,
         spreadsheetId: watch.spreadsheet_id,
@@ -505,6 +580,8 @@ export class ControlPlaneDO {
           pending_changed_at = ?,
           debounce_until = ?,
           expiration_at = COALESCE(?, expiration_at),
+          last_message_number = COALESCE(?, last_message_number),
+          last_watch_error = NULL,
           updated_at = ?
       WHERE spreadsheet_id = ?
       `,
@@ -512,6 +589,7 @@ export class ControlPlaneDO {
       changedAt,
       debounceUntil,
       parsedExpiration,
+      nextMessageNumber,
       changedAt,
       watch.spreadsheet_id
     );
@@ -581,6 +659,15 @@ export class ControlPlaneDO {
     );
   }
 
+  private listSpreadsheetWatchesForAdmin(): AdminListSpreadsheetWatchesResult {
+    const projectSlugsBySpreadsheetId = this.getProjectSlugsBySpreadsheetId();
+    return {
+      data: this.listSpreadsheetWatches().map((row) =>
+        this.mapSpreadsheetWatch(row, projectSlugsBySpreadsheetId.get(row.spreadsheet_id) ?? [])
+      )
+    };
+  }
+
   private requireSpreadsheetWatch(spreadsheetId: string) {
     const watch = this.getSpreadsheetWatch(spreadsheetId);
     if (!watch) {
@@ -615,6 +702,62 @@ export class ControlPlaneDO {
         WHERE spreadsheet_id = ?
         `,
         watch.spreadsheet_id
+      );
+    }
+  }
+
+  private async renewSpreadsheetWatch(watch: SpreadsheetWatchRow) {
+    const webhookToken = this.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim();
+    if (!watch.webhook_url?.trim()) {
+      this.recordWatchError(watch.spreadsheet_id, 'Spreadsheet watch is missing its stored webhook URL.');
+      return;
+    }
+
+    if (!webhookToken) {
+      this.recordWatchError(watch.spreadsheet_id, 'GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.');
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const durationMs = this.getWatchDurationMs(watch);
+
+    try {
+      const renewedWatch = await this.getSheetsClient(watch.google_credential_ref).watchSpreadsheetFile(
+        watch.spreadsheet_id,
+        {
+          webhookUrl: watch.webhook_url,
+          token: webhookToken,
+          expirationMs: Date.now() + durationMs
+        }
+      );
+
+      this.ctx.storage.sql.exec(
+        `
+        UPDATE spreadsheet_watches
+        SET channel_id = ?,
+            resource_id = ?,
+            resource_uri = ?,
+            expiration_at = ?,
+            expiration_duration_ms = ?,
+            last_message_number = NULL,
+            last_watch_error = NULL,
+            updated_at = ?
+        WHERE spreadsheet_id = ?
+        `,
+        renewedWatch.channelId,
+        renewedWatch.resourceId,
+        renewedWatch.resourceUri,
+        renewedWatch.expirationAt,
+        durationMs,
+        now,
+        watch.spreadsheet_id
+      );
+
+      await this.stopExistingSpreadsheetWatch(watch);
+    } catch (error) {
+      this.recordWatchError(
+        watch.spreadsheet_id,
+        error instanceof Error ? error.message : String(error)
       );
     }
   }
@@ -706,6 +849,29 @@ export class ControlPlaneDO {
     ).map((row) => row.slug);
   }
 
+  private getProjectSlugsBySpreadsheetId() {
+    const rows = this.selectRows<{ spreadsheet_id: string; slug: string }>(
+      `
+      SELECT spreadsheet_id, slug
+      FROM project_registry
+      ORDER BY spreadsheet_id ASC, slug ASC
+      `
+    );
+
+    const projectSlugsBySpreadsheetId = new Map<string, string[]>();
+    for (const row of rows) {
+      const existing = projectSlugsBySpreadsheetId.get(row.spreadsheet_id);
+      if (existing) {
+        existing.push(row.slug);
+        continue;
+      }
+
+      projectSlugsBySpreadsheetId.set(row.spreadsheet_id, [row.slug]);
+    }
+
+    return projectSlugsBySpreadsheetId;
+  }
+
   private async listProjectTables(projectSlug: string): Promise<TableConfig[]> {
     const response = await doRpc<ProjectDoResponse>(getProjectStub(this.env, projectSlug), {
       type: 'project.table.list',
@@ -719,7 +885,71 @@ export class ControlPlaneDO {
   }
 
   private async scheduleNextAlarm() {
-    const next = this.selectOptionalRow<{ debounce_until: string | null }>(
+    const nextDebounceAtMs = this.getNextDebounceAlarmAtMs();
+    const nextRenewalAtMs = this.getNextRenewalAlarmAtMs();
+    const nextAlarmAtMs = this.getEarlierAlarmAtMs(nextDebounceAtMs, nextRenewalAtMs);
+
+    if (nextAlarmAtMs === null) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+
+    await this.ctx.storage.setAlarm(nextAlarmAtMs);
+  }
+
+  private parseDriveNotificationExpiration(value: string | null) {
+    if (!value) {
+      return null;
+    }
+
+    const parsedMs = Date.parse(value);
+    return Number.isNaN(parsedMs) ? null : new Date(parsedMs).toISOString();
+  }
+
+  private shouldIgnoreNotification(watch: SpreadsheetWatchRow, messageNumber: string | null) {
+    const comparison = compareMessageNumbers(messageNumber, watch.last_message_number);
+    return comparison !== null && comparison <= 0;
+  }
+
+  private getWatchDurationMs(watch: Pick<SpreadsheetWatchRow, 'expiration_duration_ms'>) {
+    return watch.expiration_duration_ms && watch.expiration_duration_ms > 0
+      ? watch.expiration_duration_ms
+      : defaultWatchDurationMs;
+  }
+
+  private getWatchRenewAtMs(watch: SpreadsheetWatchRenewalRow) {
+    if (!watch.expiration_at) {
+      return null;
+    }
+
+    const expirationAtMs = Date.parse(watch.expiration_at);
+    if (Number.isNaN(expirationAtMs)) {
+      return null;
+    }
+
+    const renewalLeadMs = this.getWatchRenewLeadMs(this.getWatchDurationMs(watch));
+    const renewalDueAtMs = expirationAtMs - renewalLeadMs;
+    if (!watch.last_watch_error) {
+      return renewalDueAtMs;
+    }
+
+    const updatedAtMs = Date.parse(watch.updated_at);
+    if (Number.isNaN(updatedAtMs)) {
+      return renewalDueAtMs;
+    }
+
+    return Math.max(renewalDueAtMs, updatedAtMs + getWatchRenewRetryDelayMs(watch.last_watch_error));
+  }
+
+  private getWatchRenewLeadMs(durationMs: number) {
+    return Math.min(
+      maxWatchRenewLeadMs,
+      Math.max(minWatchRenewLeadMs, Math.floor(durationMs / 4))
+    );
+  }
+
+  private getNextDebounceAlarmAtMs() {
+    const next = this.selectOptionalRow<{ debounce_until: string }>(
       `
       SELECT debounce_until
       FROM spreadsheet_watches
@@ -731,20 +961,59 @@ export class ControlPlaneDO {
     );
 
     if (!next?.debounce_until) {
-      await this.ctx.storage.deleteAlarm();
-      return;
-    }
-
-    await this.ctx.storage.setAlarm(Date.parse(next.debounce_until));
-  }
-
-  private parseDriveNotificationExpiration(value: string | null) {
-    if (!value) {
       return null;
     }
 
-    const parsedMs = Date.parse(value);
-    return Number.isNaN(parsedMs) ? null : new Date(parsedMs).toISOString();
+    const debounceAtMs = Date.parse(next.debounce_until);
+    return Number.isNaN(debounceAtMs) ? null : debounceAtMs;
+  }
+
+  private getNextRenewalAlarmAtMs() {
+    let nextRenewalAtMs: number | null = null;
+
+    for (const watch of this.selectRows<SpreadsheetWatchRenewalRow>(
+      `
+      SELECT spreadsheet_id, expiration_at, expiration_duration_ms, last_watch_error, updated_at
+      FROM spreadsheet_watches
+      WHERE expiration_at IS NOT NULL
+      ORDER BY expiration_at ASC, spreadsheet_id ASC
+      `
+    )) {
+      const renewAtMs = this.getWatchRenewAtMs(watch);
+      if (renewAtMs === null) {
+        continue;
+      }
+
+      nextRenewalAtMs = nextRenewalAtMs === null ? renewAtMs : Math.min(nextRenewalAtMs, renewAtMs);
+    }
+
+    return nextRenewalAtMs;
+  }
+
+  private getEarlierAlarmAtMs(left: number | null, right: number | null) {
+    if (left === null) {
+      return right;
+    }
+
+    if (right === null) {
+      return left;
+    }
+
+    return Math.min(left, right);
+  }
+
+  private recordWatchError(spreadsheetId: string, message: string) {
+    const now = new Date().toISOString();
+    this.ctx.storage.sql.exec(
+      `
+      UPDATE spreadsheet_watches
+      SET last_watch_error = ?, updated_at = ?
+      WHERE spreadsheet_id = ?
+      `,
+      message,
+      now,
+      spreadsheetId
+    );
   }
 
   private getSheetsClient(googleCredentialRef: string) {
@@ -776,6 +1045,7 @@ export class ControlPlaneDO {
       resourceId: row.resource_id,
       resourceUri: row.resource_uri,
       expirationAt: row.expiration_at,
+      lastWatchError: row.last_watch_error,
       lastNotificationAt: row.last_notification_at,
       pendingChangedAt: row.pending_changed_at,
       debounceUntil: row.debounce_until,
@@ -802,4 +1072,33 @@ export class ControlPlaneDO {
     void unusedHash;
     return principal;
   }
+}
+
+function compareMessageNumbers(left: string | null, right: string | null) {
+  if (!left || !right || !/^\d+$/.test(left) || !/^\d+$/.test(right)) {
+    return null;
+  }
+
+  const leftValue = BigInt(left);
+  const rightValue = BigInt(right);
+  if (leftValue === rightValue) {
+    return 0;
+  }
+
+  return leftValue < rightValue ? -1 : 1;
+}
+
+function normalizeMessageNumber(value: string | null) {
+  return value && /^\d+$/.test(value) ? value : null;
+}
+
+function getWatchRenewRetryDelayMs(lastWatchError: string | null) {
+  return isNonRetriableWatchConfigurationError(lastWatchError)
+    ? watchRenewConfigRetryMs
+    : watchRenewRetryMs;
+}
+
+function isNonRetriableWatchConfigurationError(lastWatchError: string | null) {
+  return lastWatchError === 'Spreadsheet watch is missing its stored webhook URL.'
+    || lastWatchError === 'GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.';
 }

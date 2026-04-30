@@ -112,6 +112,7 @@ export const spreadsheetWatchSchema = z.object({
   resourceId: z.string().min(1),
   resourceUri: z.string().min(1).nullable(),
   expirationAt: z.string().datetime().nullable(),
+  lastWatchError: z.string().nullable(),
   lastNotificationAt: z.string().datetime().nullable(),
   pendingChangedAt: z.string().datetime().nullable(),
   debounceUntil: z.string().datetime().nullable(),
@@ -124,6 +125,8 @@ export const spreadsheetWatchSchema = z.object({
 export const adminRegisterSpreadsheetWatchesResultSchema = z.object({
   data: z.array(spreadsheetWatchSchema)
 });
+
+export const adminListSpreadsheetWatchesResultSchema = adminRegisterSpreadsheetWatchesResultSchema;
 
 export const upsertTableResultSchema = z.object({
   data: tableConfigSchema
@@ -198,6 +201,7 @@ export type AdminInspectSpreadsheetTabResult = z.infer<typeof adminInspectSpread
 export type AdminRegisterSpreadsheetWatchesInput = z.infer<typeof adminRegisterSpreadsheetWatchesInputSchema>;
 export type SpreadsheetWatch = z.infer<typeof spreadsheetWatchSchema>;
 export type AdminRegisterSpreadsheetWatchesResult = z.infer<typeof adminRegisterSpreadsheetWatchesResultSchema>;
+export type AdminListSpreadsheetWatchesResult = z.infer<typeof adminListSpreadsheetWatchesResultSchema>;
 export type UpsertTableResult = z.infer<typeof upsertTableResultSchema>;
 export type GetRowResult = z.infer<typeof getRowResultSchema>;
 export type CreateRowResult = z.infer<typeof createRowResultSchema>;

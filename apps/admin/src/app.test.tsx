@@ -16,6 +16,67 @@ function createJsonResponse(body: unknown, status = 200) {
   });
 }
 
+function createDeferred<T>() {
+  let resolvePromise: ((value: T | PromiseLike<T>) => void) | null = null;
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+
+  return {
+    promise,
+    resolve(value: T) {
+      if (!resolvePromise) {
+        throw new Error('Deferred promise resolver was not initialized.');
+      }
+
+      resolvePromise(value);
+    }
+  };
+}
+
+function createSpreadsheetWatchStatusResponse(url: string) {
+  if (url !== '/v1/admin/system/google/drive/watches') {
+    return null;
+  }
+
+  return createJsonResponse({
+    data: [
+      {
+        spreadsheetId: 'sheet-1',
+        googleCredentialRef: 'default',
+        channelId: 'channel-sheet-1',
+        resourceId: 'resource-sheet-1',
+        resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+        expirationAt: '2099-05-03T00:00:00.000Z',
+        lastWatchError: null,
+        lastNotificationAt: '2026-04-26T00:00:00.000Z',
+        pendingChangedAt: null,
+        debounceUntil: null,
+        lastReindexStartedAt: null,
+        lastReindexCompletedAt: '2026-04-26T00:00:10.000Z',
+        lastReindexError: null,
+        projectSlugs: ['demo']
+      },
+      {
+        spreadsheetId: 'sheet-2',
+        googleCredentialRef: 'default',
+        channelId: 'channel-sheet-2',
+        resourceId: 'resource-sheet-2',
+        resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-2',
+        expirationAt: '2099-05-04T00:00:00.000Z',
+        lastWatchError: null,
+        lastNotificationAt: '2026-04-27T00:00:00.000Z',
+        pendingChangedAt: null,
+        debounceUntil: null,
+        lastReindexStartedAt: null,
+        lastReindexCompletedAt: '2026-04-27T00:00:10.000Z',
+        lastReindexError: null,
+        projectSlugs: ['prod']
+      }
+    ]
+  });
+}
+
 function installLocalStorage() {
   const localStorageMock = {
     getItem(key: string) {
@@ -50,6 +111,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -154,6 +217,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -224,6 +289,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -393,10 +460,99 @@ describe('App', () => {
     });
   });
 
+  it('clears stale spreadsheet watch status while switching projects', async () => {
+    const prodProjectResponse = createDeferred<Response>();
+
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: 0,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            },
+            {
+              slug: 'prod',
+              name: 'Prod',
+              spreadsheetId: 'sheet-2',
+              tableCount: 0,
+              updatedAt: '2026-04-27T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: []
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=prod') {
+        return prodProjectResponse.promise;
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys?project=prod' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByText(/active \/ expires/i);
+    fireEvent.click(screen.getByTestId('project-card-prod'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Loading project details...')).toBeTruthy();
+      expect(screen.queryByText(/active \/ expires/i)).toBeNull();
+    });
+
+    prodProjectResponse.resolve(createJsonResponse({
+      project: {
+        slug: 'prod',
+        name: 'Prod',
+        spreadsheetId: 'sheet-2',
+        googleCredentialRef: 'default',
+        defaultAuthMode: 'private',
+        createdAt: '2026-04-27T00:00:00.000Z',
+        updatedAt: '2026-04-27T00:00:00.000Z'
+      },
+      tables: []
+    }));
+
+    await screen.findByText('Prod');
+  });
+
   it('auto-loads cache status, links to the spreadsheet, and refreshes stale tables on demand', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -523,6 +679,7 @@ describe('App', () => {
     const staleStatuses = await screen.findAllByText('ready / ttl-expired / 0 rows');
     expect(staleStatuses.length).toBeGreaterThan(0);
     expect(screen.getAllByText('warning / 1 issues').length).toBeGreaterThan(0);
+    expect(screen.getByText(/active \/ expires/i)).toBeTruthy();
     const spreadsheetLink = screen.getByRole('link', { name: 'Open in Google Sheets' });
     expect(spreadsheetLink.getAttribute('href')).toBe('https://docs.google.com/spreadsheets/d/sheet-1/edit');
 
@@ -532,10 +689,73 @@ describe('App', () => {
     expect(refreshedStatuses.length).toBeGreaterThan(0);
   });
 
+  it('shows a clear spreadsheet watch status message when a project-scoped key cannot read global watch state', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url === '/v1/admin/system/google/drive/watches') {
+        return createJsonResponse({
+          error: {
+            code: 'UNAUTHORIZED',
+            message: 'This operation requires a global admin key.',
+            details: null
+          }
+        }, 401);
+      }
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: 0,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: []
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'sfk_project-admin-key.secret' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByText('This operation requires a global admin key. requestId=req-ui');
+  });
+
   it('clears the revealed key when the selected project changes', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -624,6 +844,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -721,6 +943,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -804,6 +1028,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -871,10 +1097,16 @@ describe('App', () => {
 
   it('refreshes the project registry after creating a table so project counts stay current', async () => {
     let projectRegistryCalls = 0;
+    let spreadsheetWatchCalls = 0;
 
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) {
+        spreadsheetWatchCalls += 1;
+        return spreadsheetWatchResponse;
+      }
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         projectRegistryCalls += 1;
@@ -1030,6 +1262,7 @@ describe('App', () => {
 
     await screen.findByText('Saving table demo/users complete.');
     expect(screen.getAllByText('1 tables').length).toBeGreaterThan(0);
+    expect(spreadsheetWatchCalls).toBe(1);
   });
 
   it('loads spreadsheet tabs only after table setup is opened', async () => {
@@ -1038,6 +1271,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -1106,6 +1341,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({ data: [] });

@@ -4,6 +4,7 @@ import type {
   ApiKeyPrincipal,
   ProjectConfig,
   ProjectSummary,
+  SpreadsheetWatch,
   SpreadsheetTab,
   TableCacheStatus,
   TableConfig
@@ -28,6 +29,7 @@ import {
   inspectSpreadsheetTab,
   listApiKeys,
   listProjects,
+  listSpreadsheetWatches,
   listSpreadsheetTabs,
   refreshTableCache,
   revokeApiKey,
@@ -91,6 +93,12 @@ type TabInspectionState =
   | { status: 'loading'; tabName: string; headerRow: number }
   | { status: 'ready'; data: AdminInspectSpreadsheetTabResult['data'] }
   | { status: 'error'; message: string; tabName: string; headerRow: number };
+
+type SpreadsheetWatchState =
+  | { status: 'idle'; message: string }
+  | { status: 'loading' }
+  | { status: 'ready'; watch: SpreadsheetWatch | null }
+  | { status: 'error'; message: string };
 
 function getInitialCredential() {
   if (typeof window === 'undefined') {
@@ -207,6 +215,10 @@ export function App() {
     status: 'idle',
     message: 'Choose a sheet tab to preview its headers.'
   });
+  const [spreadsheetWatchState, setSpreadsheetWatchState] = useState<SpreadsheetWatchState>({
+    status: 'idle',
+    message: 'Select a project to inspect spreadsheet watch status.'
+  });
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeState>({
     tone: 'idle',
@@ -271,6 +283,10 @@ export function App() {
         status: 'idle',
         message: 'Select a project to inspect tables, cache state, and keys.'
       });
+      setSpreadsheetWatchState({
+        status: 'idle',
+        message: 'Select a project to inspect spreadsheet watch status.'
+      });
       setProjectKeysState({
         status: 'idle',
         message: 'Select a project to inspect and manage scoped API keys.'
@@ -305,6 +321,53 @@ export function App() {
       cancelled = true;
     };
   }, [credential, selectedProjectSlug]);
+
+  useEffect(() => {
+    if (!credential || !selectedProjectSlug) {
+      setSpreadsheetWatchState({
+        status: 'idle',
+        message: 'Select a project to inspect spreadsheet watch status.'
+      });
+      return;
+    }
+
+    if (projectDetailState.status !== 'ready') {
+      setSpreadsheetWatchState({ status: 'loading' });
+      return;
+    }
+
+    let cancelled = false;
+    setSpreadsheetWatchState({ status: 'loading' });
+
+    void (async () => {
+      try {
+        const result = await listSpreadsheetWatches(credential);
+        const watch = result.data.find((entry) => entry.spreadsheetId === projectDetailState.project.spreadsheetId) ?? null;
+        if (!cancelled) {
+          setSpreadsheetWatchState({
+            status: 'ready',
+            watch
+          });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setSpreadsheetWatchState({
+            status: 'error',
+            message: error instanceof Error ? error.message : 'Unknown error'
+          });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    credential,
+    selectedProjectSlug,
+    projectDetailState.status,
+    projectDetailState.status === 'ready' ? projectDetailState.project.spreadsheetId : null
+  ]);
 
   useEffect(() => {
     if (!credential || !selectedProjectSlug || projectDetailState.status !== 'ready' || !tableSetupOpen) {
@@ -718,6 +781,10 @@ export function App() {
       status: 'idle',
       message: 'Select a project to load spreadsheet tabs.'
     });
+    setSpreadsheetWatchState({
+      status: 'idle',
+      message: 'Select a project to inspect spreadsheet watch status.'
+    });
     setTabInspectionState({
       status: 'idle',
       message: 'Choose a sheet tab to preview its headers.'
@@ -1004,6 +1071,7 @@ export function App() {
           cacheStatusLoadingByTable={cacheStatusLoadingByTable}
           spreadsheetTabsState={spreadsheetTabsState}
           tabInspectionState={tabInspectionState}
+          spreadsheetWatchState={spreadsheetWatchState}
           tableSetupOpen={tableSetupOpen}
           onTableSetupOpenChange={setTableSetupOpen}
           onCreateTableDraftChange={setCreateTableDraft}

@@ -6,6 +6,7 @@ import { createConsolePrompter, promptForSetup, type SetupPromptActions, type Se
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, type SetupPrereqResult } from './lib/setup-prereqs';
 import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './lib/setup-bootstrap';
 import { deployAdminPages, deployApiWorker, getApiWranglerConfigPath, getAdminPagesProjectName } from './lib/setup-deploy';
+import { registerDriveWatches } from './lib/setup-drive-watches';
 import { applyAdminSecrets, applyApiSecrets, collectAdminSiteSecrets, collectSetupSecrets, requireAdminSiteSecrets } from './lib/setup-secrets';
 import { createSmokeEnv } from './lib/setup-smoke';
 import {
@@ -15,7 +16,11 @@ import {
   type SetupLocalState,
   writeSetupLocalState
 } from './lib/setup-state';
-import { resolvePreferredSmokeAdminCredential, resolveSetupRuntimeState, summarizeSetupSecrets } from './lib/setup-runtime';
+import {
+  resolvePreferredAdminCredential,
+  resolveSetupRuntimeState,
+  summarizeSetupSecrets
+} from './lib/setup-runtime';
 import { getCommandName, runCommand } from './lib/process';
 import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
 
@@ -113,6 +118,36 @@ async function persistLocalState(configPath: string, currentState: SetupLocalSta
   };
   await writeSetupLocalState(configPath, nextState);
   return nextState;
+}
+
+async function registerDriveWatchesIfPossible(options: {
+  apiUrl: string | null;
+  adminCredential: string | null;
+  shouldRegister: boolean;
+  failOnError?: boolean;
+}) {
+  if (!options.shouldRegister || !options.apiUrl || !options.adminCredential) {
+    return null;
+  }
+
+  logStep('Registering Google Drive spreadsheet watches');
+  try {
+    const result = await registerDriveWatches({
+      baseUrl: options.apiUrl,
+      adminCredential: options.adminCredential
+    });
+    logSuccess(`Registered or renewed ${result.length} spreadsheet watch${result.length === 1 ? '' : 'es'}`);
+    return result;
+  } catch (error) {
+    if (options.failOnError) {
+      throw error;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Warning: Failed to register Google Drive spreadsheet watches automatically: ${message}`);
+    console.warn('Setup will continue. To retry watch registration later, run: npm run ops:watch:drive');
+    return null;
+  }
 }
 
 async function main() {
@@ -348,6 +383,16 @@ async function main() {
       localStateWritten = true;
     }
 
+    const setupAdminCredential = resolvePreferredAdminCredential({
+      adminApiKey,
+      adminBearerToken
+    });
+    await registerDriveWatchesIfPossible({
+      apiUrl,
+      adminCredential: setupAdminCredential,
+      shouldRegister: actions.deployNow || actions.bootstrapNow
+    });
+
     if (actions.smokeNow) {
       if (!config.smoke.enabled) {
         throw new ScriptError('Smoke is disabled in sheetflare.setup.json. Set smoke.enabled to true or rerun setup with a smoke-enabled config.');
@@ -356,7 +401,7 @@ async function main() {
         throw new ScriptError('API base URL is required for smoke.');
       }
 
-      let smokeAdminCredential = resolvePreferredSmokeAdminCredential({
+      let smokeAdminCredential = resolvePreferredAdminCredential({
         adminApiKey,
         adminBearerToken
       });
