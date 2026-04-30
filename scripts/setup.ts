@@ -6,6 +6,7 @@ import { createConsolePrompter, promptForSetup, type SetupPromptActions, type Se
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, type SetupPrereqResult } from './lib/setup-prereqs';
 import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './lib/setup-bootstrap';
 import { deployAdminPages, deployApiWorker, getApiWranglerConfigPath, getAdminPagesProjectName } from './lib/setup-deploy';
+import { registerDriveWatches } from './lib/setup-drive-watches';
 import { applyAdminSecrets, applyApiSecrets, collectAdminSiteSecrets, collectSetupSecrets, requireAdminSiteSecrets } from './lib/setup-secrets';
 import { createSmokeEnv } from './lib/setup-smoke';
 import {
@@ -15,7 +16,12 @@ import {
   type SetupLocalState,
   writeSetupLocalState
 } from './lib/setup-state';
-import { resolvePreferredSmokeAdminCredential, resolveSetupRuntimeState, summarizeSetupSecrets } from './lib/setup-runtime';
+import {
+  resolvePreferredSetupAdminCredential,
+  resolvePreferredSmokeAdminCredential,
+  resolveSetupRuntimeState,
+  summarizeSetupSecrets
+} from './lib/setup-runtime';
 import { getCommandName, runCommand } from './lib/process';
 import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
 
@@ -113,6 +119,24 @@ async function persistLocalState(configPath: string, currentState: SetupLocalSta
   };
   await writeSetupLocalState(configPath, nextState);
   return nextState;
+}
+
+async function registerDriveWatchesIfPossible(options: {
+  apiUrl: string | null;
+  adminCredential: string | null;
+  shouldRegister: boolean;
+}) {
+  if (!options.shouldRegister || !options.apiUrl || !options.adminCredential) {
+    return null;
+  }
+
+  logStep('Registering Google Drive spreadsheet watches');
+  const result = await registerDriveWatches({
+    baseUrl: options.apiUrl,
+    adminCredential: options.adminCredential
+  });
+  logSuccess(`Registered or renewed ${result.length} spreadsheet watch${result.length === 1 ? '' : 'es'}`);
+  return result;
 }
 
 async function main() {
@@ -347,6 +371,16 @@ async function main() {
       });
       localStateWritten = true;
     }
+
+    const setupAdminCredential = resolvePreferredSetupAdminCredential({
+      adminApiKey,
+      adminBearerToken
+    });
+    await registerDriveWatchesIfPossible({
+      apiUrl,
+      adminCredential: setupAdminCredential,
+      shouldRegister: actions.deployNow || actions.bootstrapNow
+    });
 
     if (actions.smokeNow) {
       if (!config.smoke.enabled) {

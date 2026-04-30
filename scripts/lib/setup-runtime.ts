@@ -45,6 +45,10 @@ export function resolvePreferredSmokeAdminCredential(state: Pick<ResolvedSetupRu
   return resolveValue(state.adminApiKey, state.adminBearerToken);
 }
 
+export function resolvePreferredSetupAdminCredential(state: Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'>) {
+  return resolveValue(state.adminApiKey, state.adminBearerToken);
+}
+
 export function summarizeSetupSecrets(options: {
   showSecrets: boolean;
   localStatePath: string | null;
