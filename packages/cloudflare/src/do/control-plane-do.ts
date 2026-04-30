@@ -518,7 +518,6 @@ export class ControlPlaneDO {
     changedAt: string,
     channelExpiration: string | null
   ) {
-    void messageNumber;
     const watch = this.selectOptionalRow<SpreadsheetWatchRow>(
       `SELECT * FROM spreadsheet_watches WHERE channel_id = ?`,
       channelId
