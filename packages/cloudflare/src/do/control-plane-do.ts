@@ -527,6 +527,7 @@ export class ControlPlaneDO {
       `SELECT * FROM spreadsheet_watches WHERE channel_id = ?`,
       channelId
     );
+    const nextMessageNumber = normalizeMessageNumber(messageNumber);
 
     if (!watch || watch.resource_id !== resourceId) {
       return {
@@ -551,14 +552,14 @@ export class ControlPlaneDO {
         UPDATE spreadsheet_watches
         SET last_notification_at = ?,
             expiration_at = COALESCE(?, expiration_at),
-            last_message_number = ?,
+            last_message_number = COALESCE(?, last_message_number),
             last_watch_error = NULL,
             updated_at = ?
         WHERE spreadsheet_id = ?
         `,
         changedAt,
         parsedExpiration,
-        messageNumber,
+        nextMessageNumber,
         changedAt,
         watch.spreadsheet_id
       );
@@ -578,7 +579,7 @@ export class ControlPlaneDO {
           pending_changed_at = ?,
           debounce_until = ?,
           expiration_at = COALESCE(?, expiration_at),
-          last_message_number = ?,
+          last_message_number = COALESCE(?, last_message_number),
           last_watch_error = NULL,
           updated_at = ?
       WHERE spreadsheet_id = ?
@@ -587,7 +588,7 @@ export class ControlPlaneDO {
       changedAt,
       debounceUntil,
       parsedExpiration,
-      messageNumber,
+      nextMessageNumber,
       changedAt,
       watch.spreadsheet_id
     );
@@ -1084,4 +1085,8 @@ function compareMessageNumbers(left: string | null, right: string | null) {
   }
 
   return leftValue < rightValue ? -1 : 1;
+}
+
+function normalizeMessageNumber(value: string | null) {
+  return value && /^\d+$/.test(value) ? value : null;
 }
