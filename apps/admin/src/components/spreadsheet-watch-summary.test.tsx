@@ -11,7 +11,7 @@ function createSpreadsheetWatch(overrides?: Partial<SpreadsheetWatch>): Spreadsh
     channelId: 'channel-sheet-1',
     resourceId: 'resource-sheet-1',
     resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
-    expirationAt: '2026-05-03T00:00:00.000Z',
+    expirationAt: '2099-05-03T00:00:00.000Z',
     lastWatchError: null,
     lastNotificationAt: '2026-04-26T00:00:00.000Z',
     pendingChangedAt: null,
@@ -45,7 +45,13 @@ describe('SpreadsheetWatchSummary', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-04T00:00:00.000Z'));
 
-    expect(getSpreadsheetWatchStatusSummary(createSpreadsheetWatch())).toMatch(/^expired \/ expires /i);
+    expect(
+      getSpreadsheetWatchStatusSummary(
+        createSpreadsheetWatch({
+          expirationAt: '2026-05-03T00:00:00.000Z'
+        })
+      )
+    ).toMatch(/^expired \/ expires /i);
   });
 
   it('renders an active watch summary', () => {
