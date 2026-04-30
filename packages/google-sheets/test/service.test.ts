@@ -171,7 +171,7 @@ describe('GoogleSheetsService.readAllRows', () => {
       clientEmail: 'service@example.com',
       privateKey: testPrivateKey,
       fetch: async (input) => {
-        const url = String(input);
+        const url = decodeURIComponent(String(input));
         if (url.includes('oauth2.googleapis.com/token')) {
           return Response.json({
             access_token: 'token',
@@ -179,10 +179,15 @@ describe('GoogleSheetsService.readAllRows', () => {
           });
         }
 
-        if (url.includes('/values/')) {
+        if (url.includes("/values/'Users'!2:2")) {
+          return Response.json({
+            values: [['_id', 'name']]
+          });
+        }
+
+        if (url.includes("/values/'Users'!A2:B")) {
           return Response.json({
             values: [
-              ['intro'],
               ['_id', 'name'],
               ['row-1', 'Ada'],
               ['row-2', 'Grace']
@@ -232,6 +237,63 @@ describe('GoogleSheetsService.readAllRows', () => {
         }
       }
     ]);
+  });
+
+  it('bounds table snapshot reads to the declared header width instead of reading the full tab', async () => {
+    const requestedUrls: string[] = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = decodeURIComponent(String(input));
+        requestedUrls.push(url);
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes("/values/'Users'!1:1")) {
+          return Response.json({
+            values: [['_id', 'name', 'status']]
+          });
+        }
+
+        if (url.includes("/values/'Users'!A1:C")) {
+          return Response.json({
+            values: [
+              ['_id', 'name', 'status'],
+              ['row-1', 'Ada', 'active']
+            ]
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    const rows = await service.readAllRows({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(requestedUrls.some((url) => url.includes("/values/'Users'!A1:C"))).toBe(true);
+    expect(requestedUrls.every((url) => !url.endsWith("/values/'Users'"))).toBe(true);
   });
 
   it('rejects rows with blank managed ids instead of fabricating row-number ids', async () => {
@@ -339,7 +401,7 @@ describe('GoogleSheetsService.readAllRows', () => {
       updatedAt: '2026-04-26T00:00:00.000Z'
     });
 
-    expect(valueFetchCount).toBe(2);
+    expect(valueFetchCount).toBe(3);
     expect(rows).toHaveLength(1);
   });
 
@@ -728,6 +790,111 @@ describe('GoogleSheetsService.readHeaderNames', () => {
   });
 });
 
+describe('GoogleSheetsService Drive watch lifecycle', () => {
+  it('registers a Drive webhook watch for a spreadsheet file', async () => {
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input, init) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        requests.push({
+          method,
+          url,
+          body:
+            init?.body && typeof init.body === 'string' && init.body.trim().startsWith('{')
+              ? JSON.parse(init.body)
+              : null
+        });
+
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes('/drive/v3/files/sheet-1/watch')) {
+          return Response.json({
+            id: 'channel-1',
+            resourceId: 'resource-1',
+            resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+            expiration: String(Date.parse('2026-05-01T00:00:00.000Z'))
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    const watch = await service.watchSpreadsheetFile('sheet-1', {
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      token: 'secret-token',
+      expirationMs: Date.parse('2026-05-01T00:00:00.000Z')
+    });
+
+    expect(watch).toEqual({
+      channelId: 'channel-1',
+      resourceId: 'resource-1',
+      resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+      expirationAt: '2026-05-01T00:00:00.000Z'
+    });
+    expect(requests.find((request) => request.url.includes('/drive/v3/files/sheet-1/watch'))).toMatchObject({
+      method: 'POST',
+      body: {
+        type: 'web_hook',
+        address: 'https://sheetflare.example/v1/system/google/drive/notifications',
+        token: 'secret-token',
+        expiration: String(Date.parse('2026-05-01T00:00:00.000Z'))
+      }
+    });
+  });
+
+  it('stops an existing Drive webhook channel cleanly', async () => {
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input, init) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        requests.push({
+          method,
+          url,
+          body:
+            init?.body && typeof init.body === 'string' && init.body.trim().startsWith('{')
+              ? JSON.parse(init.body)
+              : null
+        });
+
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.endsWith('/drive/v3/channels/stop')) {
+          return Response.json({});
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    await service.stopDriveChannel('channel-1', 'resource-1');
+
+    expect(requests.find((request) => request.url.endsWith('/drive/v3/channels/stop'))).toMatchObject({
+      method: 'POST',
+      body: {
+        id: 'channel-1',
+        resourceId: 'resource-1'
+      }
+    });
+  });
+});
+
 describe('GoogleSheetsService.writeRow', () => {
   it('sends raw values to Sheets so the API preserves literal cell contents', async () => {
     const requestedUrls: string[] = [];
@@ -924,5 +1091,79 @@ describe('GoogleSheetsService.writeRow', () => {
 
     expect(rowNumber).toBe(5);
     expect(requestedUrls.some((url) => url.includes("/values/'Users'!B2:B:append"))).toBe(true);
+  });
+
+  it('reuses a previously resolved header layout across sparse mutation helpers', async () => {
+    const requestedUrls: string[] = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = decodeURIComponent(String(input));
+        requestedUrls.push(url);
+
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes("/values/'Users'!1:1")) {
+          return Response.json({
+            values: [['name', '_id', 'derived', 'status']]
+          });
+        }
+
+        if (url.includes("/values/'Users'!B2:B:append")) {
+          return Response.json({
+            updates: {
+              updatedRange: "'Users'!B5:B5"
+            }
+          });
+        }
+
+        if (url.includes("/values/'Users'!5:5")) {
+          return Response.json({
+            values: [['Ada', 'row-5', 'derived', 'active']]
+          });
+        }
+
+        if (url.includes('/values:batchUpdate')) {
+          return Response.json({});
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    const config = {
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      readOnlyFields: ['derived'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    } satisfies GoogleSheetTableConfig;
+
+    const layout = await service.getHeaderLayout(config);
+    const rowNumber = await service.appendRowSkeleton(config, 'row-5', layout);
+    await service.writeRowPatch(config, rowNumber, {
+      name: 'Ada',
+      status: 'active'
+    }, layout);
+    await service.readSingleRow(config, rowNumber, layout);
+
+    expect(requestedUrls.filter((url) => url.includes("/values/'Users'!1:1"))).toHaveLength(1);
   });
 });

@@ -8,6 +8,29 @@ function formatTimestamp(value: string | null) {
   return value ? new Date(value).toLocaleString() : 'Not yet';
 }
 
+function formatValidationSummary(cache: TableCacheStatus) {
+  const issueLabel = cache.validation.issueCount === 1 ? 'issue' : 'issues';
+  return cache.validation.status === 'ok'
+    ? 'ok / 0 issues'
+    : `${cache.validation.status} / ${cache.validation.issueCount} ${issueLabel}`;
+}
+
+function formatValidationIssues(cache: TableCacheStatus) {
+  return cache.validation.issues
+    .map((issue) => `row ${issue.rowNumber} (${issue.rowId}) ${issue.field} ${issue.code}: ${issue.message}`)
+    .join('; ');
+}
+
+function formatExternalChangeSummary(cache: TableCacheStatus) {
+  if (!cache.externalChange.pending) {
+    return cache.externalChange.lastAutoReindexAt
+      ? `idle / last auto reindex ${formatTimestamp(cache.externalChange.lastAutoReindexAt)}`
+      : 'idle';
+  }
+
+  return `pending / debounce until ${formatTimestamp(cache.externalChange.debounceUntil)}`;
+}
+
 export function CacheStatusSummary({ cache }: CacheStatusSummaryProps) {
   return (
     <>
@@ -20,6 +43,14 @@ export function CacheStatusSummary({ cache }: CacheStatusSummaryProps) {
         <dd>{cache.stale ? 'Stale' : 'Fresh'} / TTL {cache.cacheTtlSeconds}s</dd>
       </div>
       <div>
+        <dt>Validation</dt>
+        <dd>{formatValidationSummary(cache)}</dd>
+      </div>
+      <div>
+        <dt>External Change</dt>
+        <dd>{formatExternalChangeSummary(cache)}</dd>
+      </div>
+      <div>
         <dt>Last Sync Completed</dt>
         <dd>{formatTimestamp(cache.lastSyncCompletedAt)}</dd>
       </div>
@@ -27,6 +58,18 @@ export function CacheStatusSummary({ cache }: CacheStatusSummaryProps) {
         <dt>Last Sync Started</dt>
         <dd>{formatTimestamp(cache.lastSyncStartedAt)}</dd>
       </div>
+      {cache.validation.issueCount > 0 ? (
+        <div>
+          <dt>Validation Issues</dt>
+          <dd>{formatValidationIssues(cache)}</dd>
+        </div>
+      ) : null}
+      {cache.externalChange.lastChangedAt ? (
+        <div>
+          <dt>Last External Change</dt>
+          <dd>{formatTimestamp(cache.externalChange.lastChangedAt)}</dd>
+        </div>
+      ) : null}
       {cache.lastSyncError ? (
         <div>
           <dt>Last Sync Error</dt>

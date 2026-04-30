@@ -19,9 +19,9 @@ describe('proxyToApi', () => {
 
     const response = await proxyToApi({
       env: {
-        SHEETFLARE_API_BASE_URL: 'https://sheetflare-staging-api.lzehrung.workers.dev'
+        SHEETFLARE_API_BASE_URL: 'https://sheetflare-api.example.workers.dev'
       },
-      request: new Request('https://sheetflare-staging-admin.pages.dev/v1/admin/projects?project=demo', {
+      request: new Request('https://sheetflare-admin.example.pages.dev/v1/admin/projects?project=demo', {
         headers: {
           accept: 'application/json',
           [adminCredentialHeaderName]: 'secret-token',
@@ -35,7 +35,7 @@ describe('proxyToApi', () => {
     const forwardedRequest = fetchMock.mock.calls[0]?.[0];
     expect(forwardedRequest).toBeInstanceOf(Request);
     expect((forwardedRequest as Request).url).toBe(
-      'https://sheetflare-staging-api.lzehrung.workers.dev/v1/admin/projects?project=demo'
+      'https://sheetflare-api.example.workers.dev/v1/admin/projects?project=demo'
     );
     expect((forwardedRequest as Request).headers.get('authorization')).toBe('Bearer secret-token');
     expect((forwardedRequest as Request).headers.get(adminCredentialHeaderName)).toBeNull();
@@ -45,7 +45,7 @@ describe('proxyToApi', () => {
     await expect(response.json()).resolves.toEqual({
       authorization: 'Bearer secret-token',
       leakedBasicAuth: null,
-      proxiedUrl: 'https://sheetflare-staging-api.lzehrung.workers.dev/v1/admin/projects?project=demo'
+      proxiedUrl: 'https://sheetflare-api.example.workers.dev/v1/admin/projects?project=demo'
     });
   });
 
@@ -53,7 +53,7 @@ describe('proxyToApi', () => {
     await expect(
       proxyToApi({
         env: {},
-        request: new Request('https://sheetflare-staging-admin.pages.dev/v1/admin/projects')
+        request: new Request('https://sheetflare-admin.example.pages.dev/v1/admin/projects')
       })
     ).rejects.toThrow('SHEETFLARE_API_BASE_URL is not configured for the admin Pages project.');
   });

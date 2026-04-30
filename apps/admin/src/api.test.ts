@@ -102,7 +102,18 @@ describe('admin api helpers', () => {
           rowCount: 3,
           lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
           lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
-          lastSyncError: null
+          lastSyncError: null,
+          validation: {
+            status: 'ok',
+            issueCount: 0,
+            issues: []
+          },
+          externalChange: {
+            pending: false,
+            lastChangedAt: null,
+            debounceUntil: null,
+            lastAutoReindexAt: null
+          }
         }
       })
     );

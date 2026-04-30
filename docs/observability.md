@@ -15,6 +15,12 @@ Emitted by the route layer:
 - `durationMs`
 - `requestId`
 - `principal`
+- `rateLimitPrincipal`
+- `rateLimitRouteFamily`
+- `rateLimitOperationKey`
+- `rateLimitLimit`
+- `rateLimitRemaining`
+- `rateLimitResetAt`
 
 ### Request failure
 
@@ -25,6 +31,9 @@ Emitted by the route layer:
 - `path`
 - `requestId`
 - `principal`
+- `rateLimitPrincipal`
+- `rateLimitRouteFamily`
+- `rateLimitOperationKey`
 - `errorName`
 - `errorMessage`
 
@@ -36,6 +45,8 @@ Emitted by `TableDO`:
 - `projectSlug`
 - `tableSlug`
 - `rowCount`
+- `validationStatus`
+- `validationIssueCount`
 - `durationMs`
 - `requestId`
 - `route`
@@ -65,7 +76,7 @@ Alert on these conditions before broad production use:
    Schedule `npm run ops:cache:health` against critical tables and alert on any non-zero exit.
    This detects:
    - `status !== "ready"`
-   - `staleReason === "error"`
+   - `staleReason === "error"` or `staleReason === "external-change"` that does not clear
    - `lastSyncError !== null`
 
 3. Repeated `429` responses
@@ -79,6 +90,12 @@ Alert on these conditions before broad production use:
 
 6. Row-count jumps or drops
    Review `table.sync.complete.rowCount` per table and alert on unexpected deltas after sync.
+
+7. Validation drift warnings
+   Alert when `table.sync.complete.validationStatus == "warning"` for critical tables, or when `validationIssueCount` rises unexpectedly after a sync.
+
+8. External-change reindex backlog
+   Alert when critical tables remain in `staleReason: "external-change"` beyond the intended debounce window, which usually means Drive notifications are arriving but automatic reindex is failing or blocked.
 
 ## Executable Health Check
 
@@ -111,6 +128,9 @@ Use these exact predicates in your chosen log platform:
 - row-count anomaly review:
   - `event == "table.sync.complete"` grouped by `projectSlug, tableSlug`
 
+- validation drift review:
+  - `event == "table.sync.complete" and validationStatus == "warning"`
+
 ## Tested Failure Workflow
 
 Once staging exists, exercise at minimum:
@@ -122,7 +142,7 @@ Once staging exists, exercise at minimum:
    - the failure is visible in the cache report
 
 2. A rate-limit pressure case
-   Run `npm run load:staging`, confirm:
+   Run `npm run load`, confirm:
    - `request.complete` emits `429`
    - the benchmark report records the first same-principal `429`
    - your alert threshold would have triggered if the pressure were sustained

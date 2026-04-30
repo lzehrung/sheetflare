@@ -33,10 +33,15 @@ function createEnv(options?: {
   const rateLimitRequests: Array<{ name: string; key: string }> = [];
   const projectRequests: string[] = [];
   const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }> = [];
+  const controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> = [];
   let verifyApiKeyCallCount = 0;
   let apiKeyTouchCallCount = 0;
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
     const body = (await request.json()) as { type: string; apiKeyId?: string; hash?: string; projectSlug?: string | null };
+    controlPlaneRequests.push({
+      type: body.type,
+      body
+    });
 
     if (body.type === 'control.api-key.verify') {
       verifyApiKeyCallCount += 1;
@@ -163,6 +168,42 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'control.spreadsheet-watches.register') {
+      return Response.json({
+        type: 'control.spreadsheet-watches.register.result',
+        result: {
+          data: [
+            {
+              spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
+              channelId: 'channel-1',
+              resourceId: 'resource-1',
+              resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+              expirationAt: '2026-05-03T00:00:00.000Z',
+              lastNotificationAt: null,
+              pendingChangedAt: null,
+              debounceUntil: null,
+              lastReindexStartedAt: null,
+              lastReindexCompletedAt: null,
+              lastReindexError: null,
+              projectSlugs: ['demo']
+            }
+          ]
+        }
+      });
+    }
+
+    if (body.type === 'control.spreadsheet-watch.notify') {
+      return Response.json({
+        type: 'control.spreadsheet-watch.notify.result',
+        result: {
+          accepted: true,
+          spreadsheetId: 'sheet-1',
+          debounceUntil: '2026-04-26T00:00:30.000Z'
+        }
+      });
+    }
+
     return Response.json({
       type: 'control.projects.list.result',
       result: {
@@ -171,6 +212,7 @@ function createEnv(options?: {
             slug: 'demo',
             name: 'Demo',
             spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
             tableCount: 2,
             updatedAt: '2026-04-26T00:00:00.000Z'
           }
@@ -180,8 +222,18 @@ function createEnv(options?: {
   });
 
   const project = new FakeDurableObjectNamespace(() => async (request) => {
-    const body = (await request.json()) as { type: string; tab?: string; headerRow?: number };
+    const body = (await request.json()) as {
+      type: string;
+      tab?: string;
+      headerRow?: number;
+      allowExisting?: boolean;
+      input?: {
+        slug?: string;
+        tableSlug?: string;
+      };
+    };
     projectRequests.push(body.type);
+    const requestUrl = new URL(request.url);
     const table = {
       projectSlug: 'demo',
       tableSlug: 'users',
@@ -198,6 +250,39 @@ function createEnv(options?: {
       createdAt: '2026-04-26T00:00:00.000Z',
       updatedAt: '2026-04-26T00:00:00.000Z'
     };
+
+    if (body.type === 'project.create') {
+      if (body.input?.slug === 'demo' && body.allowExisting !== true && requestUrl.searchParams.get('upsert') !== 'true') {
+        return Response.json({
+          error: {
+            code: 'CONFLICT',
+            message: 'Project demo already exists.',
+            details: {
+              projectSlug: 'demo'
+            }
+          }
+        }, { status: 409 });
+      }
+
+      return Response.json({
+        type: 'project.create.result',
+        result: {
+          created: !(body.allowExisting === true && body.input?.slug === 'demo'),
+          data: {
+            project: {
+              slug: body.input?.slug ?? 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
+              createdAt: '2026-04-26T00:00:00.000Z',
+              updatedAt: '2026-04-26T00:00:00.000Z',
+              defaultAuthMode: options?.defaultAuthMode ?? 'private'
+            },
+            tables: [table]
+          }
+        }
+      });
+    }
 
     if (body.type === 'project.get') {
       return Response.json({
@@ -302,10 +387,33 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'project.table.create') {
+      if (body.input?.tableSlug === 'users' && body.allowExisting !== true && requestUrl.searchParams.get('upsert') !== 'true') {
+        return Response.json({
+          error: {
+            code: 'CONFLICT',
+            message: 'Table demo/users already exists.',
+            details: {
+              projectSlug: 'demo',
+              tableSlug: 'users'
+            }
+          }
+        }, { status: 409 });
+      }
+
+      return Response.json({
+        type: 'project.table.create.result',
+        result: {
+          created: !(body.allowExisting === true && body.input?.tableSlug === 'users'),
+          data: table
+        }
+      });
+    }
+
     return Response.json({
-      type: 'project.table.create.result',
+      type: 'project.table.list.result',
       result: {
-        data: table
+        data: [table]
       }
     });
   });
@@ -350,7 +458,18 @@ function createEnv(options?: {
             rowCount: 2,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
-            lastSyncError: null
+            lastSyncError: null,
+            validation: {
+              status: 'ok',
+              issueCount: 0,
+              issues: []
+            },
+            externalChange: {
+              pending: false,
+              lastChangedAt: null,
+              debounceUntil: null,
+              lastAutoReindexAt: null
+            }
           }
         }
       });
@@ -370,7 +489,18 @@ function createEnv(options?: {
             rowCount: 3,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
-            lastSyncError: null
+            lastSyncError: null,
+            validation: {
+              status: 'ok',
+              issueCount: 0,
+              issues: []
+            },
+            externalChange: {
+              pending: false,
+              lastChangedAt: null,
+              debounceUntil: null,
+              lastAutoReindexAt: null
+            }
           }
         }
       });
@@ -418,6 +548,7 @@ function createEnv(options?: {
     RATE_LIMIT_DO: rateLimit as never,
     GOOGLE_CLIENT_EMAIL: 'service@example.com',
     GOOGLE_PRIVATE_KEY: 'private-key',
+    GOOGLE_DRIVE_WEBHOOK_SECRET: 'drive-secret',
     ADMIN_BEARER_TOKEN: 'secret',
     RATE_LIMIT_MAX_REQUESTS: '300',
     RATE_LIMIT_WINDOW_SECONDS: '60'
@@ -433,6 +564,10 @@ function createEnv(options?: {
   });
   Object.defineProperty(env, '__projectRequests', {
     value: projectRequests,
+    enumerable: false
+  });
+  Object.defineProperty(env, '__controlPlaneRequests', {
+    value: controlPlaneRequests,
     enumerable: false
   });
   Object.defineProperty(env, '__verifyApiKeyCallCount', {
@@ -481,11 +616,248 @@ describe('api routes', () => {
           slug: 'demo',
           name: 'Demo',
           spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'default',
           tableCount: 2,
           updatedAt: '2026-04-26T00:00:00.000Z'
         }
       ]
     });
+  });
+
+  it('registers Drive spreadsheet watches through a global admin route', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> };
+    const response = await app.request(
+      '/v1/admin/system/google/drive/watches/register',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          debounceSeconds: 45,
+          expirationHours: 72
+        })
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: [
+        {
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'default',
+          channelId: 'channel-1',
+          resourceId: 'resource-1',
+          resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+          expirationAt: '2026-05-03T00:00:00.000Z',
+          lastNotificationAt: null,
+          pendingChangedAt: null,
+          debounceUntil: null,
+          lastReindexStartedAt: null,
+          lastReindexCompletedAt: null,
+          lastReindexError: null,
+          projectSlugs: ['demo']
+        }
+      ]
+    });
+    expect(env.__controlPlaneRequests.at(-1)).toMatchObject({
+      type: 'control.spreadsheet-watches.register',
+      body: {
+        debounceSeconds: 45,
+        webhookToken: 'drive-secret'
+      }
+    });
+  });
+
+  it('accepts verified Google Drive webhook notifications without edge rate limiting', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }>;
+      __rateLimitRequests: Array<{ name: string; key: string }>;
+    };
+    const response = await app.request(
+      '/v1/system/google/drive/notifications',
+      {
+        method: 'POST',
+        headers: {
+          'x-goog-channel-id': 'channel-1',
+          'x-goog-resource-id': 'resource-1',
+          'x-goog-resource-state': 'update',
+          'x-goog-message-number': '2',
+          'x-goog-channel-token': 'drive-secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(204);
+    expect(env.__rateLimitRequests).toEqual([]);
+    expect(env.__controlPlaneRequests.at(-1)).toMatchObject({
+      type: 'control.spreadsheet-watch.notify',
+      body: {
+        channelId: 'channel-1',
+        resourceId: 'resource-1',
+        resourceState: 'update'
+      }
+    });
+  });
+
+  it('rejects Google Drive webhook notifications with the wrong verification token', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/system/google/drive/notifications',
+      {
+        method: 'POST',
+        headers: {
+          'x-goog-channel-id': 'channel-1',
+          'x-goog-resource-id': 'resource-1',
+          'x-goog-resource-state': 'update',
+          'x-goog-channel-token': 'wrong-secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(401);
+  });
+
+  it('rejects duplicate project creation unless upsert is requested explicitly', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(409);
+  });
+
+  it('allows explicit project upserts for idempotent automation', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects?upsert=true',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it('treats upsert=false as a real false value instead of enabling replacement', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects?upsert=false',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(409);
+  });
+
+  it('rejects invalid upsert query values', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects?upsert=yes',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it('returns 200 for explicit table upserts that replace existing config', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects/demo/tables?upsert=true',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: expect.objectContaining({
+        projectSlug: 'demo',
+        tableSlug: 'users'
+      })
+    });
+  });
+
+  it('treats table upsert=false as a real false value instead of replacing config', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects/demo/tables?upsert=false',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(409);
   });
 
   it('reports internal readiness separately from liveness', async () => {
@@ -524,7 +896,7 @@ describe('api routes', () => {
   });
 
   it('creates rows against the table durable object', async () => {
-    vi.spyOn(console, 'info').mockImplementation(() => {});
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     const app = createApp();
     const response = await app.request(
       '/v1/projects/demo/tables/users/rows',
@@ -557,6 +929,8 @@ describe('api routes', () => {
     expect(response.headers.get('x-request-id')).toBeTruthy();
     expect(response.headers.get('x-ratelimit-limit')).toBe('300');
     expect(response.headers.get('x-ratelimit-remaining')).toBe('299');
+    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitOperationKey":"rows.create"'));
+    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitPrincipal":"api-key:project-key"'));
   });
 
   it('rejects protected row creation without credentials', async () => {
@@ -637,6 +1011,7 @@ describe('api routes', () => {
   });
 
   it('returns 429 when the edge rate limit is exceeded', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const app = createApp();
     const response = await app.request(
       '/v1/admin/projects',
@@ -656,12 +1031,15 @@ describe('api routes', () => {
         details: {
           principal: 'bootstrap-admin',
           routeFamily: 'admin',
+          operationKey: 'admin.projects.list',
           maxRequests: 300,
           windowSeconds: 60,
           resetAt: '2026-04-26T00:01:00.000Z'
         }
       }
     });
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitOperationKey":"admin.projects.list"'));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitPrincipal":"bootstrap-admin"'));
   });
 
   it('creates api keys through bootstrap admin auth', async () => {
@@ -839,7 +1217,18 @@ describe('api routes', () => {
         rowCount: 2,
         lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
         lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
-        lastSyncError: null
+        lastSyncError: null,
+        validation: {
+          status: 'ok',
+          issueCount: 0,
+          issues: []
+        },
+        externalChange: {
+          pending: false,
+          lastChangedAt: null,
+          debounceUntil: null,
+          lastAutoReindexAt: null
+        }
       }
     });
   });
@@ -872,7 +1261,18 @@ describe('api routes', () => {
         rowCount: 3,
         lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
         lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
-        lastSyncError: null
+        lastSyncError: null,
+        validation: {
+          status: 'ok',
+          issueCount: 0,
+          issues: []
+        },
+        externalChange: {
+          pending: false,
+          lastChangedAt: null,
+          debounceUntil: null,
+          lastAutoReindexAt: null
+        }
       }
     });
     expect(env.__tableRequests.at(-1)).toMatchObject({
@@ -983,6 +1383,26 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(401);
+    expect(env.__rateLimitRequests).toEqual([
+      { name: 'rate-limit:admin:client:anonymous', key: 'admin.projects.list' }
+    ]);
+  });
+
+  it('ignores x-forwarded-for when deriving the anonymous rate-limit principal', async () => {
+    const app = createApp();
+    const env = createEnv({ rateLimitAllowed: false }) as Env & { __rateLimitRequests: Array<{ name: string; key: string }> };
+
+    const response = await app.request(
+      '/v1/admin/projects',
+      {
+        headers: {
+          'x-forwarded-for': '203.0.113.10'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(429);
     expect(env.__rateLimitRequests).toEqual([
       { name: 'rate-limit:admin:client:anonymous', key: 'admin.projects.list' }
     ]);

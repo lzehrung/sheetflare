@@ -31,7 +31,7 @@ Create a dedicated Google service account for this environment.
 Recommended shape:
 
 - one user-managed service account per environment
-- Google Sheets API enabled in that GCP project
+- Google Sheets API and Google Drive API enabled in that GCP project
 - spreadsheet-level `Editor` sharing only on the exact spreadsheets Sheetflare will manage
 
 Share the sheet with the service-account email as an editor.
@@ -43,98 +43,74 @@ You will need:
 - service-account client email
 - service-account private key
 
-## 3. Configure the Worker
-
-Verify Wrangler auth first:
-
-```powershell
-npx wrangler whoami
-```
-
-If needed:
-
-```powershell
-npx wrangler login
-```
-
-Set these on the Worker:
-
-- `GOOGLE_CLIENT_EMAIL`
-- `GOOGLE_PRIVATE_KEY`
-- `ADMIN_BEARER_TOKEN`
-- `RATE_LIMIT_MAX_REQUESTS`
-- `RATE_LIMIT_WINDOW_SECONDS`
-- `TABLE_MAX_FULL_SCAN_ROWS`
-
-Optional:
-
-- `GOOGLE_CREDENTIALS_JSON`
-
-If you use one shared credential for the whole gateway, set `GOOGLE_CLIENT_EMAIL` and `GOOGLE_PRIVATE_KEY`.
-
-If you need multiple named credentials in one deployment, set `GOOGLE_CREDENTIALS_JSON` as a secret and then set each project's `googleCredentialRef` to the matching key.
-
-Set secrets:
-
-```powershell
-npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
-npx wrangler secret put ADMIN_BEARER_TOKEN --config apps/api/wrangler.jsonc
-```
-
-Set non-secret variables in `apps/api/wrangler.jsonc` or your deploy system.
-
-## 4. Verify the repo before deploy
+## 3. Install and run setup
 
 From repo root:
 
 ```powershell
 npm install
-npm run lint
-npm test
-npm run typecheck
-npm run build
+npm run setup
 ```
 
-## 5. Deploy
+The setup flow will:
+
+- check repo prerequisites and, when needed, Wrangler auth for secret or deploy steps
+- prompt for the spreadsheet URL or ID
+- prompt for the first private project and table mapping
+- write `sheetflare.setup.json`
+- optionally apply Worker secrets
+- optionally deploy the API Worker
+- optionally deploy the admin UI
+- optionally bootstrap the first project, tables, and keys
+- optionally run the smoke suite
+
+The simplest happy path is:
+
+- share the sheet with the Google service-account email first
+- point setup at the service-account JSON file when prompted
+- let setup generate the bootstrap admin token
+- let setup create the initial admin, read, and mutation keys
+
+Setup writes a checked non-secret config file at repo root:
 
 ```powershell
-npx wrangler deploy --config apps/api/wrangler.jsonc
+sheetflare.setup.json
 ```
 
-Save the deployed base URL, for example:
+When setup applies secrets, deploys, or bootstraps, it creates or updates `.sheetflare.setup.local.json` beside the checked config. That local state file stores deployment URLs and generated credentials so reruns can stay noninteractive. A config-only run may not create it. It is secret material, it is gitignored, and it should stay on the operator machine only.
+
+The generated config is reusable. Common reruns:
 
 ```powershell
-$env:SHEETFLARE_BASE_URL = "https://your-worker.example.workers.dev"
+npm run setup -- --apply-secrets
+npm run setup -- --deploy
+npm run setup -- --bootstrap
+npm run setup -- --smoke
 ```
 
-## 6. Bootstrap admin access
+Notes for reruns:
 
-Set the bootstrap token locally:
+- `npm run setup -- --deploy` will redeploy the admin UI only when `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD` are available from local setup state or the environment.
+- `npm run setup -- --smoke` can use either a scoped admin API key or the bootstrap admin credential from local setup state or `SHEETFLARE_ADMIN_CREDENTIAL`.
 
-```powershell
-$env:SHEETFLARE_ADMIN_CREDENTIAL = "<ADMIN_BEARER_TOKEN>"
-```
+## 4. What setup still expects from you
 
-Create a scoped admin key:
+Setup does not automate:
 
-```powershell
-npm run ops:create-admin-key
-```
+- creating the Google service account itself
+- enabling the Google Sheets API and Google Drive API in GCP
+- sharing the spreadsheet with the service-account email
+- creating new sheet tabs for you
+- custom Worker or Pages naming beyond the checked public defaults
+- advanced multi-credential topologies using `GOOGLE_CREDENTIALS_JSON`
 
-Keep the returned API key. Prefer it for routine admin use. Treat the bootstrap token as break-glass only.
+For those details, use:
 
-Optional faster path:
+- [google-service-accounts.md](./google-service-accounts.md)
+- [deploy.md](./deploy.md)
+- [operator-runbook.md](./operator-runbook.md)
 
-- set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON`
-- run `npm run ops:bootstrap`
-
-That script can create projects, tables, and initial API keys in one pass.
-
-## 7. Create a first private project and table
-
-Use the admin UI, the admin API, or `npm run ops:bootstrap` to create:
-
-- one private project
+## 5. The first table shape setup expects
 
 Add a table config such as:
 
@@ -146,20 +122,13 @@ Add a table config such as:
 - `fieldRules`: optional, for required, unique, enum, normalize, and type validation
 - `cacheTtlSeconds`: `15` or `60`
 
-Set `defaultAuthMode` to `"private"` unless you intentionally want anonymous reads.
+In `sheetflare.setup.json`, `privateProject` is always bootstrapped as a private project.
+If you also want anonymous reads, add `publicReadProject` instead of trying to set `defaultAuthMode` inside the setup config.
 
 Set `googleCredentialRef`:
 
 - leave it blank or use `default` if the Worker uses one shared Google credential
 - set it explicitly if the project should use a named credential from `GOOGLE_CREDENTIALS_JSON`
-
-The admin UI can now:
-
-- create projects
-- create tables
-- mint scoped API keys
-- inspect cache status
-- force reindex
 
 If a sheet contains formula-derived columns that the API must never overwrite, configure them in `readOnlyFields`.
 Those columns remain readable through the API, but create/update requests cannot target them.
@@ -173,7 +142,20 @@ Typical uses:
 - normalized fields such as trimmed/lowercased email addresses
 - typed fields such as numeric scores or ISO dates
 
-If you want a repeatable bootstrap instead of clicking through the admin UI, set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON` and run `npm run ops:bootstrap`.
+## 6. Manual fallback paths
+
+If you do not want setup to perform one or more actions immediately, it is safe to stop after `sheetflare.setup.json` has been written.
+
+You can then rerun only the needed step:
+
+```powershell
+npm run setup -- --apply-secrets
+npm run setup -- --deploy
+npm run setup -- --bootstrap
+npm run setup -- --smoke
+```
+
+If you want a completely manual bootstrap path instead of using setup, set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON` and run `npm run ops:bootstrap`.
 
 Template:
 
@@ -235,14 +217,7 @@ $env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
 npm run ops:bootstrap
 ```
 
-## 8. Create the keys needed for smoke testing
-
-You need:
-
-- a private read key with `table:read`
-- a mutation key with `table:create`, `table:update`, and `table:delete`
-
-They may be the same key if that is simpler for an initial deployment.
+## 7. Optional public-read coverage
 
 If you also want to exercise anonymous `public-read` behavior, create a second project with:
 
@@ -250,9 +225,9 @@ If you also want to exercise anonymous `public-read` behavior, create a second p
 - its own spreadsheet or tab mapping
 - a table such as `users`
 
-The bundled smoke suite currently checks both a private and a public-read project.
+The bundled smoke suite always checks the private path. It adds anonymous `public-read` coverage only when `SHEETFLARE_PUBLIC_PROJECT` and `SHEETFLARE_PUBLIC_TABLE` are set.
 
-## 9. Run the smoke suite
+## 8. Manual smoke inputs
 
 Set the smoke-test environment:
 
@@ -261,10 +236,15 @@ $env:SHEETFLARE_PRIVATE_PROJECT = "demo"
 $env:SHEETFLARE_PRIVATE_TABLE = "users"
 $env:SHEETFLARE_PRIVATE_READ_KEY = "sfk_private-read.secret"
 $env:SHEETFLARE_MUTATION_KEY = "sfk_mutation.secret"
-$env:SHEETFLARE_PUBLIC_PROJECT = "demo-public"
-$env:SHEETFLARE_PUBLIC_TABLE = "users"
 $env:SHEETFLARE_SMOKE_CREATE_VALUES_JSON = '{"name":"Smoke Row","status":"active"}'
 $env:SHEETFLARE_SMOKE_UPDATE_VALUES_JSON = '{"name":"Smoke Row Updated"}'
+```
+
+Optional for anonymous `public-read` coverage:
+
+```powershell
+$env:SHEETFLARE_PUBLIC_PROJECT = "demo-public"
+$env:SHEETFLARE_PUBLIC_TABLE = "users"
 ```
 
 Run:
@@ -286,13 +266,16 @@ The smoke suite checks:
 - admin access
 - private-table anonymous rejection
 - private-table keyed reads
-- public-read anonymous access
-- public-read anonymous write rejection
 - cache status with `staleReason`
 - create/get/update/delete on a smoke row
 - admin reindex
 
-## 10. Inspect cache health
+When `SHEETFLARE_PUBLIC_PROJECT` and `SHEETFLARE_PUBLIC_TABLE` are set, it also checks:
+
+- public-read anonymous access
+- public-read anonymous write rejection
+
+## 9. Inspect cache health
 
 ```powershell
 $env:SHEETFLARE_PROJECT = "demo"
@@ -305,8 +288,12 @@ Healthy output should show:
 - `status: "ready"`
 - `staleReason: "fresh"` after healthy activity or reindex
 - `lastSyncError: null`
+- `validation.status: "ok"` unless the last full sync detected direct sheet drift against configured `fieldRules`
+- `externalChange.pending: false` unless a Drive notification has queued a debounced auto-reindex
 
-## 11. Useful operator commands
+`lastSyncStartedAt`, `lastSyncCompletedAt`, and `validation` refer to the last full rebuild from Google Sheets, not the most recent successful point mutation.
+
+## 10. Useful operator commands
 
 Create admin key:
 
@@ -332,6 +319,18 @@ Force reindex:
 npm run ops:reindex
 ```
 
+Register or renew Google Drive watches for automatic debounced reindexing:
+
+```powershell
+npm run ops:watch:drive
+```
+
+This requires:
+
+- `GOOGLE_DRIVE_WEBHOOK_SECRET` deployed on the API Worker
+- the Google Drive API enabled for the same service-account project
+- the deployed API URL to be reachable by Google
+
 Run the load and churn harness:
 
 ```powershell
@@ -339,7 +338,7 @@ $env:SHEETFLARE_LOAD_REPORT_PATH = "reports/load-$(Get-Date -Format yyyyMMdd-HHm
 npm run load
 ```
 
-## 12. If setup fails
+## 11. If setup fails
 
 Check these first:
 
@@ -364,10 +363,13 @@ Required smoke env vars:
 - `SHEETFLARE_PRIVATE_TABLE`
 - `SHEETFLARE_PRIVATE_READ_KEY`
 - `SHEETFLARE_MUTATION_KEY`
-- `SHEETFLARE_PUBLIC_PROJECT`
-- `SHEETFLARE_PUBLIC_TABLE`
 - `SHEETFLARE_SMOKE_CREATE_VALUES_JSON`
 - `SHEETFLARE_SMOKE_UPDATE_VALUES_JSON`
+
+Optional for anonymous `public-read` coverage:
+
+- `SHEETFLARE_PUBLIC_PROJECT`
+- `SHEETFLARE_PUBLIC_TABLE`
 
 ```powershell
 npx playwright install chromium

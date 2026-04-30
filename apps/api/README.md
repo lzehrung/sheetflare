@@ -17,6 +17,7 @@ Cloudflare Worker entrypoint for the Sheetflare HTTP surface.
 
 - API-key verification is cached per request so auth and rate limiting do not re-verify the same key twice.
 - Responses include `x-request-id`; rate-limited routes also expose rate-limit headers.
+- Admin project and table POST routes create by default; replacing an existing config requires `?upsert=true` and returns `200` when an existing config was intentionally replaced.
 - Data routes should stay thin. Query semantics, cache behavior, and Google Sheets mutation correctness belong in `@sheetflare/cloudflare`.
 
 ## Commands

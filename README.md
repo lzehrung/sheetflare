@@ -3,6 +3,7 @@
 ![Sheetflare](./docs/assets/sheetflare.jpg)
 
 Sheetflare is a Cloudflare-first starter for exposing Google Sheets tabs through a small Hono API backed by Durable Objects.
+It is aimed at controlled self-hosted deployments and is not yet production-proven for broad external workloads.
 
 Production hardening guidance lives in [production-readiness-checklist.md](./production-readiness-checklist.md).
 Start with [docs/quickstart.md](./docs/quickstart.md).
@@ -25,6 +26,7 @@ Project policies live in [LICENSE](./LICENSE), [SECURITY.md](./SECURITY.md), [CO
 ```powershell
 npm install
 npm run check
+npm run setup
 npm run dev:api
 npm run dev:admin
 npm run deploy
@@ -34,6 +36,7 @@ npm run smoke
 
 ## Operator Scripts
 
+- `npm run setup`
 - `npm run ops:create-admin-key`
 - `npm run ops:bootstrap`
 - `npm run ops:cache`
@@ -50,9 +53,17 @@ npm run smoke
 For the normal setup flow:
 
 1. Follow [docs/quickstart.md](./docs/quickstart.md).
-2. Use [docs/google-service-accounts.md](./docs/google-service-accounts.md) to provision the right Google credential model.
-3. Use [docs/deploy.md](./docs/deploy.md) for staging or production deployment details, including CI secret layout and Cloudflare token scopes.
-4. Use [docs/operator-runbook.md](./docs/operator-runbook.md) for day-2 operations and failure handling.
+2. Run `npm run setup`.
+3. Use [docs/google-service-accounts.md](./docs/google-service-accounts.md) only if you still need help provisioning the Google service account itself.
+4. Use [docs/deploy.md](./docs/deploy.md) for CI deployment details, manual fallback commands, and Cloudflare token scopes.
+5. Use [docs/operator-runbook.md](./docs/operator-runbook.md) for day-2 operations and failure handling.
+
+`npm run setup` writes `sheetflare.setup.json`, keeps reusable local secret state in `.sheetflare.setup.local.json`, can apply secrets, can deploy, can bootstrap the first project and keys, and can run smoke validation. The local state file is secret material, stays untracked, and should not be shared. For reruns from an existing config:
+
+- `npm run setup -- --apply-secrets`
+- `npm run setup -- --deploy`
+- `npm run setup -- --bootstrap`
+- `npm run setup -- --smoke`
 
 If you are maintaining this repository's own shared staging environment, use [docs/contributor-staging.md](./docs/contributor-staging.md).
 
@@ -64,6 +75,7 @@ When the API worker is running:
 - `GET /docs` serves the interactive API reference UI.
 
 The docs reflect the actual HTTP surface, including auth requirements, path params, query params, and request/response bodies for the supported endpoints.
+Admin project and table POST routes create by default. Replacing an existing config requires an explicit `?upsert=true` and returns `200` instead of `201`.
 
 ## Auth Model
 
@@ -92,6 +104,7 @@ Bootstrap and deployment steps are documented in [docs/quickstart.md](./docs/qui
 - Mutation lookup uses a narrow scan of the managed ID column plus targeted row reads instead of rescanning full row payloads, which reduces write-path cost on larger sheets while preserving correctness.
 - Read-only columns are never targeted by API writes, which lets a sheet expose formula-derived or operator-managed values without API updates flattening them.
 - `fieldRules` are enforced on API writes. They do not prevent direct Google Sheets edits from introducing invalid or duplicate values later.
+- Cache status now includes `validation`, which summarizes field-rule drift found during the last full sync without blocking normal reads.
 
 ## Cache And Sync
 
@@ -105,9 +118,10 @@ Bootstrap and deployment steps are documented in [docs/quickstart.md](./docs/qui
   - cached headers
   - sync metadata
 - Writes update the cache immediately after successful upstream mutation.
-- Deletes normally repair cached row numbers through a narrow managed-ID scan instead of forcing a full row-data resync.
-- If the post-delete row reference scan does not match the local cache shape, the table falls back to a full sync for safety.
+- If a create fails after the initial row append, the API attempts to delete that partial upstream row before returning the failure.
+- Deletes normally repair cached row numbers locally after successful API deletes. If the live header layout has drifted or the cache is already stale, the table falls back to a full sync for safety.
 - Table config changes that affect cache shape, indexing, or sheet layout automatically mark the cache stale and force a resync on the next read or write.
+- Full syncs now bound Google Sheets reads to the declared header width instead of reading the entire tab width.
 
 Operational procedures for reindex, cache inspection, and failure handling live in [docs/operator-runbook.md](./docs/operator-runbook.md).
 
@@ -183,7 +197,9 @@ Performance notes:
 - Non-timeout transport failures are reported distinctly from actual request timeouts.
 - Rate limits are bucketed by route family and operation key, for example `admin.projects.list`, `rows.list`, and `admin.cache.reindex`, so hot endpoints do not starve unrelated calls from the same principal.
 - Rate-limit principals are derived only from verified credentials; unverified API-key-shaped strings fall back to the anonymous/IP bucket.
-- `npm run build`, `npm run typecheck`, and `npm test` all pass from the repo root.
+- Request logs now include the applied rate-limit principal, route family, operation key, and limit/remaining/reset fields so `429` analysis lines up with the actual bucket selection.
+- `table.sync.complete` logs include validation status and issue counts from the same sync pass.
+- `npm run check` now runs lint, typecheck, test, and build from the repo root.
 
 ## Local End-To-End Checks
 
@@ -196,10 +212,13 @@ Required smoke env vars:
 - `SHEETFLARE_PRIVATE_TABLE`
 - `SHEETFLARE_PRIVATE_READ_KEY`
 - `SHEETFLARE_MUTATION_KEY`
-- `SHEETFLARE_PUBLIC_PROJECT`
-- `SHEETFLARE_PUBLIC_TABLE`
 - `SHEETFLARE_SMOKE_CREATE_VALUES_JSON`
 - `SHEETFLARE_SMOKE_UPDATE_VALUES_JSON`
+
+Optional for anonymous `public-read` coverage:
+
+- `SHEETFLARE_PUBLIC_PROJECT`
+- `SHEETFLARE_PUBLIC_TABLE`
 
 ```powershell
 npx playwright install chromium
