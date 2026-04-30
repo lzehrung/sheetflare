@@ -16,6 +16,49 @@ function createJsonResponse(body: unknown, status = 200) {
   });
 }
 
+function createSpreadsheetWatchStatusResponse(url: string) {
+  if (url !== '/v1/admin/system/google/drive/watches') {
+    return null;
+  }
+
+  return createJsonResponse({
+    data: [
+      {
+        spreadsheetId: 'sheet-1',
+        googleCredentialRef: 'default',
+        channelId: 'channel-sheet-1',
+        resourceId: 'resource-sheet-1',
+        resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+        expirationAt: '2026-05-03T00:00:00.000Z',
+        lastWatchError: null,
+        lastNotificationAt: '2026-04-26T00:00:00.000Z',
+        pendingChangedAt: null,
+        debounceUntil: null,
+        lastReindexStartedAt: null,
+        lastReindexCompletedAt: '2026-04-26T00:00:10.000Z',
+        lastReindexError: null,
+        projectSlugs: ['demo']
+      },
+      {
+        spreadsheetId: 'sheet-2',
+        googleCredentialRef: 'default',
+        channelId: 'channel-sheet-2',
+        resourceId: 'resource-sheet-2',
+        resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-2',
+        expirationAt: '2026-05-04T00:00:00.000Z',
+        lastWatchError: null,
+        lastNotificationAt: '2026-04-27T00:00:00.000Z',
+        pendingChangedAt: null,
+        debounceUntil: null,
+        lastReindexStartedAt: null,
+        lastReindexCompletedAt: '2026-04-27T00:00:10.000Z',
+        lastReindexError: null,
+        projectSlugs: ['prod']
+      }
+    ]
+  });
+}
+
 function installLocalStorage() {
   const localStorageMock = {
     getItem(key: string) {
@@ -50,6 +93,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -154,6 +199,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -224,6 +271,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -397,6 +446,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -523,6 +574,7 @@ describe('App', () => {
     const staleStatuses = await screen.findAllByText('ready / ttl-expired / 0 rows');
     expect(staleStatuses.length).toBeGreaterThan(0);
     expect(screen.getAllByText('warning / 1 issues').length).toBeGreaterThan(0);
+    expect(screen.getByText(/active \/ expires/i)).toBeTruthy();
     const spreadsheetLink = screen.getByRole('link', { name: 'Open in Google Sheets' });
     expect(spreadsheetLink.getAttribute('href')).toBe('https://docs.google.com/spreadsheets/d/sheet-1/edit');
 
@@ -532,10 +584,73 @@ describe('App', () => {
     expect(refreshedStatuses.length).toBeGreaterThan(0);
   });
 
+  it('shows a clear spreadsheet watch status message when a project-scoped key cannot read global watch state', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url === '/v1/admin/system/google/drive/watches') {
+        return createJsonResponse({
+          error: {
+            code: 'UNAUTHORIZED',
+            message: 'This operation requires a global admin key.',
+            details: null
+          }
+        }, 401);
+      }
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: 0,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: []
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'sfk_project-admin-key.secret' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByText('This operation requires a global admin key. requestId=req-ui');
+  });
+
   it('clears the revealed key when the selected project changes', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -624,6 +739,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -721,6 +838,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -804,6 +923,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -875,6 +996,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         projectRegistryCalls += 1;
@@ -1038,6 +1161,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({
@@ -1106,6 +1231,8 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         return createJsonResponse({ data: [] });
