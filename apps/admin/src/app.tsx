@@ -359,7 +359,12 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [credential, projectDetailState, selectedProjectSlug]);
+  }, [
+    credential,
+    selectedProjectSlug,
+    projectDetailState.status,
+    projectDetailState.status === 'ready' ? projectDetailState.project.spreadsheetId : null
+  ]);
 
   useEffect(() => {
     if (!credential || !selectedProjectSlug || projectDetailState.status !== 'ready' || !tableSetupOpen) {

@@ -992,12 +992,16 @@ describe('App', () => {
 
   it('refreshes the project registry after creating a table so project counts stay current', async () => {
     let projectRegistryCalls = 0;
+    let spreadsheetWatchCalls = 0;
 
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
       const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
-      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
+      if (spreadsheetWatchResponse) {
+        spreadsheetWatchCalls += 1;
+        return spreadsheetWatchResponse;
+      }
 
       if (url === '/v1/admin/projects' && method === 'GET') {
         projectRegistryCalls += 1;
@@ -1153,6 +1157,7 @@ describe('App', () => {
 
     await screen.findByText('Saving table demo/users complete.');
     expect(screen.getAllByText('1 tables').length).toBeGreaterThan(0);
+    expect(spreadsheetWatchCalls).toBe(1);
   });
 
   it('loads spreadsheet tabs only after table setup is opened', async () => {

@@ -8,9 +8,22 @@ export function formatSpreadsheetWatchTimestamp(value: string | null) {
   return value ? new Date(value).toLocaleString() : 'Not yet';
 }
 
+function isSpreadsheetWatchExpired(expirationAt: string | null) {
+  if (!expirationAt) {
+    return false;
+  }
+
+  const expirationAtMs = Date.parse(expirationAt);
+  return !Number.isNaN(expirationAtMs) && expirationAtMs <= Date.now();
+}
+
 export function getSpreadsheetWatchStatus(watch: SpreadsheetWatch) {
   if (watch.lastWatchError) {
     return 'error';
+  }
+
+  if (isSpreadsheetWatchExpired(watch.expirationAt)) {
+    return 'expired';
   }
 
   if (watch.pendingChangedAt) {
@@ -45,7 +58,7 @@ export function SpreadsheetWatchSummary({ watch }: SpreadsheetWatchSummaryProps)
       </div>
       <div>
         <dt>Projects</dt>
-        <dd>{watch.projectSlugs.join(', ')}</dd>
+        <dd>{watch.projectSlugs.length > 0 ? watch.projectSlugs.join(', ') : 'None'}</dd>
       </div>
       {watch.pendingChangedAt ? (
         <div>
