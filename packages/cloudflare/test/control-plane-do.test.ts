@@ -744,6 +744,102 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     vi.useRealTimers();
   });
 
+  it('preserves the stored message number when a notification arrives without one', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T15:00:00.000Z'));
+
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    vi.stubGlobal('fetch', createSheetsAndDriveFetch(sheet));
+    const { env } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30
+    });
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watch.notify',
+      channelId: 'channel-sheet-1',
+      resourceId: 'resource-sheet-1',
+      resourceState: 'update',
+      messageNumber: '2',
+      changedAt: '2026-04-29T15:01:00.000Z',
+      channelExpiration: 'Fri, 01 May 2026 00:00:00 GMT'
+    });
+
+    const nullMessageResponse = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watch.notify',
+      channelId: 'channel-sheet-1',
+      resourceId: 'resource-sheet-1',
+      resourceState: 'update',
+      messageNumber: null,
+      changedAt: '2026-04-29T15:01:10.000Z',
+      channelExpiration: 'Fri, 01 May 2026 00:00:00 GMT'
+    });
+
+    expect((nullMessageResponse as {
+      type: 'control.spreadsheet-watch.notify.result';
+      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
+    }).result).toEqual({
+      accepted: true,
+      spreadsheetId: 'sheet-1',
+      debounceUntil: '2026-04-29T15:01:40.000Z'
+    });
+
+    const duplicateResponse = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watch.notify',
+      channelId: 'channel-sheet-1',
+      resourceId: 'resource-sheet-1',
+      resourceState: 'update',
+      messageNumber: '2',
+      changedAt: '2026-04-29T15:01:20.000Z',
+      channelExpiration: 'Fri, 01 May 2026 00:00:00 GMT'
+    });
+
+    expect((duplicateResponse as {
+      type: 'control.spreadsheet-watch.notify.result';
+      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
+    }).result).toEqual({
+      accepted: true,
+      spreadsheetId: 'sheet-1',
+      debounceUntil: '2026-04-29T15:01:40.000Z'
+    });
+
+    vi.useRealTimers();
+  });
+
   it('renews expiring spreadsheet watches from the control-plane alarm before they lapse', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
