@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
 import type { SpreadsheetWatch } from '@sheetflare/contracts';
 import { getSpreadsheetWatchStatusSummary, SpreadsheetWatchSummary } from './spreadsheet-watch-summary';
 
@@ -25,6 +25,11 @@ function createSpreadsheetWatch(overrides?: Partial<SpreadsheetWatch>): Spreadsh
 }
 
 describe('SpreadsheetWatchSummary', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    cleanup();
+  });
+
   it('builds a shared one-line status summary', () => {
     expect(getSpreadsheetWatchStatusSummary(createSpreadsheetWatch())).toMatch(/^active \/ expires /i);
     expect(
@@ -34,6 +39,13 @@ describe('SpreadsheetWatchSummary', () => {
         })
       )
     ).toMatch(/^pending reindex \/ expires /i);
+  });
+
+  it('surfaces expired watches distinctly', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-04T00:00:00.000Z'));
+
+    expect(getSpreadsheetWatchStatusSummary(createSpreadsheetWatch())).toMatch(/^expired \/ expires /i);
   });
 
   it('renders an active watch summary', () => {
@@ -47,6 +59,16 @@ describe('SpreadsheetWatchSummary', () => {
     expect(screen.getByText('active')).toBeTruthy();
     expect(screen.getByText('Projects')).toBeTruthy();
     expect(screen.getByText('demo')).toBeTruthy();
+  });
+
+  it('renders an explicit fallback when no projects are linked', () => {
+    render(
+      <dl>
+        <SpreadsheetWatchSummary watch={createSpreadsheetWatch({ projectSlugs: [] })} />
+      </dl>
+    );
+
+    expect(screen.getByText('None')).toBeTruthy();
   });
 
   it('renders pending and error details when present', () => {
