@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  resolvePreferredSetupAdminCredential,
-  resolvePreferredSmokeAdminCredential,
+  resolvePreferredAdminCredential,
   resolveSetupRuntimeState,
   summarizeSetupSecrets
 } from './setup-runtime';
@@ -52,32 +51,16 @@ describe('resolveSetupRuntimeState', () => {
   });
 });
 
-describe('resolvePreferredSmokeAdminCredential', () => {
-  it('prefers a scoped admin api key for smoke when available', () => {
-    expect(resolvePreferredSmokeAdminCredential({
+describe('resolvePreferredAdminCredential', () => {
+  it('prefers a scoped admin api key when available', () => {
+    expect(resolvePreferredAdminCredential({
       adminApiKey: 'sfk_admin.secret',
       adminBearerToken: 'bootstrap.secret'
     })).toBe('sfk_admin.secret');
   });
 
   it('falls back to the bootstrap admin credential when no admin api key exists', () => {
-    expect(resolvePreferredSmokeAdminCredential({
-      adminApiKey: null,
-      adminBearerToken: 'bootstrap.secret'
-    })).toBe('bootstrap.secret');
-  });
-});
-
-describe('resolvePreferredSetupAdminCredential', () => {
-  it('prefers the reusable admin api key when available', () => {
-    expect(resolvePreferredSetupAdminCredential({
-      adminApiKey: 'sfk_admin.secret',
-      adminBearerToken: 'bootstrap.secret'
-    })).toBe('sfk_admin.secret');
-  });
-
-  it('falls back to the bootstrap credential when no admin api key exists', () => {
-    expect(resolvePreferredSetupAdminCredential({
+    expect(resolvePreferredAdminCredential({
       adminApiKey: null,
       adminBearerToken: 'bootstrap.secret'
     })).toBe('bootstrap.secret');

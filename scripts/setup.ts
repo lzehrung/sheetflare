@@ -17,8 +17,7 @@ import {
   writeSetupLocalState
 } from './lib/setup-state';
 import {
-  resolvePreferredSetupAdminCredential,
-  resolvePreferredSmokeAdminCredential,
+  resolvePreferredAdminCredential,
   resolveSetupRuntimeState,
   summarizeSetupSecrets
 } from './lib/setup-runtime';
@@ -125,18 +124,30 @@ async function registerDriveWatchesIfPossible(options: {
   apiUrl: string | null;
   adminCredential: string | null;
   shouldRegister: boolean;
+  failOnError?: boolean;
 }) {
   if (!options.shouldRegister || !options.apiUrl || !options.adminCredential) {
     return null;
   }
 
   logStep('Registering Google Drive spreadsheet watches');
-  const result = await registerDriveWatches({
-    baseUrl: options.apiUrl,
-    adminCredential: options.adminCredential
-  });
-  logSuccess(`Registered or renewed ${result.length} spreadsheet watch${result.length === 1 ? '' : 'es'}`);
-  return result;
+  try {
+    const result = await registerDriveWatches({
+      baseUrl: options.apiUrl,
+      adminCredential: options.adminCredential
+    });
+    logSuccess(`Registered or renewed ${result.length} spreadsheet watch${result.length === 1 ? '' : 'es'}`);
+    return result;
+  } catch (error) {
+    if (options.failOnError) {
+      throw error;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Warning: Failed to register Google Drive spreadsheet watches automatically: ${message}`);
+    console.warn('Setup will continue. To retry watch registration later, run: npm run ops:watch:drive');
+    return null;
+  }
 }
 
 async function main() {
@@ -372,7 +383,7 @@ async function main() {
       localStateWritten = true;
     }
 
-    const setupAdminCredential = resolvePreferredSetupAdminCredential({
+    const setupAdminCredential = resolvePreferredAdminCredential({
       adminApiKey,
       adminBearerToken
     });
@@ -390,7 +401,7 @@ async function main() {
         throw new ScriptError('API base URL is required for smoke.');
       }
 
-      let smokeAdminCredential = resolvePreferredSmokeAdminCredential({
+      let smokeAdminCredential = resolvePreferredAdminCredential({
         adminApiKey,
         adminBearerToken
       });

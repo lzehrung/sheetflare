@@ -41,11 +41,7 @@ export function resolveSetupRuntimeState(localState: SetupLocalState | null): Re
   };
 }
 
-export function resolvePreferredSmokeAdminCredential(state: Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'>) {
-  return resolveValue(state.adminApiKey, state.adminBearerToken);
-}
-
-export function resolvePreferredSetupAdminCredential(state: Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'>) {
+export function resolvePreferredAdminCredential(state: Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'>) {
   return resolveValue(state.adminApiKey, state.adminBearerToken);
 }
 
