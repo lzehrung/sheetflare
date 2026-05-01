@@ -8,9 +8,16 @@ export function NoticeBanner({ tone, message }: NoticeBannerProps) {
     return null;
   }
 
+  let className = 'muted';
+  if (tone === 'error') {
+    className = 'error';
+  } else if (tone === 'success') {
+    className = 'success';
+  }
+
   return (
     <p
-      className={tone === 'error' ? 'error' : tone === 'success' ? 'success' : 'muted'}
+      className={className}
       role="status"
       aria-live="polite"
     >

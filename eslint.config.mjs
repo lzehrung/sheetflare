@@ -31,7 +31,8 @@ export default tseslint.config(
       }
     },
     rules: {
-      'no-console': 'off'
+      'no-console': 'off',
+      'no-nested-ternary': 'error'
     }
   },
   {

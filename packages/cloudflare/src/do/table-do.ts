@@ -1135,19 +1135,7 @@ export class TableDO {
         })
       : null;
     const signatureMatches = !configSignature || this.getMeta('config.signature') === configSignature;
-
-    const staleReason: CacheStaleReason =
-      meta.status === 'error'
-        ? 'error'
-        : !meta.lastSyncCompletedAt || Number.isNaN(lastSyncMs)
-          ? 'never-synced'
-          : !signatureMatches
-            ? 'config-changed'
-            : externalChange.pending
-              ? 'external-change'
-              : Date.now() - lastSyncMs > config.cacheTtlSeconds * 1000
-              ? 'ttl-expired'
-              : 'fresh';
+    const staleReason = this.getStaleReason(config.cacheTtlSeconds, meta, lastSyncMs, signatureMatches, externalChange.pending);
 
     return {
       status: meta.status,
@@ -1161,6 +1149,36 @@ export class TableDO {
       validation: this.getValidationSummary(),
       externalChange
     };
+  }
+
+  private getStaleReason(
+    cacheTtlSeconds: number,
+    meta: SyncMeta,
+    lastSyncMs: number,
+    signatureMatches: boolean,
+    hasPendingExternalChange: boolean
+  ): CacheStaleReason {
+    if (meta.status === 'error') {
+      return 'error';
+    }
+
+    if (!meta.lastSyncCompletedAt || Number.isNaN(lastSyncMs)) {
+      return 'never-synced';
+    }
+
+    if (!signatureMatches) {
+      return 'config-changed';
+    }
+
+    if (hasPendingExternalChange) {
+      return 'external-change';
+    }
+
+    if (Date.now() - lastSyncMs > cacheTtlSeconds * 1000) {
+      return 'ttl-expired';
+    }
+
+    return 'fresh';
   }
 
   private getValidationSummary(): TableValidationSummary {
@@ -1589,13 +1607,7 @@ export class TableDO {
               sortDirection: query.sort.direction,
               rowId: lastRow.id,
               rowNumber: lastRow.rowNumber,
-              value: normalizeScalarCursorValue(
-                query.sort.field === 'rowNumber'
-                  ? lastRow.rowNumber
-                  : query.sort.field === 'id'
-                    ? lastRow.id
-                    : this.normalizeCursorSourceValue(lastRow.values[query.sort.field])
-              )
+              value: normalizeScalarCursorValue(this.getSortFieldValue(lastRow, query.sort.field))
             })
           : null
     };
@@ -1840,8 +1852,32 @@ export class TableDO {
 
   private matchesFilter(row: RowEnvelope, filter: NonNullable<ListRowsQuery['filter']>) {
     return Object.entries(filter).every(([field, definition]) =>
-      this.matchesFieldFilter(field === 'rowNumber' ? row.rowNumber : field === 'id' ? row.id : (row.values[field] ?? null), definition)
+      this.matchesFieldFilter(this.getFilterFieldValue(row, field), definition)
     );
+  }
+
+  private getFilterFieldValue(row: RowEnvelope, field: string) {
+    if (field === 'rowNumber') {
+      return row.rowNumber;
+    }
+
+    if (field === 'id') {
+      return row.id;
+    }
+
+    return row.values[field] ?? null;
+  }
+
+  private getSortFieldValue(row: RowEnvelope, sortField: string) {
+    if (sortField === 'rowNumber') {
+      return row.rowNumber;
+    }
+
+    if (sortField === 'id') {
+      return row.id;
+    }
+
+    return this.normalizeCursorSourceValue(row.values[sortField]);
   }
 
   private matchesFieldFilter(value: RowRecord[string] | string | number, definition: NonNullable<NonNullable<ListRowsQuery['filter']>[string]>) {
@@ -1877,14 +1913,7 @@ export class TableDO {
     direction: 'asc' | 'desc',
     cursor: NonNullable<ReturnType<typeof decodeQueryCursor>>
   ) {
-    const valueComparison = this.compareScanCursorValue(
-      sortField === 'rowNumber'
-        ? row.rowNumber
-        : sortField === 'id'
-          ? row.id
-          : this.normalizeCursorSourceValue(row.values[sortField]),
-      cursor
-    );
+    const valueComparison = this.compareScanCursorValue(this.getSortFieldValue(row, sortField), cursor);
 
     if (valueComparison !== 0) {
       return direction === 'desc' ? valueComparison < 0 : valueComparison > 0;
@@ -1914,13 +1943,25 @@ export class TableDO {
     }
 
     const comparableValue = Array.isArray(value) ? JSON.stringify(value) : value;
-    const cursorValue = cursor.value.kind === 'null'
-      ? null
-      : cursor.value.kind === 'boolean' || cursor.value.kind === 'number' || cursor.value.kind === 'string'
-        ? cursor.value.value
-        : null;
+    const cursorValue = this.getDecodedCursorValue(cursor);
 
     return compareQueryValues(comparableValue, cursorValue);
+  }
+
+  private getDecodedCursorValue(cursor: NonNullable<ReturnType<typeof decodeQueryCursor>>) {
+    if (cursor.value.kind === 'null') {
+      return null;
+    }
+
+    if (
+      cursor.value.kind === 'boolean' ||
+      cursor.value.kind === 'number' ||
+      cursor.value.kind === 'string'
+    ) {
+      return cursor.value.value;
+    }
+
+    return null;
   }
 }
 

@@ -64,6 +64,26 @@ function renderFieldError(message: string | undefined) {
   return message ? <p className="fieldMessage error">{message}</p> : null;
 }
 
+function renderSpreadsheetWatchState(spreadsheetWatchState: SpreadsheetWatchState) {
+  if (spreadsheetWatchState.status === 'loading') {
+    return 'Loading watch status...';
+  }
+
+  if (spreadsheetWatchState.status === 'idle') {
+    return spreadsheetWatchState.message;
+  }
+
+  if (spreadsheetWatchState.status === 'error') {
+    return <span className="error">{spreadsheetWatchState.message}</span>;
+  }
+
+  if (spreadsheetWatchState.watch) {
+    return getSpreadsheetWatchStatusSummary(spreadsheetWatchState.watch);
+  }
+
+  return 'No watch registered yet.';
+}
+
 function parseCsv(value: string) {
   return value
     .split(',')
@@ -288,14 +308,7 @@ export function SelectedProjectPanel({
               <div>
                 <dt>Drive Watch</dt>
                 <dd>
-                  {spreadsheetWatchState.status === 'loading' ? 'Loading watch status...' : null}
-                  {spreadsheetWatchState.status === 'idle' ? spreadsheetWatchState.message : null}
-                  {spreadsheetWatchState.status === 'error' ? <span className="error">{spreadsheetWatchState.message}</span> : null}
-                  {spreadsheetWatchState.status === 'ready'
-                    ? spreadsheetWatchState.watch
-                      ? getSpreadsheetWatchStatusSummary(spreadsheetWatchState.watch)
-                      : 'No watch registered yet.'
-                    : null}
+                  {renderSpreadsheetWatchState(spreadsheetWatchState)}
                 </dd>
               </div>
             </dl>

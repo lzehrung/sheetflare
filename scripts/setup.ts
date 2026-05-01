@@ -69,7 +69,12 @@ function isMissingFileError(error: unknown) {
 
 function renderPrereqSummary(results: SetupPrereqResult[]) {
   for (const result of results) {
-    const prefix = result.status === 'ready' ? '[ok]' : result.status === 'warning' ? '[warn]' : '[blocked]';
+    let prefix = '[blocked]';
+    if (result.status === 'ready') {
+      prefix = '[ok]';
+    } else if (result.status === 'warning') {
+      prefix = '[warn]';
+    }
     console.log(`${prefix} ${result.name}: ${result.summary}`);
     if (result.remediation) {
       console.log(`       ${result.remediation}`);

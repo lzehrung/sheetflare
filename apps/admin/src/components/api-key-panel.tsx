@@ -34,6 +34,37 @@ function renderFieldError(message: string | undefined) {
   return message ? <p className="fieldMessage error">{message}</p> : null;
 }
 
+function renderGlobalKeysState(
+  globalKeysState: GlobalKeysState,
+  onRevoke: (apiKeyId: string) => void,
+  busy: boolean
+) {
+  if (globalKeysState.status === 'idle') {
+    return <p className="muted">{globalKeysState.message}</p>;
+  }
+
+  if (globalKeysState.status === 'loading') {
+    return <p className="muted">Loading global keys...</p>;
+  }
+
+  if (globalKeysState.status === 'error') {
+    if (globalKeysState.unauthorized) {
+      return <p className="muted">Global key listing requires a global admin credential.</p>;
+    }
+
+    return <p className="error">{globalKeysState.message}</p>;
+  }
+
+  return (
+    <ApiKeySections
+      keys={globalKeysState.data}
+      onRevoke={(apiKeyId) => onRevoke(apiKeyId)}
+      busy={busy}
+      emptyMessage="No global admin keys yet."
+    />
+  );
+}
+
 export function ApiKeyPanel({
   selectedProjectSlug,
   draft,
@@ -140,21 +171,7 @@ export function ApiKeyPanel({
             <p className="muted compact">Break-glass and cross-project credentials.</p>
           </div>
         </summary>
-        {globalKeysState.status === 'idle' ? <p className="muted">{globalKeysState.message}</p> : null}
-        {globalKeysState.status === 'loading' ? <p className="muted">Loading global keys...</p> : null}
-        {globalKeysState.status === 'error' ? (
-          globalKeysState.unauthorized
-            ? <p className="muted">Global key listing requires a global admin credential.</p>
-            : <p className="error">{globalKeysState.message}</p>
-        ) : null}
-        {globalKeysState.status === 'ready' ? (
-          <ApiKeySections
-            keys={globalKeysState.data}
-            onRevoke={(apiKeyId) => onRevoke(apiKeyId)}
-            busy={busy}
-            emptyMessage="No global admin keys yet."
-          />
-        ) : null}
+        {renderGlobalKeysState(globalKeysState, onRevoke, busy)}
       </details>
     </div>
   );

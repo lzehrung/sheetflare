@@ -25,6 +25,58 @@ class FakeDurableObjectNamespace {
   }
 }
 
+function buildApiKeyRecord(apiKeyId: string) {
+  if (apiKeyId === 'project-key') {
+    return {
+      id: 'project-key',
+      projectSlug: 'demo',
+      name: 'Demo key',
+      scopes: ['table:create', 'table:read'],
+      createdAt: '2026-04-26T00:00:00.000Z',
+      revokedAt: null,
+      lastUsedAt: null
+    };
+  }
+
+  if (apiKeyId === 'touch-key') {
+    return {
+      id: 'touch-key',
+      projectSlug: 'demo',
+      name: 'Touch key',
+      scopes: ['table:read'],
+      createdAt: '2026-04-26T00:00:00.000Z',
+      revokedAt: null,
+      lastUsedAt: null
+    };
+  }
+
+  if (apiKeyId === 'project-admin-key') {
+    return {
+      id: 'project-admin-key',
+      projectSlug: 'demo',
+      name: 'Demo admin key',
+      scopes: ['admin:projects', 'admin:keys', 'table:read'],
+      createdAt: '2026-04-26T00:00:00.000Z',
+      revokedAt: null,
+      lastUsedAt: null
+    };
+  }
+
+  if (apiKeyId === 'global-key') {
+    return {
+      id: 'global-key',
+      projectSlug: null,
+      name: 'Global key',
+      scopes: ['admin:keys'],
+      createdAt: '2026-04-26T00:00:00.000Z',
+      revokedAt: null,
+      lastUsedAt: null
+    };
+  }
+
+  return null;
+}
+
 function createEnv(options?: {
   rateLimitAllowed?: boolean;
   defaultAuthMode?: 'private' | 'public-read';
@@ -52,38 +104,7 @@ function createEnv(options?: {
       return Response.json({
         type: 'control.api-key.verify.result',
         result: {
-          record:
-            body.apiKeyId === 'project-key'
-              ? {
-                  id: 'project-key',
-                  projectSlug: 'demo',
-                  name: 'Demo key',
-                  scopes: ['table:create', 'table:read'],
-                  createdAt: '2026-04-26T00:00:00.000Z',
-                  revokedAt: null,
-                  lastUsedAt: null
-                }
-              : body.apiKeyId === 'touch-key'
-                ? {
-                    id: 'touch-key',
-                    projectSlug: 'demo',
-                    name: 'Touch key',
-                    scopes: ['table:read'],
-                    createdAt: '2026-04-26T00:00:00.000Z',
-                    revokedAt: null,
-                    lastUsedAt: null
-                  }
-              : body.apiKeyId === 'project-admin-key'
-                ? {
-                    id: 'project-admin-key',
-                    projectSlug: 'demo',
-                    name: 'Demo admin key',
-                    scopes: ['admin:projects', 'admin:keys', 'table:read'],
-                    createdAt: '2026-04-26T00:00:00.000Z',
-                    revokedAt: null,
-                    lastUsedAt: null
-                  }
-                : null
+          record: buildApiKeyRecord(body.apiKeyId ?? '')
         }
       });
     }
@@ -137,37 +158,7 @@ function createEnv(options?: {
       return Response.json({
         type: 'control.api-key.get.result',
         result: {
-          record: body.apiKeyId === 'project-key'
-            ? {
-                id: 'project-key',
-                projectSlug: 'demo',
-                name: 'Demo key',
-                scopes: ['table:create', 'table:read'],
-                createdAt: '2026-04-26T00:00:00.000Z',
-                revokedAt: null,
-                lastUsedAt: null
-              }
-            : body.apiKeyId === 'touch-key'
-              ? {
-                  id: 'touch-key',
-                  projectSlug: 'demo',
-                  name: 'Touch key',
-                  scopes: ['table:read'],
-                  createdAt: '2026-04-26T00:00:00.000Z',
-                  revokedAt: null,
-                  lastUsedAt: null
-                }
-            : body.apiKeyId === 'global-key'
-              ? {
-                  id: 'global-key',
-                  projectSlug: null,
-                  name: 'Global key',
-                  scopes: ['admin:keys'],
-                  createdAt: '2026-04-26T00:00:00.000Z',
-                  revokedAt: null,
-                  lastUsedAt: null
-                }
-              : null
+          record: buildApiKeyRecord(body.apiKeyId ?? '')
         }
       });
     }

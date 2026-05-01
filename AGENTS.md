@@ -88,6 +88,18 @@ Trust boundaries include:
 - persisted metadata
 - Google Sheets payloads when assumptions matter
 
+### Do not use nested ternaries
+
+Never introduce nested ternary expressions.
+
+If branching has more than two cases:
+
+- use an `if` / `else if` / `else` chain
+- extract a small helper
+- assign an intermediate variable with explicit control flow
+
+Readability is more important than compressing conditional logic into a single expression.
+
 ## Cloudflare / Data-Plane Rules
 
 ### Durable Objects own local truth

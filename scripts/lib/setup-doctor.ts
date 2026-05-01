@@ -108,6 +108,18 @@ function getConfiguredGoogleCredentialRefs(config: SetupConfig) {
   return refs;
 }
 
+function describeReadyCredentialSummary(ready: ReadyResponse['checks']) {
+  if (ready.defaultGoogleCredential === 'configured' && ready.namedGoogleCredentials === 'configured') {
+    return 'default and named Google credentials';
+  }
+
+  if (ready.defaultGoogleCredential === 'configured') {
+    return 'the default Google credential';
+  }
+
+  return 'named Google credentials';
+}
+
 export async function runSetupDoctor(options: {
   config: SetupConfig;
   runtimeState: ResolvedSetupRuntimeState;
@@ -215,16 +227,10 @@ export async function runSetupDoctor(options: {
           'Apply GOOGLE_DRIVE_WEBHOOK_SECRET through setup or wrangler secret put, then redeploy if needed.'
         ));
       } else {
-        const credentialSummary =
-          ready.checks.defaultGoogleCredential === 'configured' && ready.checks.namedGoogleCredentials === 'configured'
-            ? 'default and named Google credentials'
-            : ready.checks.defaultGoogleCredential === 'configured'
-              ? 'the default Google credential'
-              : 'named Google credentials';
         results.push(createResult(
           'API readiness',
           'ready',
-          `API /ready reports the Worker as healthy with ${credentialSummary} and the Drive webhook secret configured.`,
+          `API /ready reports the Worker as healthy with ${describeReadyCredentialSummary(ready.checks)} and the Drive webhook secret configured.`,
           null
         ));
       }
