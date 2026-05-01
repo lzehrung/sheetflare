@@ -29,6 +29,8 @@ function createEnv(options?: {
   rateLimitAllowed?: boolean;
   defaultAuthMode?: 'private' | 'public-read';
   projectAccessStatus?: 200 | 404 | 500;
+  googleClientEmail?: string;
+  adminBearerToken?: string;
 }): Env {
   const rateLimitRequests: Array<{ name: string; key: string }> = [];
   const projectRequests: string[] = [];
@@ -573,10 +575,10 @@ function createEnv(options?: {
     PROJECT_DO: project as never,
     TABLE_DO: table as never,
     RATE_LIMIT_DO: rateLimit as never,
-    GOOGLE_CLIENT_EMAIL: 'service@example.com',
+    GOOGLE_CLIENT_EMAIL: options?.googleClientEmail ?? 'service@example.com',
     GOOGLE_PRIVATE_KEY: 'private-key',
     GOOGLE_DRIVE_WEBHOOK_SECRET: 'drive-secret',
-    ADMIN_BEARER_TOKEN: 'secret',
+    ADMIN_BEARER_TOKEN: options?.adminBearerToken ?? 'secret',
     RATE_LIMIT_MAX_REQUESTS: '300',
     RATE_LIMIT_WINDOW_SECONDS: '60'
   };
@@ -649,6 +651,23 @@ describe('api routes', () => {
         }
       ]
     });
+  });
+
+  it('accepts bootstrap admin tokens even when the deployed secret includes trailing whitespace', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects',
+      {
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      createEnv({
+        adminBearerToken: 'secret\n'
+      })
+    );
+
+    expect(response.status).toBe(200);
   });
 
   it('registers Drive spreadsheet watches through a global admin route', async () => {
@@ -942,6 +961,30 @@ describe('api routes', () => {
         bootstrapAdmin: 'configured'
       },
       notes: [
+        'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
+      ]
+    });
+  });
+
+  it('treats the checked-in placeholder GOOGLE_CLIENT_EMAIL as not configured in /ready', async () => {
+    const app = createApp();
+    const response = await app.request('/ready', {}, createEnv({
+      googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com'
+    }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      service: 'sheetflare-api',
+      checks: {
+        controlPlane: 'ok',
+        rateLimit: 'ok',
+        defaultGoogleCredential: 'missing',
+        googleDriveWebhookSecret: 'configured',
+        bootstrapAdmin: 'configured'
+      },
+      notes: [
+        'Default Google service-account credential is not configured, or GOOGLE_CLIENT_EMAIL is still the checked-in placeholder. Project-specific credentials may still work.',
         'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
       ]
     });

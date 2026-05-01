@@ -4,6 +4,7 @@ import {
   createGoogleServiceAccountEmail,
   getDefaultGoogleProjectId,
   getDefaultGoogleServiceAccountName,
+  isPlaceholderGoogleClientEmail,
   normalizeGoogleProjectId,
   normalizeGoogleServiceAccountName,
   provisionGoogleServiceAccount
@@ -20,6 +21,11 @@ describe('google setup defaults', () => {
   it('builds the canonical service-account email', () => {
     expect(createGoogleServiceAccountEmail('sheetflare-prod', 'sheetflare-prod'))
       .toBe('sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com');
+  });
+
+  it('detects the checked-in placeholder client email', () => {
+    expect(isPlaceholderGoogleClientEmail('service-account@your-gcp-project.iam.gserviceaccount.com')).toBe(true);
+    expect(isPlaceholderGoogleClientEmail('sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com')).toBe(false);
   });
 
   it('validates project and service-account names clearly', () => {

@@ -7,6 +7,7 @@ import {
   buildApiDeployCommand,
   buildPagesProjectCreateCommand,
   buildPagesProjectListCommand,
+  getApiWranglerConfigPath,
   getAdminPagesProjectName,
   getAdminPagesSiteUrl,
   parsePagesProjectList,
@@ -66,6 +67,12 @@ describe('setup deploy command builders', () => {
 
   it('uses the generic public Pages project name', () => {
     expect(getAdminPagesProjectName()).toBe('sheetflare-admin');
+    expect(getAdminPagesProjectName('staging')).toBe('sheetflare-staging-admin');
+  });
+
+  it('uses the correct API wrangler config path for each profile', () => {
+    expect(getApiWranglerConfigPath().replace(/\\/g, '/')).toContain('apps/api/wrangler.jsonc');
+    expect(getApiWranglerConfigPath('staging').replace(/\\/g, '/')).toContain('apps/api/wrangler.staging.jsonc');
   });
 
   it('derives the canonical Pages site URL from the project name', () => {

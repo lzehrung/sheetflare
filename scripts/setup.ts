@@ -12,7 +12,7 @@ import {
   getApiWranglerConfigPath,
   getAdminPagesProjectName
 } from './lib/setup-deploy';
-import { registerDriveWatches } from './lib/setup-drive-watches';
+import { listDriveWatches, registerDriveWatches } from './lib/setup-drive-watches';
 import {
   applyAdminApiBaseUrl,
   applyAdminSecrets,
@@ -34,6 +34,8 @@ import {
   resolveSetupRuntimeState,
   summarizeSetupSecrets
 } from './lib/setup-runtime';
+import { runSetupDoctor } from './lib/setup-doctor';
+import { isPlaceholderGoogleClientEmail } from './lib/setup-google';
 import { verifyAdminPagesDeployment } from './lib/setup-verify';
 import { getCommandName, runCommand } from './lib/process';
 import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
@@ -90,6 +92,20 @@ async function promptForText(prompter: SetupPrompter, options: {
 function printExecutionSummary(summary: SetupExecutionSummary) {
   console.log('\nSetup summary');
   console.log(JSON.stringify(summary, null, 2));
+}
+
+function assertRealGoogleClientEmail(value: string | null) {
+  if (!value) {
+    throw new ScriptError('Deploy requires GOOGLE_CLIENT_EMAIL from setup secrets, local setup state, or the environment.');
+  }
+
+  if (isPlaceholderGoogleClientEmail(value)) {
+    throw new ScriptError(
+      `Deploy cannot use the checked-in placeholder GOOGLE_CLIENT_EMAIL (${value}). Run npm run setup -- --apply-secrets --provision-google, or provide a real GOOGLE_CLIENT_EMAIL before deploying.`
+    );
+  }
+
+  return value;
 }
 
 async function runBootstrap(env: NodeJS.ProcessEnv) {
@@ -150,7 +166,24 @@ async function registerDriveWatchesIfPossible(options: {
       baseUrl: options.apiUrl,
       adminCredential: options.adminCredential
     });
-    logSuccess(`Registered or renewed ${result.length} spreadsheet watch${result.length === 1 ? '' : 'es'}`);
+    const verified = await listDriveWatches({
+      baseUrl: options.apiUrl,
+      adminCredential: options.adminCredential,
+      retries: 2,
+      retryDelayMs: 1000
+    });
+    const visibleSpreadsheetIds = new Set(verified.map((watch) => watch.spreadsheetId));
+    const missingSpreadsheetIds = result
+      .map((watch) => watch.spreadsheetId)
+      .filter((spreadsheetId) => !visibleSpreadsheetIds.has(spreadsheetId));
+
+    if (missingSpreadsheetIds.length > 0) {
+      console.warn(
+        `Warning: Drive watch registration returned success, but status has not yet confirmed spreadsheet watch visibility for ${missingSpreadsheetIds.join(', ')}. Re-check with npm run ops:watch:drive:status.`
+      );
+    } else {
+      logSuccess(`Registered or renewed ${result.length} spreadsheet watch${result.length === 1 ? '' : 'es'}`);
+    }
     return result;
   } catch (error) {
     if (options.failOnError) {
@@ -164,8 +197,8 @@ async function registerDriveWatchesIfPossible(options: {
   }
 }
 
-async function ensureAdminPagesProjectReady() {
-  const pagesProjectName = getAdminPagesProjectName();
+async function ensureAdminPagesProjectReady(profile: string) {
+  const pagesProjectName = getAdminPagesProjectName(profile);
   const result = await ensurePagesProjectExists(pagesProjectName);
   if (result.created) {
     logSuccess(`Created Cloudflare Pages project ${pagesProjectName}`);
@@ -214,7 +247,7 @@ async function main() {
 
   logStep('Checking setup prerequisites');
   const prereqResults = await checkSetupPrereqsWithOptions({
-    includeWranglerAuth: options.applySecrets || options.deploy,
+    includeWranglerAuth: options.applySecrets || options.deploy || options.verify,
     includeGcloudAuth: options.provisionGoogle
   });
   renderPrereqSummary(prereqResults);
@@ -262,7 +295,7 @@ async function main() {
 
     const actions = resolveSetupActions(options, promptActions);
 
-    if (!actions.applySecretsNow && !actions.deployNow && !actions.bootstrapNow && !actions.smokeNow) {
+    if (!actions.applySecretsNow && !actions.deployNow && !actions.bootstrapNow && !actions.smokeNow && !options.verify) {
       return;
     }
 
@@ -307,7 +340,7 @@ async function main() {
 
       logStep('Applying Worker secrets');
       await applyApiSecrets({
-        apiWranglerConfigPath: getApiWranglerConfigPath(),
+        apiWranglerConfigPath: getApiWranglerConfigPath(config.profile),
         googlePrivateKey: setupSecrets.googlePrivateKey,
         driveWebhookSecret: setupSecrets.driveWebhookSecret,
         adminBearerToken: setupSecrets.adminBearerToken
@@ -329,7 +362,7 @@ async function main() {
           adminUiUsername,
           adminUiPassword
         });
-        const pagesProjectName = await ensureAdminPagesProjectReady();
+        const pagesProjectName = await ensureAdminPagesProjectReady(config.profile);
         await applyAdminPagesConfiguration({
           adminUiPassword: adminSiteSecrets.adminUiPassword,
           adminUiUsername: adminSiteSecrets.adminUiUsername,
@@ -340,20 +373,17 @@ async function main() {
     }
 
     if (actions.deployNow) {
-      const googleClientEmail = setupSecrets?.googleClientEmail
+      const googleClientEmail = assertRealGoogleClientEmail(setupSecrets?.googleClientEmail
         ?? localState?.googleClientEmail
-        ?? resolvedRuntimeState.googleClientEmail;
-      if (!googleClientEmail) {
-        throw new ScriptError('Deploy requires GOOGLE_CLIENT_EMAIL from setup secrets, local setup state, or the environment.');
-      }
+        ?? resolvedRuntimeState.googleClientEmail);
 
       logStep('Deploying API Worker');
-      const apiDeploy = await deployApiWorker(googleClientEmail);
+      const apiDeploy = await deployApiWorker(config.profile, googleClientEmail);
       apiUrl = apiDeploy.url;
       logSuccess(`API deployed at ${apiUrl}`);
 
       if (config.deploy.admin) {
-        const pagesProjectName = await ensureAdminPagesProjectReady();
+        const pagesProjectName = await ensureAdminPagesProjectReady(config.profile);
         if (!adminUiUsername || !adminUiPassword) {
           const adminSiteSecrets = await collectAdminSiteSecrets({
             prompter,
@@ -376,7 +406,7 @@ async function main() {
         });
 
         logStep('Deploying admin Pages site');
-        const adminDeploy = await deployAdminPages();
+        const adminDeploy = await deployAdminPages(config.profile);
         adminUrl = adminDeploy.siteUrl;
         logSuccess(`Admin deployed at ${adminUrl}`);
 
@@ -523,6 +553,23 @@ async function main() {
         mutationKey
       })
     });
+
+    if (options.verify) {
+      logStep('Verifying setup-managed environment');
+      const verificationResults = await runSetupDoctor({
+        config,
+        runtimeState: resolveSetupRuntimeState(localState),
+        prereqResults
+      });
+      renderPrereqSummary(verificationResults);
+
+      const blockedResults = verificationResults.filter((result) => result.status === 'blocked');
+      if (blockedResults.length > 0) {
+        throw new ScriptError(`Setup verification found ${blockedResults.length} blocking issue${blockedResults.length === 1 ? '' : 's'}.`);
+      }
+
+      logSuccess('Setup verification completed without blocking issues');
+    }
   } finally {
     prompter?.close?.();
   }
