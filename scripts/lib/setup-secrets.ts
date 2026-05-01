@@ -265,6 +265,24 @@ export async function applyAdminSecrets(options: {
   }
 }
 
+export async function applyAdminApiBaseUrl(options: {
+  apiBaseUrl: string;
+  pagesProjectName: string;
+}) {
+  const wrangler = getCommandName('npx');
+  const command = buildAdminApiBaseUrlCommand(options.pagesProjectName);
+  const result = await runCommand(
+    wrangler,
+    command,
+    {
+      input: `${options.apiBaseUrl}\n`
+    }
+  );
+  if (result.code !== 0) {
+    throw new ScriptError('Failed to apply SHEETFLARE_API_BASE_URL with wrangler pages secret put.');
+  }
+}
+
 export function buildApiSecretCommands(apiWranglerConfigPath: string) {
   return {
     googlePrivateKey: ['wrangler', 'secret', 'put', 'GOOGLE_PRIVATE_KEY', '--config', apiWranglerConfigPath],
@@ -278,4 +296,8 @@ export function buildAdminSecretCommands(pagesProjectName: string) {
     username: ['wrangler', 'pages', 'secret', 'put', 'ADMIN_UI_USERNAME', '--project-name', pagesProjectName],
     password: ['wrangler', 'pages', 'secret', 'put', 'ADMIN_UI_PASSWORD', '--project-name', pagesProjectName]
   };
+}
+
+export function buildAdminApiBaseUrlCommand(pagesProjectName: string) {
+  return ['wrangler', 'pages', 'secret', 'put', 'SHEETFLARE_API_BASE_URL', '--project-name', pagesProjectName];
 }
