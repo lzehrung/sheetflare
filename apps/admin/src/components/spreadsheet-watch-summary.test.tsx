@@ -2,7 +2,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import type { SpreadsheetWatch } from '@sheetflare/contracts';
-import { getSpreadsheetWatchStatusSummary, SpreadsheetWatchSummary } from './spreadsheet-watch-summary';
+import {
+  formatSpreadsheetWatchTimestamp,
+  getSpreadsheetWatchStatusSummary,
+  SpreadsheetWatchSummary
+} from './spreadsheet-watch-summary';
 
 function createSpreadsheetWatch(overrides?: Partial<SpreadsheetWatch>): SpreadsheetWatch {
   return {
@@ -39,6 +43,10 @@ describe('SpreadsheetWatchSummary', () => {
         })
       )
     ).toMatch(/^pending reindex \/ expires /i);
+  });
+
+  it('formats timestamps with both local timezone context and UTC', () => {
+    expect(formatSpreadsheetWatchTimestamp('2026-05-02T04:29:49.000Z')).toMatch(/\(.+UTC\)$/);
   });
 
   it('surfaces expired watches distinctly', () => {
