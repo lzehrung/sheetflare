@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  buildAdminApiBaseUrlCommand,
   buildAdminSecretCommands,
   buildApiSecretCommands,
   collectAdminSiteSecrets,
@@ -37,6 +38,18 @@ describe('setup secret command builders', () => {
       username: ['wrangler', 'pages', 'secret', 'put', 'ADMIN_UI_USERNAME', '--project-name', 'sheetflare-admin'],
       password: ['wrangler', 'pages', 'secret', 'put', 'ADMIN_UI_PASSWORD', '--project-name', 'sheetflare-admin']
     });
+  });
+
+  it('builds the admin Pages API base-url binding command against the provided project name', () => {
+    expect(buildAdminApiBaseUrlCommand('sheetflare-admin')).toEqual([
+      'wrangler',
+      'pages',
+      'secret',
+      'put',
+      'SHEETFLARE_API_BASE_URL',
+      '--project-name',
+      'sheetflare-admin'
+    ]);
   });
 
   it('collects secrets noninteractively from environment values', async () => {

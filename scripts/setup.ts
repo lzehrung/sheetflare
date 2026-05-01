@@ -5,9 +5,22 @@ import { actionsRequireWranglerAuth, parseSetupArgs, resolveSetupActions } from 
 import { createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, type SetupPrereqResult } from './lib/setup-prereqs';
 import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './lib/setup-bootstrap';
-import { deployAdminPages, deployApiWorker, getApiWranglerConfigPath, getAdminPagesProjectName } from './lib/setup-deploy';
+import {
+  deployAdminPages,
+  deployApiWorker,
+  ensurePagesProjectExists,
+  getApiWranglerConfigPath,
+  getAdminPagesProjectName
+} from './lib/setup-deploy';
 import { registerDriveWatches } from './lib/setup-drive-watches';
-import { applyAdminSecrets, applyApiSecrets, collectAdminSiteSecrets, collectSetupSecrets, requireAdminSiteSecrets } from './lib/setup-secrets';
+import {
+  applyAdminApiBaseUrl,
+  applyAdminSecrets,
+  applyApiSecrets,
+  collectAdminSiteSecrets,
+  collectSetupSecrets,
+  requireAdminSiteSecrets
+} from './lib/setup-secrets';
 import { createSmokeEnv } from './lib/setup-smoke';
 import {
   createSetupLocalState,
@@ -21,6 +34,7 @@ import {
   resolveSetupRuntimeState,
   summarizeSetupSecrets
 } from './lib/setup-runtime';
+import { verifyAdminPagesDeployment } from './lib/setup-verify';
 import { getCommandName, runCommand } from './lib/process';
 import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
 
@@ -150,6 +164,42 @@ async function registerDriveWatchesIfPossible(options: {
   }
 }
 
+async function ensureAdminPagesProjectReady() {
+  const pagesProjectName = getAdminPagesProjectName();
+  const result = await ensurePagesProjectExists(pagesProjectName);
+  if (result.created) {
+    logSuccess(`Created Cloudflare Pages project ${pagesProjectName}`);
+  }
+
+  return pagesProjectName;
+}
+
+async function applyAdminPagesConfiguration(options: {
+  adminUiPassword: string;
+  adminUiUsername: string;
+  apiUrl?: string | null;
+  pagesProjectName: string;
+}) {
+  logStep('Applying admin Pages site secrets');
+  await applyAdminSecrets({
+    pagesProjectName: options.pagesProjectName,
+    username: options.adminUiUsername,
+    password: options.adminUiPassword
+  });
+  logSuccess('Admin site secrets applied');
+
+  if (!options.apiUrl) {
+    return;
+  }
+
+  logStep('Applying admin Pages API base URL');
+  await applyAdminApiBaseUrl({
+    apiBaseUrl: options.apiUrl,
+    pagesProjectName: options.pagesProjectName
+  });
+  logSuccess('Admin Pages API base URL applied');
+}
+
 async function main() {
   const options = parseSetupArgs(process.argv.slice(2));
   const resolvedConfigPath = resolve(options.configPath);
@@ -272,13 +322,13 @@ async function main() {
           adminUiUsername,
           adminUiPassword
         });
-        logStep('Applying admin Pages site secrets');
-        await applyAdminSecrets({
-          pagesProjectName: getAdminPagesProjectName(),
-          username: adminSiteSecrets.adminUiUsername,
-          password: adminSiteSecrets.adminUiPassword
+        const pagesProjectName = await ensureAdminPagesProjectReady();
+        await applyAdminPagesConfiguration({
+          adminUiPassword: adminSiteSecrets.adminUiPassword,
+          adminUiUsername: adminSiteSecrets.adminUiUsername,
+          apiUrl,
+          pagesProjectName,
         });
-        logSuccess('Admin site secrets applied');
       }
     }
 
@@ -296,6 +346,7 @@ async function main() {
       logSuccess(`API deployed at ${apiUrl}`);
 
       if (config.deploy.admin) {
+        const pagesProjectName = await ensureAdminPagesProjectReady();
         if (!adminUiUsername || !adminUiPassword) {
           const adminSiteSecrets = await collectAdminSiteSecrets({
             prompter,
@@ -306,22 +357,29 @@ async function main() {
           adminUiPassword = adminSiteSecrets.adminUiPassword;
         }
 
-        logStep('Deploying admin Pages site');
-        const adminDeploy = await deployAdminPages(apiUrl);
-        adminUrl = adminDeploy.url;
-        logSuccess(`Admin deployed at ${adminUrl}`);
-
-        logStep('Applying admin Pages site secrets');
         const adminSiteSecrets = requireAdminSiteSecrets({
           adminUiUsername,
           adminUiPassword
         });
-        await applyAdminSecrets({
-          pagesProjectName: getAdminPagesProjectName(),
-          username: adminSiteSecrets.adminUiUsername,
-          password: adminSiteSecrets.adminUiPassword
+        await applyAdminPagesConfiguration({
+          adminUiPassword: adminSiteSecrets.adminUiPassword,
+          adminUiUsername: adminSiteSecrets.adminUiUsername,
+          apiUrl,
+          pagesProjectName,
         });
-        logSuccess('Admin site secrets applied');
+
+        logStep('Deploying admin Pages site');
+        const adminDeploy = await deployAdminPages();
+        adminUrl = adminDeploy.siteUrl;
+        logSuccess(`Admin deployed at ${adminUrl}`);
+
+        logStep('Verifying admin Pages site');
+        await verifyAdminPagesDeployment({
+          password: adminSiteSecrets.adminUiPassword,
+          siteUrl: adminDeploy.siteUrl,
+          username: adminSiteSecrets.adminUiUsername
+        });
+        logSuccess('Admin Pages site verified');
       }
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
