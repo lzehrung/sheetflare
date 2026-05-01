@@ -43,6 +43,13 @@ describe('SpreadsheetWatchSummary', () => {
         })
       )
     ).toMatch(/^pending reindex \/ expires /i);
+    expect(
+      getSpreadsheetWatchStatusSummary(
+        createSpreadsheetWatch({
+          lastWatchError: 'Renewal failed.'
+        })
+      )
+    ).toMatch(/^renewal warning \/ expires /i);
   });
 
   it('formats timestamps with both local timezone context and UTC', () => {
@@ -98,7 +105,7 @@ describe('SpreadsheetWatchSummary', () => {
       </dl>
     );
 
-    expect(screen.getByText('error')).toBeTruthy();
+    expect(screen.getByText('renewal warning')).toBeTruthy();
     expect(screen.getByText('Pending Change')).toBeTruthy();
     expect(screen.getByText('Debounce Until')).toBeTruthy();
     expect(screen.getByText('Last Watch Error')).toBeTruthy();

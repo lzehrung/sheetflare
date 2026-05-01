@@ -78,7 +78,16 @@ function renderSpreadsheetWatchState(spreadsheetWatchState: SpreadsheetWatchStat
   }
 
   if (spreadsheetWatchState.watch) {
-    return getSpreadsheetWatchStatusSummary(spreadsheetWatchState.watch);
+    return (
+      <>
+        <span>{getSpreadsheetWatchStatusSummary(spreadsheetWatchState.watch)}</span>
+        {spreadsheetWatchState.watch.lastWatchError ? (
+          <p className="muted compact">
+            Last watch issue: {spreadsheetWatchState.watch.lastWatchError}
+          </p>
+        ) : null}
+      </>
+    );
   }
 
   return 'No watch registered yet.';
@@ -316,7 +325,7 @@ export function SelectedProjectPanel({
               <div className="healthSummary">
                 <span className="badge healthBadge">Healthy {projectHealthSummary.healthy}</span>
                 <span className="badge badgeMuted">Stale {projectHealthSummary.stale}</span>
-                <span className="badge badgeMuted">Errors {projectHealthSummary.error}</span>
+                <span className="badge badgeMuted">Table Errors {projectHealthSummary.error}</span>
                 {projectHealthSummary.loading > 0 ? (
                   <span className="badge badgeMuted">Loading {projectHealthSummary.loading}</span>
                 ) : null}

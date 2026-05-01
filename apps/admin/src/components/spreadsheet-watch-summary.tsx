@@ -49,12 +49,12 @@ function isSpreadsheetWatchExpired(expirationAt: string | null) {
 }
 
 export function getSpreadsheetWatchStatus(watch: SpreadsheetWatch) {
-  if (watch.lastWatchError) {
-    return 'error';
-  }
-
   if (isSpreadsheetWatchExpired(watch.expirationAt)) {
     return 'expired';
+  }
+
+  if (watch.lastWatchError) {
+    return 'renewal warning';
   }
 
   if (watch.pendingChangedAt) {

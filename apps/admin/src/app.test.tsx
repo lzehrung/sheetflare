@@ -547,6 +547,127 @@ describe('App', () => {
     await screen.findByText('Prod');
   });
 
+  it('distinguishes drive watch issues from table error counts in the project overview', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url === '/v1/admin/system/google/drive/watches') {
+        return createJsonResponse({
+          data: [
+            {
+              spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
+              channelId: 'channel-sheet-1',
+              resourceId: 'resource-sheet-1',
+              resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+              expirationAt: '2099-05-03T00:00:00.000Z',
+              lastWatchError: 'Google Sheets authentication or permission check failed.',
+              lastNotificationAt: '2026-04-26T00:00:00.000Z',
+              pendingChangedAt: null,
+              debounceUntil: null,
+              lastReindexStartedAt: null,
+              lastReindexCompletedAt: '2026-04-26T00:00:10.000Z',
+              lastReindexError: null,
+              projectSlugs: ['demo']
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: 1,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: [
+            {
+              projectSlug: 'demo',
+              tableSlug: 'users',
+              sheetTabName: 'Users',
+              idColumn: '_id',
+              indexedFields: ['_id'],
+              readOnlyFields: [],
+              fieldRules: {},
+              headerRow: 1,
+              dataStartRow: 2,
+              readEnabled: true,
+              createEnabled: true,
+              updateEnabled: true,
+              deleteEnabled: true,
+              cacheTtlSeconds: 15,
+              createdAt: '2026-04-26T00:00:00.000Z',
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects/demo/tables/users/cache') {
+        return createJsonResponse({
+          data: {
+            status: 'ready',
+            cacheTtlSeconds: 15,
+            stale: false,
+            staleReason: 'fresh',
+            rowCount: 1,
+            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
+            lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
+            lastSyncError: null,
+            validation: {
+              status: 'ok',
+              issueCount: 0,
+              issues: []
+            },
+            externalChange: {
+              pending: false,
+              lastChangedAt: null,
+              debounceUntil: null,
+              lastAutoReindexAt: null
+            }
+          }
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByText(/renewal warning \/ expires/i);
+    expect(screen.getByText('Last watch issue: Google Sheets authentication or permission check failed.')).toBeTruthy();
+    expect(screen.getByText('Table Errors 0')).toBeTruthy();
+  });
+
   it('auto-loads cache status, links to the spreadsheet, and refreshes stale tables on demand', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
