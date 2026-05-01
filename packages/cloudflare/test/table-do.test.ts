@@ -183,6 +183,15 @@ function createSheetsFetch(sheet: SheetState) {
       });
     }
 
+    const boundedSingleRowMatch = range.match(/^'Users'!A(\d+):([A-Z]+)\d+$/);
+    if (boundedSingleRowMatch) {
+      const rowIndex = Number(boundedSingleRowMatch[1]) - 1;
+      const endColumnIndex = columnLettersToIndex(boundedSingleRowMatch[2]);
+      return Response.json({
+        values: [sheet.rows[rowIndex]?.slice(0, endColumnIndex + 1) ?? []]
+      });
+    }
+
     const singleColumnMatch = range.match(/^'Users'!([A-Z]+)(\d+):\1$/);
     if (singleColumnMatch) {
       const columnIndex = columnLettersToIndex(singleColumnMatch[1]);
@@ -2743,7 +2752,7 @@ describe('TableDO', () => {
         return Response.json({});
       }
 
-      if (url.includes("/values/'Users'!2:2")) {
+      if (url.includes("/values/'Users'!A2:B2")) {
         return Response.json({
           values: [['row-1', 'Ada']]
         });

@@ -180,6 +180,11 @@ function buildBoundedTableRange(headerRow: number, lastColumnNumber: number) {
   return `A${headerRow}:${lastColumn}`;
 }
 
+function buildBoundedRowRange(rowNumber: number, lastColumnNumber: number) {
+  const lastColumn = columnNumberToA1(lastColumnNumber);
+  return `A${rowNumber}:${lastColumn}${rowNumber}`;
+}
+
 type ColumnValueSegment = {
   startColumnNumber: number;
   values: Array<string | number | boolean>;
@@ -494,10 +499,12 @@ export class GoogleSheetsService {
     rowNumber: number,
     layout?: GoogleSheetHeaderLayout
   ): Promise<RowEnvelope> {
-    const [resolvedLayout, values] = await Promise.all([
-      layout ? Promise.resolve(layout) : this.readHeaderLayout(config),
-      this.readValues(config.spreadsheetId, `${escapeSheetName(config.sheetTabName)}!${rowNumber}:${rowNumber}`)
-    ]);
+    const resolvedLayout = layout ?? await this.readHeaderLayout(config);
+    const lastColumnNumber = resolvedLayout.entries.at(-1)?.columnNumber ?? 1;
+    const values = await this.readValues(
+      config.spreadsheetId,
+      `${escapeSheetName(config.sheetTabName)}!${buildBoundedRowRange(rowNumber, lastColumnNumber)}`
+    );
 
     const row = values[0];
     if (!row) {

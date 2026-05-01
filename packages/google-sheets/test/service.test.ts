@@ -572,7 +572,7 @@ describe('GoogleSheetsService.readAllRows', () => {
           });
         }
 
-        if (range === "'Users'!2:2") {
+        if (range === "'Users'!A2:B2") {
           return Response.json({
             values: [['Ada', 'row-2']]
           });
@@ -584,7 +584,7 @@ describe('GoogleSheetsService.readAllRows', () => {
           });
         }
 
-        if (range === "'Users'!3:3") {
+        if (range === "'Users'!A3:B3") {
           return Response.json({
             values: [['Grace', 'row-1']]
           });
@@ -625,9 +625,9 @@ describe('GoogleSheetsService.readAllRows', () => {
     });
     expect(requestedRanges).toEqual([
       "'Users'!1:1",
-      "'Users'!2:2",
+      "'Users'!A2:B2",
       "'Users'!B2:B",
-      "'Users'!3:3"
+      "'Users'!A3:B3"
     ]);
     expect(requestedRanges).not.toContain("'Users'");
   });
@@ -1124,7 +1124,7 @@ describe('GoogleSheetsService.writeRow', () => {
           });
         }
 
-        if (url.includes("/values/'Users'!5:5")) {
+        if (url.includes("/values/'Users'!A5:D5")) {
           return Response.json({
             values: [['Ada', 'row-5', 'derived', 'active']]
           });
@@ -1166,5 +1166,6 @@ describe('GoogleSheetsService.writeRow', () => {
     await service.readSingleRow(config, rowNumber, layout);
 
     expect(requestedUrls.filter((url) => url.includes("/values/'Users'!1:1"))).toHaveLength(1);
+    expect(requestedUrls).toContain("https://sheets.googleapis.com/v4/spreadsheets/sheet-1/values/'Users'!A5:D5");
   });
 });
