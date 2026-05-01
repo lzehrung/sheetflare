@@ -40,11 +40,12 @@ describe('serializeSheetCell', () => {
 });
 
 describe('parseSheetCellValue', () => {
-  it('parses primitives and arrays', () => {
+  it('preserves raw sheet text instead of inferring types from strings', () => {
     expect(parseSheetCellValue('')).toBeNull();
-    expect(parseSheetCellValue('42')).toBe(42);
-    expect(parseSheetCellValue('true')).toBe(true);
-    expect(parseSheetCellValue('["a","b"]')).toEqual(['a', 'b']);
+    expect(parseSheetCellValue('42')).toBe('42');
+    expect(parseSheetCellValue('true')).toBe('true');
+    expect(parseSheetCellValue('["a","b"]')).toBe('["a","b"]');
+    expect(parseSheetCellValue('00123')).toBe('00123');
     expect(parseSheetCellValue('Ada')).toBe('Ada');
   });
 });

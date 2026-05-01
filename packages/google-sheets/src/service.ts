@@ -26,8 +26,10 @@ type GoogleTokenResponse = {
   expires_in: number;
 };
 
+type GoogleCellValue = string | number | boolean;
+
 type GoogleValuesResponse = {
-  values?: string[][];
+  values?: GoogleCellValue[][];
 };
 
 type GoogleAppendResponse = {
@@ -122,21 +124,9 @@ export function serializeSheetCell(value: RowRecord[string]): string | number | 
   return value;
 }
 
-export function parseSheetCellValue(value: string | undefined): RowRecord[string] {
-  if (value === undefined || value === '') return null;
-  if (/^(?:true|false)$/i.test(value)) return value.toLowerCase() === 'true';
-  if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return Number(value);
-
-  try {
-    const parsed = JSON.parse(value);
-    if (
-      Array.isArray(parsed) &&
-      parsed.every((entry) => ['string', 'number', 'boolean'].includes(typeof entry))
-    ) {
-      return parsed as string[] | number[] | boolean[];
-    }
-  } catch {
-    return value;
+export function parseSheetCellValue(value: GoogleCellValue | undefined): RowRecord[string] {
+  if (value === undefined || value === '') {
+    return null;
   }
 
   return value;
@@ -246,11 +236,18 @@ function parseUpdatedRangeRowNumber(updatedRange: string | undefined): number {
   return Number(match[1]);
 }
 
-function extractHeaderEntries(headerRow: readonly string[] | undefined): HeaderLayoutEntry[] {
+function extractHeaderEntries(headerRow: readonly GoogleCellValue[] | undefined): HeaderLayoutEntry[] {
   const entries: HeaderLayoutEntry[] = [];
   const seenHeaders = new Set<string>();
 
   for (const [index, rawHeader] of (headerRow ?? []).entries()) {
+    if (typeof rawHeader !== 'string') {
+      throw new BadRequestError('Sheet headers must be non-empty strings.', {
+        columnNumber: index + 1,
+        value: rawHeader
+      });
+    }
+
     const header = rawHeader.trim();
     if (!header) {
       continue;
@@ -277,7 +274,7 @@ function extractHeaderEntries(headerRow: readonly string[] | undefined): HeaderL
   return entries;
 }
 
-function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: string): GoogleSheetHeaderLayout {
+function buildHeaderLayout(headerRow: readonly GoogleCellValue[] | undefined, idColumn: string): GoogleSheetHeaderLayout {
   const entries = extractHeaderEntries(headerRow);
 
   const idEntry = entries.find((entry) => entry.name === idColumn);
@@ -294,7 +291,12 @@ function buildHeaderLayout(headerRow: readonly string[] | undefined, idColumn: s
   };
 }
 
-function buildRowEnvelope(config: GoogleSheetTableConfig, layout: GoogleSheetHeaderLayout, rowNumber: number, cells: readonly string[]): RowEnvelope {
+function buildRowEnvelope(
+  config: GoogleSheetTableConfig,
+  layout: GoogleSheetHeaderLayout,
+  rowNumber: number,
+  cells: readonly GoogleCellValue[]
+): RowEnvelope {
   const values: RowRecord = {};
 
   for (const entry of layout.entries) {
@@ -727,7 +729,7 @@ export class GoogleSheetsService {
     await this.parseJson(response);
   }
 
-  private async readValues(spreadsheetId: string, range: string): Promise<string[][]> {
+  private async readValues(spreadsheetId: string, range: string): Promise<GoogleCellValue[][]> {
     const accessToken = await this.getAccessToken();
     const response = await this.authorizedRequest(
       `${this.sheetsApiBaseUrl}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}`,

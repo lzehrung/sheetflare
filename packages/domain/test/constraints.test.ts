@@ -75,7 +75,7 @@ describe('validateFieldRules', () => {
     ]);
   });
 
-  it('enforces configured scalar and date-like field types', () => {
+  it('coerces canonical string scalars for explicit typed rules and still rejects invalid values', () => {
     expect(validateFieldRules({
       score: '10',
       active: 'true',
@@ -95,16 +95,6 @@ describe('validateFieldRules', () => {
         type: 'datetime'
       }
     })).toEqual([
-      {
-        field: 'score',
-        code: 'TYPE',
-        message: 'score must be a number.'
-      },
-      {
-        field: 'active',
-        code: 'TYPE',
-        message: 'active must be a boolean.'
-      },
       {
         field: 'dueDate',
         code: 'TYPE',

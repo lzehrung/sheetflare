@@ -34,6 +34,48 @@ function isIsoDateTimeString(value: string) {
   return /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
 }
 
+function isCanonicalNumberString(value: string) {
+  return /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value);
+}
+
+function isCanonicalBooleanString(value: string) {
+  return /^(?:true|false)$/i.test(value);
+}
+
+export function coerceFieldRuleValue(
+  value: RowRecord[string] | undefined,
+  rule: FieldRule | undefined
+): RowRecord[string] | undefined {
+  if (value === undefined || value === null || Array.isArray(value) || !rule?.type) {
+    return value;
+  }
+
+  switch (rule.type) {
+    case 'string':
+      return value;
+    case 'number':
+      if (typeof value === 'number') {
+        return value;
+      }
+
+      return typeof value === 'string' && isCanonicalNumberString(value)
+        ? Number(value)
+        : value;
+    case 'boolean':
+      if (typeof value === 'boolean') {
+        return value;
+      }
+
+      return typeof value === 'string' && isCanonicalBooleanString(value)
+        ? value.toLowerCase() === 'true'
+        : value;
+    case 'date':
+      return typeof value === 'string' && isIsoDateString(value) ? value : value;
+    case 'datetime':
+      return typeof value === 'string' && isIsoDateTimeString(value) ? value : value;
+  }
+}
+
 function matchesConstrainedType(value: RowRecord[string] | undefined, expectedType: NonNullable<FieldRule['type']>) {
   switch (expectedType) {
     case 'string':
@@ -110,6 +152,7 @@ export function validateFieldRules(values: RowRecord, fieldRules: FieldRules | u
 
   for (const [fieldName, rule] of Object.entries(normalizedRules)) {
     const value = normalizedValues[fieldName];
+    const typedValue = coerceFieldRuleValue(value, rule);
 
     if (rule.required && isBlankValue(value)) {
       violations.push({
@@ -120,7 +163,7 @@ export function validateFieldRules(values: RowRecord, fieldRules: FieldRules | u
       continue;
     }
 
-    if (rule.type && !isBlankValue(value) && !matchesConstrainedType(value, rule.type)) {
+    if (rule.type && !isBlankValue(value) && !matchesConstrainedType(typedValue, rule.type)) {
       violations.push({
         field: fieldName,
         code: 'TYPE',

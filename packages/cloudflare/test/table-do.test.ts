@@ -1096,7 +1096,6 @@ describe('TableDO', () => {
         fieldErrors: [
           { field: 'email', code: 'REQUIRED' },
           { field: 'status', code: 'ENUM' },
-          { field: 'score', code: 'TYPE' },
           { field: 'dueDate', code: 'TYPE' }
         ]
       }
@@ -1649,7 +1648,7 @@ describe('TableDO', () => {
         data: {
           id: '42',
           values: {
-            _id: 42,
+            _id: '42',
             name: 'Ada'
           }
         }
@@ -3871,7 +3870,7 @@ describe('TableDO', () => {
         data: {
           fields: [
             { name: '_id', inferredType: 'string', nullable: false },
-            { name: 'score', inferredType: 'number', nullable: true }
+            { name: 'score', inferredType: 'string', nullable: true }
           ]
         }
       }
@@ -4212,6 +4211,11 @@ describe('TableDO', () => {
           tableSlug: 'users',
           sheetTabName: 'Users',
           indexedFields: ['score'],
+          fieldRules: {
+            score: {
+              type: 'number'
+            }
+          },
           cacheTtlSeconds: 3600
         }
       }
