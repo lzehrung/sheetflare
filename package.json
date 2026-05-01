@@ -1,6 +1,21 @@
 {
   "name": "sheetflare",
   "version": "0.1.0",
+  "description": "Expose and manage your Google Sheets as a REST API with Cloudflare Workers and Durable Objects. Built for self-hosted deployments.",  
+  "author": "Luke Zehrung <me@lukezehrung.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/lzehrung/sheetflare",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lzehrung/sheetflare"
+  },
+  "bugs": "https://github.com/lzehrung/sheetflare/issues",
+  "keywords": [
+    "google sheets",
+    "rest api",
+    "cloudflare workers",
+    "durable objects"
+  ],
   "private": true,
   "workspaces": [
     "apps/*",

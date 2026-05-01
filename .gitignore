@@ -9,3 +9,4 @@ Thumbs.db
 .sheetflare.setup.local.json
 .wrangler-staging-secrets.json
 *.setup-*.jsonc
+*.env
