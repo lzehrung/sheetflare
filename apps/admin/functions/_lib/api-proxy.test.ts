@@ -50,11 +50,30 @@ describe('proxyToApi', () => {
   });
 
   it('fails clearly when the Pages project is missing its upstream API configuration', async () => {
-    await expect(
-      proxyToApi({
-        env: {},
-        request: new Request('https://sheetflare-admin.example.pages.dev/v1/admin/projects')
-      })
-    ).rejects.toThrow('SHEETFLARE_API_BASE_URL is not configured for the admin Pages project.');
+    const response = await proxyToApi({
+      env: {},
+      request: new Request('https://sheetflare-admin.example.pages.dev/v1/admin/projects')
+    });
+
+    expect(response.status).toBe(500);
+    await expect(response.text()).resolves.toBe('SHEETFLARE_API_BASE_URL is not configured for the admin Pages project.');
+  });
+
+  it('fails clearly when the upstream fetch throws', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('network unreachable');
+    }));
+
+    const response = await proxyToApi({
+      env: {
+        SHEETFLARE_API_BASE_URL: 'https://sheetflare-api.example.workers.dev'
+      },
+      request: new Request('https://sheetflare-admin.example.pages.dev/docs')
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.text()).resolves.toBe(
+      'Admin Pages could not reach the Sheetflare API upstream: network unreachable'
+    );
   });
 });
