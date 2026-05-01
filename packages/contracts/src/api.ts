@@ -109,6 +109,17 @@ export const adminStopSpreadsheetWatchesInputSchema = z.object({
   spreadsheetId: spreadsheetIdSchema.optional()
 });
 
+export const spreadsheetWatchRetryAdviceSchema = z.object({
+  spreadsheetId: spreadsheetIdSchema,
+  status: z.enum(['active-watch-present', 'cooldown-recommended', 'ready-to-retry']),
+  currentWatchExpirationAt: z.string().datetime().nullable(),
+  lastKnownStoppedAt: z.string().datetime().nullable(),
+  lastKnownExpirationAt: z.string().datetime().nullable(),
+  safeRetryAt: z.string().datetime().nullable(),
+  note: z.string().min(1),
+  projectSlugs: z.array(projectSlugSchema)
+});
+
 export const spreadsheetWatchSchema = z.object({
   spreadsheetId: spreadsheetIdSchema,
   googleCredentialRef: z.string().min(1),
@@ -131,6 +142,9 @@ export const adminRegisterSpreadsheetWatchesResultSchema = z.object({
 });
 
 export const adminListSpreadsheetWatchesResultSchema = adminRegisterSpreadsheetWatchesResultSchema;
+export const adminListSpreadsheetWatchRetryAdviceResultSchema = z.object({
+  data: z.array(spreadsheetWatchRetryAdviceSchema)
+});
 
 export const upsertTableResultSchema = z.object({
   data: tableConfigSchema
@@ -207,6 +221,8 @@ export type AdminStopSpreadsheetWatchesInput = z.infer<typeof adminStopSpreadshe
 export type SpreadsheetWatch = z.infer<typeof spreadsheetWatchSchema>;
 export type AdminRegisterSpreadsheetWatchesResult = z.infer<typeof adminRegisterSpreadsheetWatchesResultSchema>;
 export type AdminListSpreadsheetWatchesResult = z.infer<typeof adminListSpreadsheetWatchesResultSchema>;
+export type SpreadsheetWatchRetryAdvice = z.infer<typeof spreadsheetWatchRetryAdviceSchema>;
+export type AdminListSpreadsheetWatchRetryAdviceResult = z.infer<typeof adminListSpreadsheetWatchRetryAdviceResultSchema>;
 export type UpsertTableResult = z.infer<typeof upsertTableResultSchema>;
 export type GetRowResult = z.infer<typeof getRowResultSchema>;
 export type CreateRowResult = z.infer<typeof createRowResultSchema>;

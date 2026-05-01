@@ -1,5 +1,6 @@
 import { AppError, ServiceUnavailableError, toErrorResponse } from '@sheetflare/contracts';
 import type {
+  AdminListSpreadsheetWatchRetryAdviceResult,
   AdminListSpreadsheetWatchesResult,
   AdminRegisterSpreadsheetWatchesResult,
   AdminCreateApiKeyResult,
@@ -66,6 +67,13 @@ type SpreadsheetWatchRenewalRow = Pick<
   'spreadsheet_id' | 'expiration_at' | 'expiration_duration_ms' | 'last_watch_error' | 'updated_at'
 >;
 
+type SpreadsheetWatchTombstoneRow = {
+  spreadsheet_id: string;
+  expiration_at: string | null;
+  stopped_at: string;
+  updated_at: string;
+};
+
 function getProjectStub(env: CloudflareEnv, projectSlug: string) {
   return env.PROJECT_DO.get(env.PROJECT_DO.idFromName(`project:${projectSlug}`));
 }
@@ -79,6 +87,7 @@ const minWatchRenewLeadMs = 5 * 60 * 1000;
 const maxWatchRenewLeadMs = 24 * 60 * 60 * 1000;
 const watchRenewRetryMs = 5 * 60 * 1000;
 const watchRenewConfigRetryMs = 60 * 60 * 1000;
+const watchRetryAdviceGraceMs = 15 * 60 * 1000;
 
 export class ControlPlaneDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
@@ -147,6 +156,15 @@ export class ControlPlaneDO {
     `);
 
     this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS spreadsheet_watch_tombstones (
+        spreadsheet_id TEXT PRIMARY KEY,
+        expiration_at TEXT,
+        stopped_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+
+    this.ctx.storage.sql.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_spreadsheet_watches_channel_id
       ON spreadsheet_watches(channel_id)
     `);
@@ -210,6 +228,11 @@ export class ControlPlaneDO {
         return {
           type: 'control.spreadsheet-watches.list.result',
           result: this.listSpreadsheetWatchesForAdmin()
+        };
+      case 'control.spreadsheet-watches.retry-advice.list':
+        return {
+          type: 'control.spreadsheet-watches.retry-advice.list.result',
+          result: this.listSpreadsheetWatchRetryAdviceForAdmin()
         };
       case 'control.spreadsheet-watches.register':
         return {
@@ -532,6 +555,7 @@ export class ControlPlaneDO {
 
     for (const watch of watches) {
       await this.stopExistingSpreadsheetWatch(watch);
+      this.recordSpreadsheetWatchTombstone(watch);
       stopped.push(
         this.mapSpreadsheetWatch(watch, projectSlugsBySpreadsheetId.get(watch.spreadsheet_id) ?? [])
       );
@@ -702,6 +726,34 @@ export class ControlPlaneDO {
     };
   }
 
+  private listSpreadsheetWatchRetryAdviceForAdmin(): AdminListSpreadsheetWatchRetryAdviceResult {
+    const projectSlugsBySpreadsheetId = this.getProjectSlugsBySpreadsheetId();
+    const activeWatchesBySpreadsheetId = new Map(
+      this.listSpreadsheetWatches().map((watch) => [watch.spreadsheet_id, watch] as const)
+    );
+    const tombstonesBySpreadsheetId = new Map(
+      this.listSpreadsheetWatchTombstones().map((row) => [row.spreadsheet_id, row] as const)
+    );
+    const spreadsheetIds = new Set<string>([
+      ...projectSlugsBySpreadsheetId.keys(),
+      ...activeWatchesBySpreadsheetId.keys(),
+      ...tombstonesBySpreadsheetId.keys()
+    ]);
+
+    return {
+      data: [...spreadsheetIds]
+        .sort((left, right) => left.localeCompare(right))
+        .map((spreadsheetId) =>
+          this.mapSpreadsheetWatchRetryAdvice(
+            spreadsheetId,
+            activeWatchesBySpreadsheetId.get(spreadsheetId) ?? null,
+            tombstonesBySpreadsheetId.get(spreadsheetId) ?? null,
+            projectSlugsBySpreadsheetId.get(spreadsheetId) ?? []
+          )
+        )
+    };
+  }
+
   private requireSpreadsheetWatch(spreadsheetId: string) {
     const watch = this.getSpreadsheetWatch(spreadsheetId);
     if (!watch) {
@@ -709,6 +761,16 @@ export class ControlPlaneDO {
     }
 
     return watch;
+  }
+
+  private listSpreadsheetWatchTombstones() {
+    return this.selectRows<SpreadsheetWatchTombstoneRow>(
+      `
+      SELECT *
+      FROM spreadsheet_watch_tombstones
+      ORDER BY spreadsheet_id ASC
+      `
+    );
   }
 
   private async stopExistingSpreadsheetWatch(watch: SpreadsheetWatchRow) {
@@ -730,6 +792,7 @@ export class ControlPlaneDO {
       }
 
       await this.stopExistingSpreadsheetWatch(watch);
+      this.recordSpreadsheetWatchTombstone(watch);
       this.ctx.storage.sql.exec(
         `
         DELETE FROM spreadsheet_watches
@@ -1069,6 +1132,24 @@ export class ControlPlaneDO {
     );
   }
 
+  private recordSpreadsheetWatchTombstone(watch: Pick<SpreadsheetWatchRow, 'spreadsheet_id' | 'expiration_at'>) {
+    const now = new Date().toISOString();
+    this.ctx.storage.sql.exec(
+      `
+      INSERT INTO spreadsheet_watch_tombstones (spreadsheet_id, expiration_at, stopped_at, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(spreadsheet_id) DO UPDATE SET
+        expiration_at = excluded.expiration_at,
+        stopped_at = excluded.stopped_at,
+        updated_at = excluded.updated_at
+      `,
+      watch.spreadsheet_id,
+      watch.expiration_at,
+      now,
+      now
+    );
+  }
+
   private getSheetsClient(googleCredentialRef: string) {
     const existing = this.sheetsByCredentialRef.get(googleCredentialRef);
     if (existing) {
@@ -1105,6 +1186,60 @@ export class ControlPlaneDO {
       lastReindexStartedAt: row.last_reindex_started_at,
       lastReindexCompletedAt: row.last_reindex_completed_at,
       lastReindexError: row.last_reindex_error,
+      projectSlugs
+    };
+  }
+
+  private mapSpreadsheetWatchRetryAdvice(
+    spreadsheetId: string,
+    activeWatch: SpreadsheetWatchRow | null,
+    tombstone: SpreadsheetWatchTombstoneRow | null,
+    projectSlugs: string[]
+  ): AdminListSpreadsheetWatchRetryAdviceResult['data'][number] {
+    if (activeWatch) {
+      return {
+        spreadsheetId,
+        status: 'active-watch-present',
+        currentWatchExpirationAt: activeWatch.expiration_at,
+        lastKnownStoppedAt: tombstone?.stopped_at ?? null,
+        lastKnownExpirationAt: tombstone?.expiration_at ?? null,
+        safeRetryAt: null,
+        note: 'A known Drive watch is still active for this spreadsheet.',
+        projectSlugs
+      };
+    }
+
+    if (tombstone) {
+      const safeRetryAt = getSpreadsheetWatchSafeRetryAt(tombstone);
+      const safeRetryAtMs = safeRetryAt ? Date.parse(safeRetryAt) : Number.NaN;
+      const status =
+        safeRetryAt && !Number.isNaN(safeRetryAtMs) && safeRetryAtMs > Date.now()
+          ? 'cooldown-recommended'
+          : 'ready-to-retry';
+
+      return {
+        spreadsheetId,
+        status,
+        currentWatchExpirationAt: null,
+        lastKnownStoppedAt: tombstone.stopped_at,
+        lastKnownExpirationAt: tombstone.expiration_at,
+        safeRetryAt,
+        note:
+          status === 'cooldown-recommended'
+            ? 'Wait until after the last known watch expiration plus a short grace window before re-registering.'
+            : 'No active watch is recorded and the cooldown window has elapsed.',
+        projectSlugs
+      };
+    }
+
+    return {
+      spreadsheetId,
+      status: 'ready-to-retry',
+      currentWatchExpirationAt: null,
+      lastKnownStoppedAt: null,
+      lastKnownExpirationAt: null,
+      safeRetryAt: null,
+      note: 'No active or previously stopped watch is recorded for this spreadsheet.',
       projectSlugs
     };
   }
@@ -1186,4 +1321,17 @@ function describeWatchError(error: unknown) {
       : null;
 
   return detailsMessage ? `${error.message} ${detailsMessage}` : error.message;
+}
+
+function getSpreadsheetWatchSafeRetryAt(tombstone: SpreadsheetWatchTombstoneRow) {
+  const referenceTimes = [tombstone.expiration_at, tombstone.stopped_at]
+    .filter((value): value is string => value !== null)
+    .map((value) => Date.parse(value))
+    .filter((value) => !Number.isNaN(value));
+
+  if (referenceTimes.length === 0) {
+    return null;
+  }
+
+  return new Date(Math.max(...referenceTimes) + watchRetryAdviceGraceMs).toISOString();
 }

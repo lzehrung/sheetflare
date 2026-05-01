@@ -568,6 +568,8 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
   });
 
   it('stops and removes known spreadsheet watches on explicit operator request', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-01T18:00:00.000Z'));
     const sheet: SheetState = {
       rows: [
         ['_id', 'status'],
@@ -659,6 +661,33 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       type: 'control.spreadsheet-watches.list.result';
       result: { data: unknown[] };
     }).result.data).toEqual([]);
+
+    const retryAdvice = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.retry-advice.list'
+    });
+
+    expect((retryAdvice as {
+      type: 'control.spreadsheet-watches.retry-advice.list.result';
+      result: {
+        data: Array<{
+          spreadsheetId: string;
+          status: string;
+          lastKnownStoppedAt: string | null;
+          lastKnownExpirationAt: string | null;
+          safeRetryAt: string | null;
+        }>;
+      };
+    }).result.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        status: 'cooldown-recommended',
+        lastKnownStoppedAt: '2026-05-01T18:00:00.000Z',
+        lastKnownExpirationAt: '2026-05-01T00:00:00.000Z',
+        safeRetryAt: '2026-05-01T18:15:00.000Z'
+      })
+    ]);
+
+    vi.useRealTimers();
   });
 
   it('debounces Drive notifications and auto-reindexes affected tables when the alarm fires', async () => {

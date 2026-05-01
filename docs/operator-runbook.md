@@ -222,6 +222,12 @@ Inspect current watch status:
 npm run ops:watch:drive:status
 ```
 
+Get retry timing guidance derived from the current watch state and the last known stopped watch:
+
+```powershell
+npm run ops:watch:drive:retry-advice
+```
+
 Stop all known spreadsheet watches or one known spreadsheet watch before re-registering:
 
 ```powershell
@@ -254,6 +260,7 @@ Operational notes:
 - `expirationAt` and `lastWatchError` from `npm run ops:watch:drive:status` are the primary signals for renewal health
 - if a watch has expired or `lastWatchError` remains non-null, rerun `npm run ops:watch:drive` and investigate Worker logs
 - if Google returns `Rate limit exceeded for creating file subscriptions.`, stop known watches with `npm run ops:watch:drive:stop`, wait for Google to release stale subscriptions, then retry registration
+- `npm run ops:watch:drive:retry-advice` shows the current helper view of whether a spreadsheet is still cooling down and the earliest conservative retry time
 - Google Drive watch behavior is documented at:
   - https://developers.google.com/workspace/drive/api/guides/push
   - https://developers.google.com/workspace/drive/api/reference/rest/v3/files/watch

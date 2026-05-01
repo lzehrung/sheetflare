@@ -44,6 +44,7 @@ npm run smoke
 - `npm run ops:cache:health`
 - `npm run ops:watch:drive`
 - `npm run ops:watch:drive:status`
+- `npm run ops:watch:drive:retry-advice`
 - `npm run ops:watch:drive:stop`
 - `npm run ops:reindex`
 - `npm run e2e:browser`

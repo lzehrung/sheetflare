@@ -9,6 +9,7 @@ import {
   adminInspectSpreadsheetTabResultSchema,
   adminListSpreadsheetWatchesResultSchema,
   adminRegisterSpreadsheetWatchesInputSchema,
+  adminListSpreadsheetWatchRetryAdviceResultSchema,
   adminStopSpreadsheetWatchesInputSchema,
   adminRegisterSpreadsheetWatchesResultSchema,
   adminListApiKeysResultSchema,
@@ -45,6 +46,7 @@ import {
   type AdminInspectSpreadsheetTabResult,
   type AdminListSpreadsheetWatchesResult,
   type AdminRegisterSpreadsheetWatchesInput,
+  type AdminListSpreadsheetWatchRetryAdviceResult,
   type AdminStopSpreadsheetWatchesInput,
   type AdminRegisterSpreadsheetWatchesResult,
   type AdminListSpreadsheetTabsResult,
@@ -1089,6 +1091,20 @@ const listSpreadsheetWatchesRoute = createRoute({
   }
 });
 
+const listSpreadsheetWatchRetryAdviceRoute = createRoute({
+  method: 'get',
+  path: '/v1/admin/system/google/drive/watches/retry-advice',
+  tags: ['System'],
+  security: adminSecurity,
+  responses: {
+    200: {
+      description: 'List Drive watch retry guidance derived from active watches and recently stopped watches',
+      content: jsonContent(adminListSpreadsheetWatchRetryAdviceResultSchema)
+    },
+    401: unauthorizedResponse
+  }
+});
+
 const stopSpreadsheetWatchesRoute = createRoute({
   method: 'post',
   path: '/v1/admin/system/google/drive/watches/stop',
@@ -1669,6 +1685,21 @@ function createApp() {
       (response as {
         type: 'control.spreadsheet-watches.list.result';
         result: AdminListSpreadsheetWatchesResult;
+      }).result
+    );
+  });
+
+  app.openapi(listSpreadsheetWatchRetryAdviceRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    assertGlobalAdminScope(auth, 'admin:projects');
+    const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+      type: 'control.spreadsheet-watches.retry-advice.list'
+    });
+
+    return c.json(
+      (response as {
+        type: 'control.spreadsheet-watches.retry-advice.list.result';
+        result: AdminListSpreadsheetWatchRetryAdviceResult;
       }).result
     );
   });

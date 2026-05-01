@@ -374,6 +374,12 @@ Inspect current watch state, including expiration and any last watch error:
 npm run ops:watch:drive:status
 ```
 
+Ask Sheetflare when it is conservatively safe to retry watch registration:
+
+```powershell
+npm run ops:watch:drive:retry-advice
+```
+
 Stop known Drive watches before retrying registration if you need to clear the current locally tracked channels:
 
 ```powershell

@@ -215,6 +215,26 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'control.spreadsheet-watches.retry-advice.list') {
+      return Response.json({
+        type: 'control.spreadsheet-watches.retry-advice.list.result',
+        result: {
+          data: [
+            {
+              spreadsheetId: 'sheet-1',
+              status: 'cooldown-recommended',
+              currentWatchExpirationAt: null,
+              lastKnownStoppedAt: '2026-05-01T18:00:00.000Z',
+              lastKnownExpirationAt: '2026-05-02T17:37:46.000Z',
+              safeRetryAt: '2026-05-02T17:52:46.000Z',
+              note: 'Wait until after the last known watch expiration plus a short grace window before re-registering.',
+              projectSlugs: ['demo']
+            }
+          ]
+        }
+      });
+    }
+
     if (body.type === 'control.spreadsheet-watches.stop') {
       return Response.json({
         type: 'control.spreadsheet-watches.stop.result',
@@ -824,6 +844,38 @@ describe('api routes', () => {
         }
       }
     });
+  });
+
+  it('lists Drive spreadsheet watch retry advice through a global admin route', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> };
+    const response = await app.request(
+      '/v1/admin/system/google/drive/watches/retry-advice',
+      {
+        method: 'GET',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: [
+        {
+          spreadsheetId: 'sheet-1',
+          status: 'cooldown-recommended',
+          currentWatchExpirationAt: null,
+          lastKnownStoppedAt: '2026-05-01T18:00:00.000Z',
+          lastKnownExpirationAt: '2026-05-02T17:37:46.000Z',
+          safeRetryAt: '2026-05-02T17:52:46.000Z',
+          note: 'Wait until after the last known watch expiration plus a short grace window before re-registering.',
+          projectSlugs: ['demo']
+        }
+      ]
+    });
+    expect(env.__controlPlaneRequests.at(-1)?.type).toBe('control.spreadsheet-watches.retry-advice.list');
   });
 
   it('accepts verified Google Drive webhook notifications without edge rate limiting', async () => {
