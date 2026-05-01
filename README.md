@@ -37,6 +37,7 @@ npm run smoke
 ## Operator Scripts
 
 - `npm run setup`
+- `npm run setup:verify`
 - `npm run ops:create-admin-key`
 - `npm run ops:bootstrap`
 - `npm run ops:cache`
@@ -66,6 +67,9 @@ For the normal setup flow:
 - `npm run setup -- --deploy`
 - `npm run setup -- --bootstrap`
 - `npm run setup -- --smoke`
+- `npm run setup -- --verify`
+
+`npm run setup -- --verify` is the fastest post-deploy confidence check. It verifies the resolved Google credential source, Worker `/ready`, Cloudflare Pages project presence when Wrangler auth is available, protected admin root plus proxied `/docs`, and Drive watch coverage for the spreadsheets declared in `sheetflare.setup.json`.
 
 If you already have `wrangler` and `gcloud` authenticated, setup can now also provision the Google side instead of requiring a pre-existing service-account JSON:
 

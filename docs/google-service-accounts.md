@@ -80,6 +80,14 @@ That path:
 - creates a key JSON temporarily and uses it immediately for Worker secret application
 - persists only `googleClientEmail` in local setup state
 
+After setup applies the credential and deploys the Worker, prefer:
+
+```powershell
+npm run setup -- --verify
+```
+
+That catches placeholder or missing Google credential state before you discover it later during bootstrap or admin use.
+
 Useful verification commands:
 
 ```powershell
