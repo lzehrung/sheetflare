@@ -30,6 +30,8 @@ function createEnv(options?: {
   defaultAuthMode?: 'private' | 'public-read';
   projectAccessStatus?: 200 | 404 | 500;
   googleClientEmail?: string;
+  googlePrivateKey?: string;
+  googleCredentialsJson?: string;
   adminBearerToken?: string;
 }): Env {
   const rateLimitRequests: Array<{ name: string; key: string }> = [];
@@ -576,7 +578,8 @@ function createEnv(options?: {
     TABLE_DO: table as never,
     RATE_LIMIT_DO: rateLimit as never,
     GOOGLE_CLIENT_EMAIL: options?.googleClientEmail ?? 'service@example.com',
-    GOOGLE_PRIVATE_KEY: 'private-key',
+    GOOGLE_PRIVATE_KEY: options?.googlePrivateKey ?? 'private-key',
+    GOOGLE_CREDENTIALS_JSON: options?.googleCredentialsJson,
     GOOGLE_DRIVE_WEBHOOK_SECRET: 'drive-secret',
     ADMIN_BEARER_TOKEN: options?.adminBearerToken ?? 'secret',
     RATE_LIMIT_MAX_REQUESTS: '300',
@@ -957,6 +960,7 @@ describe('api routes', () => {
         controlPlane: 'ok',
         rateLimit: 'ok',
         defaultGoogleCredential: 'configured',
+        namedGoogleCredentials: 'missing',
         googleDriveWebhookSecret: 'configured',
         bootstrapAdmin: 'configured'
       },
@@ -980,11 +984,71 @@ describe('api routes', () => {
         controlPlane: 'ok',
         rateLimit: 'ok',
         defaultGoogleCredential: 'missing',
+        namedGoogleCredentials: 'missing',
         googleDriveWebhookSecret: 'configured',
         bootstrapAdmin: 'configured'
       },
       notes: [
-        'Default Google service-account credential is not configured, or GOOGLE_CLIENT_EMAIL is still the checked-in placeholder. Project-specific credentials may still work.',
+        'Neither the default Google service-account credential nor named GOOGLE_CREDENTIALS_JSON entries are configured.',
+        'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
+      ]
+    });
+  });
+
+  it('treats named Google credentials as a healthy readiness source when the default credential is absent', async () => {
+    const app = createApp();
+    const response = await app.request('/ready', {}, createEnv({
+      googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
+      googlePrivateKey: '',
+      googleCredentialsJson: JSON.stringify({
+        prod: {
+          client_email: 'service@example.com',
+          private_key: 'secret'
+        }
+      })
+    }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      service: 'sheetflare-api',
+      checks: {
+        controlPlane: 'ok',
+        rateLimit: 'ok',
+        defaultGoogleCredential: 'missing',
+        namedGoogleCredentials: 'configured',
+        googleDriveWebhookSecret: 'configured',
+        bootstrapAdmin: 'configured'
+      },
+      notes: [
+        'Default Google service-account credential is not configured, but named GOOGLE_CREDENTIALS_JSON entries are available for project-specific refs.',
+        'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
+      ]
+    });
+  });
+
+  it('reports invalid named Google credentials distinctly in /ready', async () => {
+    const app = createApp();
+    const response = await app.request('/ready', {}, createEnv({
+      googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
+      googlePrivateKey: '',
+      googleCredentialsJson: '{"prod":{"client_email":"service@example.com"}}'
+    }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      service: 'sheetflare-api',
+      checks: {
+        controlPlane: 'ok',
+        rateLimit: 'ok',
+        defaultGoogleCredential: 'missing',
+        namedGoogleCredentials: 'invalid',
+        googleDriveWebhookSecret: 'configured',
+        bootstrapAdmin: 'configured'
+      },
+      notes: [
+        'GOOGLE_CREDENTIALS_JSON is present but invalid. Each named credential must include non-empty client_email and private_key fields.',
         'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
       ]
     });

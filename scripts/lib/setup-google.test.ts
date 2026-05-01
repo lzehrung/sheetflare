@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   checkGcloudAuthPrereq,
   createGoogleServiceAccountEmail,
+  getNamedGoogleCredentialsStatus,
   getDefaultGoogleProjectId,
   getDefaultGoogleServiceAccountName,
   isPlaceholderGoogleClientEmail,
@@ -26,6 +27,17 @@ describe('google setup defaults', () => {
   it('detects the checked-in placeholder client email', () => {
     expect(isPlaceholderGoogleClientEmail('service-account@your-gcp-project.iam.gserviceaccount.com')).toBe(true);
     expect(isPlaceholderGoogleClientEmail('sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com')).toBe(false);
+  });
+
+  it('classifies named Google credential JSON accurately', () => {
+    expect(getNamedGoogleCredentialsStatus(null)).toBe('missing');
+    expect(getNamedGoogleCredentialsStatus('not-json')).toBe('invalid');
+    expect(getNamedGoogleCredentialsStatus(JSON.stringify({
+      prod: {
+        client_email: 'service@example.com',
+        private_key: 'secret'
+      }
+    }))).toBe('configured');
   });
 
   it('validates project and service-account names clearly', () => {

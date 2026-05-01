@@ -11,6 +11,7 @@ type ReadyResponse = {
   ok: boolean;
   checks: {
     defaultGoogleCredential: 'configured' | 'missing';
+    namedGoogleCredentials: 'configured' | 'missing' | 'invalid';
     googleDriveWebhookSecret: 'configured' | 'missing';
     bootstrapAdmin: 'configured' | 'missing';
   };
@@ -36,6 +37,25 @@ function createResult(
     summary,
     remediation
   };
+}
+
+export function getSetupDoctorFailureMessage(results: SetupPrereqResult[]) {
+  const blockedResults = results.filter((result) => result.status === 'blocked');
+  const warningResults = results.filter((result) => result.status === 'warning');
+  if (blockedResults.length === 0 && warningResults.length === 0) {
+    return null;
+  }
+
+  const issues = [
+    blockedResults.length > 0
+      ? `${blockedResults.length} blocking issue${blockedResults.length === 1 ? '' : 's'}`
+      : null,
+    warningResults.length > 0
+      ? `${warningResults.length} warning${warningResults.length === 1 ? '' : 's'}`
+      : null
+  ].filter(Boolean).join(' and ');
+
+  return `Setup verification found ${issues}.`;
 }
 
 async function fetchReadyStatus(apiUrl: string) {
@@ -79,6 +99,15 @@ function getErroredWatchSpreadsheetIds(watches: Awaited<ReturnType<typeof listDr
     .map((watch) => watch.spreadsheetId);
 }
 
+function getConfiguredGoogleCredentialRefs(config: SetupConfig) {
+  const refs = new Set<string>([config.privateProject.googleCredentialRef ?? 'default']);
+  if (config.publicReadProject) {
+    refs.add(config.publicReadProject.googleCredentialRef ?? 'default');
+  }
+
+  return refs;
+}
+
 export async function runSetupDoctor(options: {
   config: SetupConfig;
   runtimeState: ResolvedSetupRuntimeState;
@@ -93,38 +122,90 @@ export async function runSetupDoctor(options: {
   const listDriveWatchesImpl = dependencies.listDriveWatches ?? listDriveWatches;
 
   const googleClientEmail = options.runtimeState.googleClientEmail;
-  if (!googleClientEmail) {
+  const namedGoogleCredentials = options.runtimeState.namedGoogleCredentials;
+  const configuredRefs = getConfiguredGoogleCredentialRefs(options.config);
+  const usesDefaultGoogleCredential = configuredRefs.has('default');
+  const usesNamedGoogleCredential = [...configuredRefs].some((ref) => ref !== 'default');
+  const hasDefaultGoogleCredential = Boolean(googleClientEmail) && !isPlaceholderGoogleClientEmail(googleClientEmail);
+
+  if (usesDefaultGoogleCredential && !googleClientEmail) {
     results.push(createResult(
       'Google credential',
       'blocked',
-      'No default Google service-account email is available from local setup state or the environment.',
+      'A configured project uses the default Google credential, but no default Google service-account email is available from local setup state or the environment.',
       'Run npm run setup -- --apply-secrets --provision-google, or set a real GOOGLE_CLIENT_EMAIL before deploy/bootstrap.'
     ));
-  } else if (isPlaceholderGoogleClientEmail(googleClientEmail)) {
+  } else if (usesDefaultGoogleCredential && googleClientEmail && isPlaceholderGoogleClientEmail(googleClientEmail)) {
     results.push(createResult(
       'Google credential',
       'blocked',
-      `GOOGLE_CLIENT_EMAIL is still set to the checked-in placeholder ${googleClientEmail}.`,
+      `A configured project uses the default Google credential, but GOOGLE_CLIENT_EMAIL is still set to the checked-in placeholder ${googleClientEmail}.`,
       'Provision a real Google service account, then rerun npm run setup -- --apply-secrets or set GOOGLE_CLIENT_EMAIL to the real client email.'
     ));
-  } else {
+  } else if (usesNamedGoogleCredential && namedGoogleCredentials === 'missing') {
+    results.push(createResult(
+      'Google credential',
+      'blocked',
+      'A configured project uses a named Google credential ref, but GOOGLE_CREDENTIALS_JSON is not set.',
+      'Apply GOOGLE_CREDENTIALS_JSON as a Worker secret, or change the project config to use the default credential.'
+    ));
+  } else if (usesNamedGoogleCredential && namedGoogleCredentials === 'invalid') {
+    results.push(createResult(
+      'Google credential',
+      'blocked',
+      'A configured project uses a named Google credential ref, but GOOGLE_CREDENTIALS_JSON is missing required client_email/private_key fields or is not valid JSON.',
+      'Fix GOOGLE_CREDENTIALS_JSON, then rerun npm run setup -- --verify.'
+    ));
+  } else if (hasDefaultGoogleCredential && namedGoogleCredentials === 'configured') {
+    results.push(createResult(
+      'Google credential',
+      'ready',
+      `Default Google service-account email is ${googleClientEmail}, and named Google credentials are configured for non-default refs.`,
+      null
+    ));
+  } else if (hasDefaultGoogleCredential) {
     results.push(createResult(
       'Google credential',
       'ready',
       `Default Google service-account email is ${googleClientEmail}.`,
       null
     ));
+  } else if (namedGoogleCredentials === 'configured') {
+    results.push(createResult(
+      'Google credential',
+      'ready',
+      'Named Google credentials are configured through GOOGLE_CREDENTIALS_JSON for the refs declared in setup config.',
+      null
+    ));
+  } else {
+    results.push(createResult(
+      'Google credential',
+      'blocked',
+      'No Google credential source is configured for the refs declared in setup config.',
+      'Apply a default GOOGLE_CLIENT_EMAIL/GOOGLE_PRIVATE_KEY pair or provide valid GOOGLE_CREDENTIALS_JSON for the configured refs.'
+    ));
   }
 
   if (options.runtimeState.apiUrl) {
     try {
       const ready = await fetchReady(options.runtimeState.apiUrl);
-      if (ready.checks.defaultGoogleCredential !== 'configured') {
+      const hasAnyReadyGoogleCredential =
+        ready.checks.defaultGoogleCredential === 'configured' ||
+        ready.checks.namedGoogleCredentials === 'configured';
+
+      if (!hasAnyReadyGoogleCredential) {
         results.push(createResult(
           'API readiness',
           'blocked',
-          'API /ready reports the default Google credential as missing.',
-          'Apply a real GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY, then redeploy the Worker.'
+          'API /ready reports that neither the default Google credential nor named Google credentials are configured.',
+          'Apply a real GOOGLE_CLIENT_EMAIL/GOOGLE_PRIVATE_KEY pair or a valid GOOGLE_CREDENTIALS_JSON secret, then redeploy the Worker.'
+        ));
+      } else if (usesNamedGoogleCredential && ready.checks.namedGoogleCredentials === 'invalid') {
+        results.push(createResult(
+          'API readiness',
+          'blocked',
+          'API /ready reports GOOGLE_CREDENTIALS_JSON as invalid.',
+          'Fix GOOGLE_CREDENTIALS_JSON so every named entry has non-empty client_email and private_key fields, then redeploy the Worker.'
         ));
       } else if (ready.checks.googleDriveWebhookSecret !== 'configured') {
         results.push(createResult(
@@ -134,10 +215,16 @@ export async function runSetupDoctor(options: {
           'Apply GOOGLE_DRIVE_WEBHOOK_SECRET through setup or wrangler secret put, then redeploy if needed.'
         ));
       } else {
+        const credentialSummary =
+          ready.checks.defaultGoogleCredential === 'configured' && ready.checks.namedGoogleCredentials === 'configured'
+            ? 'default and named Google credentials'
+            : ready.checks.defaultGoogleCredential === 'configured'
+              ? 'the default Google credential'
+              : 'named Google credentials';
         results.push(createResult(
           'API readiness',
           'ready',
-          'API /ready reports the Worker as healthy with Google credentials and Drive webhook secret configured.',
+          `API /ready reports the Worker as healthy with ${credentialSummary} and the Drive webhook secret configured.`,
           null
         ));
       }

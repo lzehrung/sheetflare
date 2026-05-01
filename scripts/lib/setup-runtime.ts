@@ -1,8 +1,10 @@
 import { getEnv } from './runtime';
 import { createSetupLocalState, redactSetupLocalState, type SetupLocalState } from './setup-state';
+import { getNamedGoogleCredentialsStatus, type GoogleCredentialSourceStatus } from './setup-google';
 
 export type ResolvedSetupRuntimeState = {
   googleClientEmail: string | null;
+  namedGoogleCredentials: GoogleCredentialSourceStatus;
   apiUrl: string | null;
   adminUrl: string | null;
   adminBearerToken: string | null;
@@ -26,6 +28,7 @@ function resolveValue(...values: Array<string | null | undefined>) {
 export function resolveSetupRuntimeState(localState: SetupLocalState | null): ResolvedSetupRuntimeState {
   return {
     googleClientEmail: resolveValue(localState?.googleClientEmail, getEnv('GOOGLE_CLIENT_EMAIL')),
+    namedGoogleCredentials: getNamedGoogleCredentialsStatus(getEnv('GOOGLE_CREDENTIALS_JSON')),
     apiUrl: resolveValue(localState?.apiUrl, getEnv('SHEETFLARE_BASE_URL')),
     adminUrl: resolveValue(localState?.adminUrl),
     adminBearerToken: resolveValue(

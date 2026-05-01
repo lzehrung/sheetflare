@@ -50,6 +50,50 @@ export function isPlaceholderGoogleClientEmail(value: string | null | undefined)
   return value.trim().toLowerCase() === placeholderGoogleClientEmail;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+export type GoogleCredentialSourceStatus = 'configured' | 'missing' | 'invalid';
+
+export function getNamedGoogleCredentialsStatus(rawValue: string | null | undefined): GoogleCredentialSourceStatus {
+  if (!rawValue || rawValue.trim().length === 0) {
+    return 'missing';
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawValue);
+  } catch {
+    return 'invalid';
+  }
+
+  if (!isRecord(parsed)) {
+    return 'invalid';
+  }
+
+  const entries = Object.values(parsed);
+  if (entries.length === 0) {
+    return 'invalid';
+  }
+
+  for (const entry of entries) {
+    if (!isRecord(entry)) {
+      return 'invalid';
+    }
+
+    if (!isNonEmptyString(entry.client_email) || !isNonEmptyString(entry.private_key)) {
+      return 'invalid';
+    }
+  }
+
+  return 'configured';
+}
+
 export function getDefaultGoogleProjectId(profile: string) {
   const normalizedProfile = normalizeProfile(profile);
   if (normalizedProfile === 'prod' || normalizedProfile === 'production') {

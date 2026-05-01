@@ -111,6 +111,7 @@ const readyResponseSchema = z.object({
     controlPlane: z.literal('ok'),
     rateLimit: z.literal('ok'),
     defaultGoogleCredential: z.enum(['configured', 'missing']),
+    namedGoogleCredentials: z.enum(['configured', 'missing', 'invalid']),
     googleDriveWebhookSecret: z.enum(['configured', 'missing']),
     bootstrapAdmin: z.enum(['configured', 'missing'])
   }),
@@ -579,6 +580,47 @@ function hasConfiguredDefaultGoogleCredential(env: Env) {
     privateKey &&
     clientEmail !== 'service-account@your-gcp-project.iam.gserviceaccount.com'
   );
+}
+
+function getNamedGoogleCredentialsStatus(env: Env) {
+  const rawValue = env.GOOGLE_CREDENTIALS_JSON?.trim();
+  if (!rawValue) {
+    return 'missing' as const;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawValue);
+  } catch {
+    return 'invalid' as const;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return 'invalid' as const;
+  }
+
+  const entries = Object.values(parsed);
+  if (entries.length === 0) {
+    return 'invalid' as const;
+  }
+
+  for (const entry of entries) {
+    if (
+      typeof entry !== 'object' ||
+      entry === null ||
+      Array.isArray(entry) ||
+      !('client_email' in entry) ||
+      !('private_key' in entry) ||
+      typeof entry.client_email !== 'string' ||
+      entry.client_email.trim().length === 0 ||
+      typeof entry.private_key !== 'string' ||
+      entry.private_key.trim().length === 0
+    ) {
+      return 'invalid' as const;
+    }
+  }
+
+  return 'configured' as const;
 }
 
 function buildTableRequestContext(c: AppContext, route: string) {
@@ -1304,12 +1346,17 @@ function createApp() {
     });
 
     const hasDefaultGoogleCredential = hasConfiguredDefaultGoogleCredential(c.env);
+    const namedGoogleCredentials = getNamedGoogleCredentialsStatus(c.env);
     const hasDriveWebhookSecret = Boolean(c.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim());
     const hasBootstrapAdmin = Boolean(c.env.ADMIN_BEARER_TOKEN?.trim());
     const notes: string[] = [];
 
-    if (!hasDefaultGoogleCredential) {
-      notes.push('Default Google service-account credential is not configured, or GOOGLE_CLIENT_EMAIL is still the checked-in placeholder. Project-specific credentials may still work.');
+    if (!hasDefaultGoogleCredential && namedGoogleCredentials === 'missing') {
+      notes.push('Neither the default Google service-account credential nor named GOOGLE_CREDENTIALS_JSON entries are configured.');
+    } else if (!hasDefaultGoogleCredential && namedGoogleCredentials === 'configured') {
+      notes.push('Default Google service-account credential is not configured, but named GOOGLE_CREDENTIALS_JSON entries are available for project-specific refs.');
+    } else if (namedGoogleCredentials === 'invalid') {
+      notes.push('GOOGLE_CREDENTIALS_JSON is present but invalid. Each named credential must include non-empty client_email and private_key fields.');
     }
 
     if (!hasBootstrapAdmin) {
@@ -1329,6 +1376,7 @@ function createApp() {
         controlPlane: 'ok',
         rateLimit: 'ok',
         defaultGoogleCredential: hasDefaultGoogleCredential ? 'configured' : 'missing',
+        namedGoogleCredentials,
         googleDriveWebhookSecret: hasDriveWebhookSecret ? 'configured' : 'missing',
         bootstrapAdmin: hasBootstrapAdmin ? 'configured' : 'missing'
       },

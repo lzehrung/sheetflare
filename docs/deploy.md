@@ -44,7 +44,7 @@ Rerun notes:
 - `npm run setup -- --deploy` requires admin-site auth secrets for the admin Pages deploy. Setup reuses `.sheetflare.setup.local.json` when available, or falls back to `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD`. It also ensures the Pages project exists and applies `SHEETFLARE_API_BASE_URL` at the Pages project level before the deploy.
 - `npm run setup -- --smoke` accepts either a scoped admin API key or the bootstrap admin credential through local setup state or `SHEETFLARE_ADMIN_CREDENTIAL`.
 - `npm run setup -- --apply-secrets --provision-google` can create the Google project, enable Sheets and Drive APIs, create the service account, and mint a key JSON before applying Worker secrets. Use `--google-project` and `--google-service-account` when the default names derived from the setup profile are not what you want.
-- `npm run setup -- --verify` is the post-deploy confidence pass. It checks Worker readiness, protected admin proxy health, and Drive watch coverage using the same operator-facing surfaces documented elsewhere.
+- `npm run setup -- --verify` is the post-deploy confidence pass. It checks Worker readiness, protected admin proxy health, and Drive watch coverage using the same operator-facing surfaces documented elsewhere. It exits non-zero on warnings as well as blocking failures, so a clean pass means the full verification surface succeeded.
 
 `.sheetflare.setup.local.json` is secret material. It is gitignored and intended to stay local to the operator machine.
 
@@ -136,12 +136,13 @@ Do not deploy if any of these fail.
 
 ## Deploy
 
-Preferred local deploy commands from repo root:
+Preferred local deploy command from repo root:
 
 ```powershell
-npm run deploy:api
-npm run deploy:admin
+npm run deploy
 ```
+
+That path is authoritative because it provisions the Pages project when missing, applies the project-level runtime binding for `SHEETFLARE_API_BASE_URL`, and verifies the live admin site afterward.
 
 Run deploys from a clean checked-out commit. Do not rely on dirty-worktree Pages deploys for release or rollback workflows.
 
@@ -151,12 +152,13 @@ For first-time or routine admin deploys, prefer:
 npm run setup -- --deploy
 ```
 
-That path is authoritative because it provisions the Pages project when missing, applies the project-level runtime binding for `SHEETFLARE_API_BASE_URL`, and verifies the live admin site afterward. Treat `npm run deploy:admin` as a lower-level fallback for an already-provisioned Pages project.
+Treat the raw deploy commands below as lower-level fallbacks for an already-provisioned environment.
 
-Or deploy both in sequence:
+Lower-level raw deploy entrypoints from repo root:
 
 ```powershell
-npm run deploy
+npm run deploy:api:raw
+npm run deploy:admin:raw
 ```
 
 Equivalent explicit command for the API Worker if you need to run it manually outside setup:

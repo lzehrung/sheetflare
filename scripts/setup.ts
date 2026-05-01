@@ -34,7 +34,7 @@ import {
   resolveSetupRuntimeState,
   summarizeSetupSecrets
 } from './lib/setup-runtime';
-import { runSetupDoctor } from './lib/setup-doctor';
+import { getSetupDoctorFailureMessage, runSetupDoctor } from './lib/setup-doctor';
 import { isPlaceholderGoogleClientEmail } from './lib/setup-google';
 import { verifyAdminPagesDeployment } from './lib/setup-verify';
 import { getCommandName, runCommand } from './lib/process';
@@ -563,12 +563,12 @@ async function main() {
       });
       renderPrereqSummary(verificationResults);
 
-      const blockedResults = verificationResults.filter((result) => result.status === 'blocked');
-      if (blockedResults.length > 0) {
-        throw new ScriptError(`Setup verification found ${blockedResults.length} blocking issue${blockedResults.length === 1 ? '' : 's'}.`);
+      const verificationFailureMessage = getSetupDoctorFailureMessage(verificationResults);
+      if (verificationFailureMessage) {
+        throw new ScriptError(verificationFailureMessage);
       }
 
-      logSuccess('Setup verification completed without blocking issues');
+      logSuccess('Setup verification completed without warnings or blocking issues');
     }
   } finally {
     prompter?.close?.();

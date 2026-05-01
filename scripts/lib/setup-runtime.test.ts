@@ -7,6 +7,7 @@ import {
 
 afterEach(() => {
   delete process.env.GOOGLE_CLIENT_EMAIL;
+  delete process.env.GOOGLE_CREDENTIALS_JSON;
   delete process.env.SHEETFLARE_BASE_URL;
   delete process.env.SHEETFLARE_ADMIN_CREDENTIAL;
   delete process.env.SHEETFLARE_PRIVATE_READ_KEY;
@@ -27,6 +28,7 @@ describe('resolveSetupRuntimeState', () => {
       privateReadKey: 'sfk_local.read'
     })).toMatchObject({
       googleClientEmail: 'local-service-account@example.com',
+      namedGoogleCredentials: 'missing',
       apiUrl: 'https://local.workers.dev',
       adminBearerToken: 'bearer.local.secret',
       privateReadKey: 'sfk_local.read'
@@ -42,11 +44,25 @@ describe('resolveSetupRuntimeState', () => {
 
     expect(resolveSetupRuntimeState(null)).toMatchObject({
       googleClientEmail: 'env-service-account@example.com',
+      namedGoogleCredentials: 'missing',
       apiUrl: 'https://env.workers.dev',
       adminBearerToken: 'sfk_env.secret',
       adminApiKey: 'sfk_env.secret',
       privateReadKey: 'sfk_env.read',
       mutationKey: 'sfk_env.mutation'
+    });
+  });
+
+  it('reports named Google credentials when GOOGLE_CREDENTIALS_JSON is valid', () => {
+    process.env.GOOGLE_CREDENTIALS_JSON = JSON.stringify({
+      prod: {
+        client_email: 'service@example.com',
+        private_key: 'secret'
+      }
+    });
+
+    expect(resolveSetupRuntimeState(null)).toMatchObject({
+      namedGoogleCredentials: 'configured'
     });
   });
 });

@@ -48,6 +48,7 @@ npm run smoke
 - `npm run e2e:browser`
 - `npm run e2e:local`
 - `npm run deploy`
+- `npm run deploy:raw`
 - `npm run smoke`
 - `npm run load`
 
@@ -69,7 +70,7 @@ For the normal setup flow:
 - `npm run setup -- --smoke`
 - `npm run setup -- --verify`
 
-`npm run setup -- --verify` is the fastest post-deploy confidence check. It verifies the resolved Google credential source, Worker `/ready`, Cloudflare Pages project presence when Wrangler auth is available, protected admin root plus proxied `/docs`, and Drive watch coverage for the spreadsheets declared in `sheetflare.setup.json`.
+`npm run setup -- --verify` is the fastest post-deploy confidence check. It verifies the resolved Google credential source, Worker `/ready`, Cloudflare Pages project presence, protected admin root plus proxied `/docs`, and Drive watch coverage for the spreadsheets declared in `sheetflare.setup.json`. It exits non-zero on both warnings and blocking issues so a passing run means the full check set completed cleanly.
 
 If you already have `wrangler` and `gcloud` authenticated, setup can now also provision the Google side instead of requiring a pre-existing service-account JSON:
 
