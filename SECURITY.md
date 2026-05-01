@@ -16,7 +16,7 @@ Please do not open public GitHub issues for suspected security vulnerabilities.
 
 Instead, email:
 
-- `security@lukezehrung.com`
+- `me@lukezehrung.com`
 
 Include:
 
