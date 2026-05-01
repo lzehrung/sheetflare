@@ -11,6 +11,7 @@ const requiredGoogleApis = [
   'sheets.googleapis.com',
   'drive.googleapis.com'
 ] as const;
+const placeholderGoogleClientEmail = 'service-account@your-gcp-project.iam.gserviceaccount.com';
 
 type CommandResult = {
   code: number | null;
@@ -39,6 +40,14 @@ type ServiceAccountKeyJson = {
 
 function normalizeProfile(profile: string) {
   return profile.trim().toLowerCase();
+}
+
+export function isPlaceholderGoogleClientEmail(value: string | null | undefined) {
+  if (!value) {
+    return false;
+  }
+
+  return value.trim().toLowerCase() === placeholderGoogleClientEmail;
 }
 
 export function getDefaultGoogleProjectId(profile: string) {

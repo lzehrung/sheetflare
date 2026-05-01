@@ -8,6 +8,7 @@ export type SetupCliOptions = {
   deploy: boolean;
   bootstrap: boolean;
   smoke: boolean;
+  verify: boolean;
   showSecrets: boolean;
   provisionGoogle: boolean;
   googleProjectId: string | null;
@@ -22,6 +23,7 @@ export function createDefaultSetupCliOptions(): SetupCliOptions {
     deploy: false,
     bootstrap: false,
     smoke: false,
+    verify: false,
     showSecrets: false,
     provisionGoogle: false,
     googleProjectId: null,
@@ -66,6 +68,11 @@ export function parseSetupArgs(argv: string[]): SetupCliOptions {
 
     if (argument === '--smoke') {
       options.smoke = true;
+      continue;
+    }
+
+    if (argument === '--verify') {
+      options.verify = true;
       continue;
     }
 

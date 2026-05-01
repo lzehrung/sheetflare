@@ -475,7 +475,8 @@ async function resolveRateLimitPrincipal(c: AppContext) {
   const authorization = c.req.header('authorization');
   if (authorization?.startsWith('Bearer ')) {
     const credential = authorization.slice('Bearer '.length).trim();
-    if (c.env.ADMIN_BEARER_TOKEN && credential === c.env.ADMIN_BEARER_TOKEN) {
+    const bootstrapAdminCredential = getBootstrapAdminCredential(c.env);
+    if (bootstrapAdminCredential && credential === bootstrapAdminCredential) {
       return 'bootstrap-admin';
     }
 
@@ -565,6 +566,21 @@ function getRequestPrincipal(c: AppContext) {
   return c.get('authPrincipal') ?? 'anonymous';
 }
 
+function getBootstrapAdminCredential(env: Env) {
+  const credential = env.ADMIN_BEARER_TOKEN?.trim();
+  return credential && credential.length > 0 ? credential : null;
+}
+
+function hasConfiguredDefaultGoogleCredential(env: Env) {
+  const clientEmail = env.GOOGLE_CLIENT_EMAIL?.trim();
+  const privateKey = env.GOOGLE_PRIVATE_KEY?.trim();
+  return Boolean(
+    clientEmail &&
+    privateKey &&
+    clientEmail !== 'service-account@your-gcp-project.iam.gserviceaccount.com'
+  );
+}
+
 function buildTableRequestContext(c: AppContext, route: string) {
   return {
     requestId: c.get('requestId'),
@@ -589,7 +605,8 @@ async function authenticateRequest(c: AppContext): Promise<AuthContext> {
     throw new UnauthorizedError();
   }
 
-  if (c.env.ADMIN_BEARER_TOKEN && credential === c.env.ADMIN_BEARER_TOKEN) {
+  const bootstrapAdminCredential = getBootstrapAdminCredential(c.env);
+  if (bootstrapAdminCredential && credential === bootstrapAdminCredential) {
     c.set('authPrincipal', 'bootstrap-admin');
     return { kind: 'bootstrap-admin' };
   }
@@ -1286,15 +1303,13 @@ function createApp() {
       windowSeconds: 1
     });
 
-    const hasDefaultGoogleCredential = Boolean(
-      c.env.GOOGLE_CLIENT_EMAIL?.trim() && c.env.GOOGLE_PRIVATE_KEY?.trim()
-    );
+    const hasDefaultGoogleCredential = hasConfiguredDefaultGoogleCredential(c.env);
     const hasDriveWebhookSecret = Boolean(c.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim());
     const hasBootstrapAdmin = Boolean(c.env.ADMIN_BEARER_TOKEN?.trim());
     const notes: string[] = [];
 
     if (!hasDefaultGoogleCredential) {
-      notes.push('Default Google service-account credential is not configured. Project-specific credentials may still work.');
+      notes.push('Default Google service-account credential is not configured, or GOOGLE_CLIENT_EMAIL is still the checked-in placeholder. Project-specific credentials may still work.');
     }
 
     if (!hasBootstrapAdmin) {

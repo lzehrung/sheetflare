@@ -32,6 +32,7 @@
     "e2e:browser": "tsx scripts/admin-browser-e2e.ts",
     "e2e:local": "tsx scripts/local-e2e.ts",
     "setup": "tsx scripts/setup.ts",
+    "setup:verify": "tsx scripts/setup.ts --verify",
     "deploy:api": "npm --workspace @sheetflare/api run deploy",
     "deploy:admin": "npm --workspace @sheetflare/admin run deploy",
     "deploy": "npm run deploy:api && npm run deploy:admin",
