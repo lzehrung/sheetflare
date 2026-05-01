@@ -9,6 +9,9 @@ export type SetupCliOptions = {
   bootstrap: boolean;
   smoke: boolean;
   showSecrets: boolean;
+  provisionGoogle: boolean;
+  googleProjectId: string | null;
+  googleServiceAccountName: string | null;
 };
 
 export function createDefaultSetupCliOptions(): SetupCliOptions {
@@ -19,7 +22,10 @@ export function createDefaultSetupCliOptions(): SetupCliOptions {
     deploy: false,
     bootstrap: false,
     smoke: false,
-    showSecrets: false
+    showSecrets: false,
+    provisionGoogle: false,
+    googleProjectId: null,
+    googleServiceAccountName: null
   };
 }
 
@@ -65,6 +71,31 @@ export function parseSetupArgs(argv: string[]): SetupCliOptions {
 
     if (argument === '--show-secrets') {
       options.showSecrets = true;
+      continue;
+    }
+
+    if (argument === '--provision-google') {
+      options.provisionGoogle = true;
+      continue;
+    }
+
+    if (argument === '--google-project') {
+      const nextValue = argv[index + 1];
+      if (!nextValue) {
+        throw new ScriptError('Missing value for --google-project.');
+      }
+      options.googleProjectId = nextValue;
+      index += 1;
+      continue;
+    }
+
+    if (argument === '--google-service-account') {
+      const nextValue = argv[index + 1];
+      if (!nextValue) {
+        throw new ScriptError('Missing value for --google-service-account.');
+      }
+      options.googleServiceAccountName = nextValue;
+      index += 1;
       continue;
     }
 

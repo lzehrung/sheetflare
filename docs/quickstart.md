@@ -43,6 +43,8 @@ You will need:
 - service-account client email
 - service-account private key
 
+If you do not already have those, and `gcloud` is authenticated locally, setup can now provision them for you.
+
 ## 3. Install and run setup
 
 From repo root:
@@ -71,6 +73,34 @@ The simplest happy path is:
 - let setup generate the bootstrap admin token
 - let setup create the initial admin, read, and mutation keys
 
+If you have not created the Google service account yet, use this variant instead:
+
+```powershell
+gcloud auth login
+npx wrangler login
+npm run setup -- --apply-secrets --provision-google
+```
+
+When Google provisioning is enabled, setup can:
+
+- create the Google Cloud project when it does not exist yet
+- enable the Google Sheets API and Google Drive API
+- create the environment-specific service account
+- create a service-account key JSON and use it immediately for Worker secret application
+- keep only the service-account email in local setup state
+
+Default names are derived from the setup profile:
+
+- `production` or `prod` -> project and service account `sheetflare-prod`
+- `staging` -> project and service account `sheetflare-staging`
+- any other profile -> `sheetflare-<profile>`
+
+Override those defaults when needed:
+
+```powershell
+npm run setup -- --apply-secrets --provision-google --google-project my-prod-project --google-service-account sheetflare-prod
+```
+
 Setup writes a checked non-secret config file at repo root:
 
 ```powershell
@@ -97,12 +127,15 @@ Notes for reruns:
 
 Setup does not automate:
 
-- creating the Google service account itself
-- enabling the Google Sheets API and Google Drive API in GCP
 - sharing the spreadsheet with the service-account email
 - creating new sheet tabs for you
 - custom Worker or Pages naming beyond the checked public defaults
 - advanced multi-credential topologies using `GOOGLE_CREDENTIALS_JSON`
+
+Without `--provision-google`, setup also does not automate:
+
+- creating the Google service account itself
+- enabling the Google Sheets API and Google Drive API in GCP
 
 For those details, use:
 

@@ -101,6 +101,38 @@ describe('checkSetupPrereqs', () => {
     expect(commandRunner).not.toHaveBeenCalled();
   });
 
+  it('checks gcloud auth on demand for Google provisioning flows', async () => {
+    const commandRunner = vi.fn(async () => ({
+      code: 0,
+      stdout: 'you@example.com\n',
+      stderr: ''
+    }));
+
+    const results = await checkSetupPrereqsWithOptions(
+      { includeWranglerAuth: false, includeGcloudAuth: true },
+      {
+        commandRunner,
+        pathExists: vi.fn(async () => true),
+        moduleResolver: vi.fn(() => undefined)
+      }
+    );
+
+    expect(results).toEqual([
+      {
+        name: 'Repo install',
+        status: 'ready',
+        summary: 'Workspace dependencies are available.',
+        remediation: null
+      },
+      {
+        name: 'gcloud auth',
+        status: 'ready',
+        summary: 'Google Cloud authentication is available for setup provisioning.',
+        remediation: null
+      }
+    ]);
+  });
+
   it('checks wrangler auth on demand', async () => {
     const result = await checkWranglerAuthPrereq({
       commandRunner: vi.fn(async () => ({
