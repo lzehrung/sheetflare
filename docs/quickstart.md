@@ -116,12 +116,14 @@ npm run setup -- --apply-secrets
 npm run setup -- --deploy
 npm run setup -- --bootstrap
 npm run setup -- --smoke
+npm run setup -- --verify
 ```
 
 Notes for reruns:
 
 - `npm run setup -- --deploy` will redeploy the admin UI only when `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD` are available from local setup state or the environment.
 - `npm run setup -- --smoke` can use either a scoped admin API key or the bootstrap admin credential from local setup state or `SHEETFLARE_ADMIN_CREDENTIAL`.
+- `npm run setup -- --verify` checks the resolved Google credential source, API `/ready`, protected admin root, proxied `/docs`, and Drive watch coverage for the spreadsheets declared in the setup config.
 
 ## 4. What setup still expects from you
 

@@ -26,6 +26,14 @@ npm run setup
 That command can write `sheetflare.setup.json`, deploy, bootstrap, and smoke-check the first project.
 It also keeps local reusable secret state in `.sheetflare.setup.local.json`; treat that file as secret material and keep it on the operator machine only.
 
+Post-deploy verification path:
+
+```powershell
+npm run setup -- --verify
+```
+
+That re-checks the resolved Google credential source, Worker `/ready`, protected admin root plus proxied `/docs`, and Drive watch coverage for the spreadsheets declared in the setup config.
+
 Manual fallback:
 
 1. Set the base URL:
