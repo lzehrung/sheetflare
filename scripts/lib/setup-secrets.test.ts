@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildAdminApiBaseUrlCommand,
   buildAdminSecretCommands,
@@ -100,8 +100,47 @@ describe('setup secret command builders', () => {
       prompter: null,
       includeAdminUiSecrets: false
     })).rejects.toThrow(
-      'Applying secrets without a TTY requires GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY, or GOOGLE_APPLICATION_CREDENTIALS pointing at a service-account JSON file.'
+      'Applying secrets without a TTY requires GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY, GOOGLE_APPLICATION_CREDENTIALS, or --provision-google with a working gcloud login.'
     );
+  });
+
+  it('provisions Google credentials noninteractively through gcloud when explicitly requested', async () => {
+    process.env.ADMIN_BEARER_TOKEN = 'bootstrap-secret';
+    process.env.GOOGLE_DRIVE_WEBHOOK_SECRET = 'drive-webhook-secret';
+
+    const provisionGoogleServiceAccountSpy = vi.fn(async () => ({
+      googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+      googlePrivateKey: '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n',
+      projectId: 'sheetflare-prod',
+      serviceAccountEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+      createdProject: true,
+      createdServiceAccount: true
+    }));
+    const result = await collectSetupSecrets({
+      prompter: null,
+      includeAdminUiSecrets: false,
+      googleProvisioning: {
+        enabled: true,
+        profile: 'production',
+        projectId: 'sheetflare-prod',
+        serviceAccountName: 'sheetflare-prod'
+      },
+      googleProvisioner: provisionGoogleServiceAccountSpy,
+      gcloudAuthChecker: vi.fn(async () => ({
+        name: 'gcloud auth',
+        status: 'ready',
+        summary: 'Google Cloud authentication is available for setup provisioning.',
+        remediation: null
+      } as const))
+    });
+
+    expect(result.googleClientEmail).toBe('sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com');
+    expect(result.googlePrivateKey).toContain('BEGIN PRIVATE KEY');
+    expect(provisionGoogleServiceAccountSpy).toHaveBeenCalledWith({
+      profile: 'production',
+      projectId: 'sheetflare-prod',
+      serviceAccountName: 'sheetflare-prod'
+    });
   });
 
   it('collects admin site secrets noninteractively from existing values', async () => {

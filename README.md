@@ -67,6 +67,16 @@ For the normal setup flow:
 - `npm run setup -- --bootstrap`
 - `npm run setup -- --smoke`
 
+If you already have `wrangler` and `gcloud` authenticated, setup can now also provision the Google side instead of requiring a pre-existing service-account JSON:
+
+```powershell
+gcloud auth login
+npx wrangler login
+npm run setup -- --apply-secrets --provision-google
+```
+
+Use `--google-project` and `--google-service-account` when you want explicit names instead of the default profile-derived ones such as `sheetflare-prod` or `sheetflare-staging`.
+
 If you are maintaining this repository's own shared staging environment, use [docs/contributor-staging.md](./docs/contributor-staging.md).
 
 ## API Docs

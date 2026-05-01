@@ -1,5 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
+import {
+  checkGcloudAuthPrereq,
+  getDefaultGoogleProjectId,
+  getDefaultGoogleServiceAccountName,
+  normalizeGoogleProjectId,
+  normalizeGoogleServiceAccountName,
+  provisionGoogleServiceAccount,
+  type ProvisionGoogleServiceAccountResult
+} from './setup-google';
 import { getCommandName, runCommand } from './process';
 import type { SetupPrompter } from './setup-prompts';
 import { ScriptError } from './runtime';
@@ -26,6 +35,13 @@ export type AdminSiteSecrets = {
 type AdminSiteSecretState = {
   adminUiUsername: string | null;
   adminUiPassword: string | null;
+};
+
+type GoogleProvisioningOptions = {
+  enabled: boolean;
+  profile: string;
+  projectId?: string | null;
+  serviceAccountName?: string | null;
 };
 
 function generateSecretToken(byteLength = 32) {
@@ -125,6 +141,9 @@ export async function collectSetupSecrets(options: {
   includeAdminUiSecrets: boolean;
   defaultAdminUiUsername?: string | null;
   defaultAdminUiPassword?: string | null;
+  googleProvisioning?: GoogleProvisioningOptions;
+  googleProvisioner?: typeof provisionGoogleServiceAccount;
+  gcloudAuthChecker?: typeof checkGcloudAuthPrereq;
 }) : Promise<SetupSecrets> {
   const envGoogleClientEmail = readEnvValue('GOOGLE_CLIENT_EMAIL');
   const envGooglePrivateKey = process.env.GOOGLE_PRIVATE_KEY;
@@ -140,28 +159,34 @@ export async function collectSetupSecrets(options: {
     googleClientEmail = credentials.client_email.trim();
     googlePrivateKey = credentials.private_key;
   } else {
-    if (!options.prompter) {
-      throw new ScriptError(
-        'Applying secrets without a TTY requires GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY, or GOOGLE_APPLICATION_CREDENTIALS pointing at a service-account JSON file.'
-      );
-    }
-
-    let credentials: ServiceAccountCredentials | null = null;
-    while (!credentials) {
-      const defaultPath = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
-      const serviceAccountPath = await options.prompter.text({
-        message: 'Path to Google service-account JSON',
-        ...(defaultPath ? { defaultValue: defaultPath } : {}),
-        validate: (value) => value.trim().length > 0 ? null : 'Service-account JSON path must not be blank.'
-      });
-      try {
-        credentials = await readServiceAccountFile(serviceAccountPath.trim());
-      } catch (error) {
-        console.log(error instanceof Error ? error.message : String(error));
+    const provisionedCredentials = await maybeProvisionGoogleCredentials(options);
+    if (provisionedCredentials) {
+      googleClientEmail = provisionedCredentials.googleClientEmail;
+      googlePrivateKey = provisionedCredentials.googlePrivateKey;
+    } else {
+      if (!options.prompter) {
+        throw new ScriptError(
+          'Applying secrets without a TTY requires GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY, GOOGLE_APPLICATION_CREDENTIALS, or --provision-google with a working gcloud login.'
+        );
       }
+
+      let credentials: ServiceAccountCredentials | null = null;
+      while (!credentials) {
+        const defaultPath = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
+        const serviceAccountPath = await options.prompter.text({
+          message: 'Path to Google service-account JSON',
+          ...(defaultPath ? { defaultValue: defaultPath } : {}),
+          validate: (value) => value.trim().length > 0 ? null : 'Service-account JSON path must not be blank.'
+        });
+        try {
+          credentials = await readServiceAccountFile(serviceAccountPath.trim());
+        } catch (error) {
+          console.log(error instanceof Error ? error.message : String(error));
+        }
+      }
+      googleClientEmail = credentials.client_email.trim();
+      googlePrivateKey = credentials.private_key;
     }
-    googleClientEmail = credentials.client_email.trim();
-    googlePrivateKey = credentials.private_key;
   }
 
   const adminBearerToken = readEnvValue('ADMIN_BEARER_TOKEN') ?? generateSecretToken(32);
@@ -191,6 +216,86 @@ export async function collectSetupSecrets(options: {
     adminUiUsername: adminSiteSecrets.adminUiUsername,
     adminUiPassword: adminSiteSecrets.adminUiPassword
   };
+}
+
+async function maybeProvisionGoogleCredentials(options: {
+  prompter: SetupPrompter | null;
+  googleProvisioning?: GoogleProvisioningOptions;
+  googleProvisioner?: typeof provisionGoogleServiceAccount;
+  gcloudAuthChecker?: typeof checkGcloudAuthPrereq;
+}): Promise<ProvisionGoogleServiceAccountResult | null> {
+  const provisioning = options.googleProvisioning;
+  if (!provisioning) {
+    return null;
+  }
+
+  const gcloudAuthChecker = options.gcloudAuthChecker ?? checkGcloudAuthPrereq;
+  const googleProvisioner = options.googleProvisioner ?? provisionGoogleServiceAccount;
+  const gcloudAuthResult = await gcloudAuthChecker();
+  if (gcloudAuthResult.status !== 'ready') {
+    if (provisioning.enabled) {
+      throw new ScriptError(gcloudAuthResult.remediation ?? 'Google Cloud authentication is required before provisioning Google resources.');
+    }
+    return null;
+  }
+
+  const defaultProjectId = getDefaultGoogleProjectId(provisioning.profile);
+  const defaultServiceAccountName = getDefaultGoogleServiceAccountName(provisioning.profile);
+
+  if (!options.prompter) {
+    if (!provisioning.enabled) {
+      return null;
+    }
+
+    return googleProvisioner({
+      profile: provisioning.profile,
+      projectId: normalizeGoogleProjectId(provisioning.projectId ?? defaultProjectId),
+      serviceAccountName: normalizeGoogleServiceAccountName(provisioning.serviceAccountName ?? defaultServiceAccountName)
+    });
+  }
+
+  let shouldProvision = provisioning.enabled;
+  if (!shouldProvision) {
+    shouldProvision = await options.prompter.confirm({
+      message: 'Provision a Google Cloud project and service account with gcloud now',
+      defaultValue: true
+    });
+  }
+
+  if (!shouldProvision) {
+    return null;
+  }
+
+  const googleProjectId = normalizeGoogleProjectId(await options.prompter.text({
+    message: 'Google Cloud project ID',
+    defaultValue: provisioning.projectId ?? defaultProjectId,
+    validate: (value) => {
+      try {
+        normalizeGoogleProjectId(value);
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }
+  }));
+  const googleServiceAccountName = normalizeGoogleServiceAccountName(await options.prompter.text({
+    message: 'Google service-account name',
+    defaultValue: provisioning.serviceAccountName ?? defaultServiceAccountName,
+    validate: (value) => {
+      try {
+        normalizeGoogleServiceAccountName(value);
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }
+  }));
+
+  return googleProvisioner({
+    profile: provisioning.profile,
+    projectId: googleProjectId,
+    serviceAccountName: googleServiceAccountName
+  });
 }
 
 export async function applyApiSecrets(options: {

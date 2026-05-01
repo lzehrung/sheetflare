@@ -3,6 +3,7 @@ import { constants as fsConstants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
+import { checkGcloudAuthPrereq } from './setup-google';
 import { getCommandName } from './process';
 
 const execFileAsync = promisify(execFile);
@@ -24,13 +25,19 @@ type CommandResult = {
 };
 
 type SetupPrereqDependencies = {
-  commandRunner?: (command: string, args: string[]) => Promise<CommandResult>;
+  commandRunner?: (command: string, args: string[], options?: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    echoStdout?: boolean;
+    echoStderr?: boolean;
+  }) => Promise<CommandResult>;
   pathExists?: (path: string) => Promise<boolean>;
   moduleResolver?: (specifier: string) => void;
 };
 
 type SetupPrereqOptions = {
   includeWranglerAuth?: boolean;
+  includeGcloudAuth?: boolean;
 };
 
 async function defaultCommandRunner(command: string, args: string[]) {
@@ -76,7 +83,7 @@ export function resolveModuleSpecifier(specifier: string) {
 }
 
 export async function checkSetupPrereqs(dependencies: SetupPrereqDependencies = {}) {
-  return checkSetupPrereqsWithOptions({ includeWranglerAuth: true }, dependencies);
+  return checkSetupPrereqsWithOptions({ includeWranglerAuth: true, includeGcloudAuth: false }, dependencies);
 }
 
 export async function checkWranglerAuthPrereq(dependencies: SetupPrereqDependencies = {}) {
@@ -139,6 +146,12 @@ export async function checkSetupPrereqsWithOptions(
 
   if (options.includeWranglerAuth ?? true) {
     results.push(await checkWranglerAuthPrereq({ commandRunner }));
+  }
+
+  if (options.includeGcloudAuth) {
+    results.push(await checkGcloudAuthPrereq({
+      commandRunner
+    }));
   }
 
   return results;

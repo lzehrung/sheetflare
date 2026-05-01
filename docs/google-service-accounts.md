@@ -10,6 +10,8 @@ Use this guide when you are:
 - deciding whether to use one shared credential or named per-project credentials
 - rotating Google credentials after initial deploy
 
+If you already have `gcloud` authenticated locally, the fastest path is now usually to let `npm run setup -- --apply-secrets --provision-google` perform the project/service-account creation for you. Use the rest of this guide when you want the exact manual commands or a custom Google layout.
+
 ## Recommended Setup
 
 Use this model unless you have a strong reason to do something else:
@@ -61,6 +63,22 @@ gcloud iam service-accounts create $serviceAccountName `
 gcloud iam service-accounts keys create "$env:TEMP\$serviceAccountName-key.json" `
   --iam-account="$serviceAccountName@$projectId.iam.gserviceaccount.com"
 ```
+
+Setup now automates that same sequence when you opt into Google provisioning:
+
+```powershell
+gcloud auth login
+npx wrangler login
+npm run setup -- --apply-secrets --provision-google --google-project sheetflare-prod --google-service-account sheetflare-prod
+```
+
+That path:
+
+- creates the Google Cloud project when needed
+- enables `sheets.googleapis.com` and `drive.googleapis.com`
+- creates the service account when missing
+- creates a key JSON temporarily and uses it immediately for Worker secret application
+- persists only `googleClientEmail` in local setup state
 
 Useful verification commands:
 

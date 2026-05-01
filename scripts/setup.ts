@@ -214,7 +214,8 @@ async function main() {
 
   logStep('Checking setup prerequisites');
   const prereqResults = await checkSetupPrereqsWithOptions({
-    includeWranglerAuth: options.applySecrets || options.deploy
+    includeWranglerAuth: options.applySecrets || options.deploy,
+    includeGcloudAuth: options.provisionGoogle
   });
   renderPrereqSummary(prereqResults);
 
@@ -292,7 +293,13 @@ async function main() {
         prompter,
         includeAdminUiSecrets: config.deploy.admin,
         defaultAdminUiUsername: adminUiUsername,
-        defaultAdminUiPassword: adminUiPassword
+        defaultAdminUiPassword: adminUiPassword,
+        googleProvisioning: {
+          enabled: options.provisionGoogle,
+          profile: config.profile,
+          projectId: options.googleProjectId,
+          serviceAccountName: options.googleServiceAccountName
+        }
       });
       adminBearerToken = setupSecrets.adminBearerToken;
       adminUiUsername = setupSecrets.adminUiUsername;

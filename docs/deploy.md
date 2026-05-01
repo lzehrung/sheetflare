@@ -20,8 +20,12 @@ The setup command can:
 - write `sheetflare.setup.json`
 - keep local reusable secret state in `.sheetflare.setup.local.json`
 - apply Worker secrets
+- provision a Google Cloud project and service account when `--provision-google` is used with a working `gcloud` login
+- ensure the target Cloudflare Pages project exists for admin deploys
+- apply the admin Pages runtime binding to the deployed API base URL
 - deploy the API Worker
 - deploy the admin UI
+- verify the protected admin site root and proxied `/docs`
 - bootstrap the first project and keys
 - run smoke validation
 
@@ -36,8 +40,9 @@ npm run setup -- --smoke
 
 Rerun notes:
 
-- `npm run setup -- --deploy` requires admin-site auth secrets for the admin Pages deploy. Setup reuses `.sheetflare.setup.local.json` when available, or falls back to `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD`.
+- `npm run setup -- --deploy` requires admin-site auth secrets for the admin Pages deploy. Setup reuses `.sheetflare.setup.local.json` when available, or falls back to `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD`. It also ensures the Pages project exists and applies `SHEETFLARE_API_BASE_URL` at the Pages project level before the deploy.
 - `npm run setup -- --smoke` accepts either a scoped admin API key or the bootstrap admin credential through local setup state or `SHEETFLARE_ADMIN_CREDENTIAL`.
+- `npm run setup -- --apply-secrets --provision-google` can create the Google project, enable Sheets and Drive APIs, create the service account, and mint a key JSON before applying Worker secrets. Use `--google-project` and `--google-service-account` when the default names derived from the setup profile are not what you want.
 
 `.sheetflare.setup.local.json` is secret material. It is gitignored and intended to stay local to the operator machine.
 
@@ -47,6 +52,30 @@ Use the rest of this document when:
 - you are wiring CI
 - you need exact Cloudflare token scopes
 - you are debugging a failed deploy outside the setup flow
+
+## Google Provisioning Through Setup
+
+When you want setup to create the Google credential instead of pointing at an existing JSON file, start with:
+
+```powershell
+gcloud auth login
+npx wrangler login
+npm run setup -- --apply-secrets --provision-google
+```
+
+Profile-derived defaults:
+
+- `production` or `prod` -> `sheetflare-prod`
+- `staging` -> `sheetflare-staging`
+- any other profile -> `sheetflare-<profile>`
+
+Explicit override example:
+
+```powershell
+npm run setup -- --apply-secrets --provision-google --google-project my-prod-project --google-service-account sheetflare-prod
+```
+
+Setup keeps the generated private key ephemeral, writes only the service-account email into local setup state, and still expects you to share the spreadsheet with that email afterward.
 
 ## Required Environment
 
@@ -114,6 +143,14 @@ npm run deploy:admin
 
 Run deploys from a clean checked-out commit. Do not rely on dirty-worktree Pages deploys for release or rollback workflows.
 
+For first-time or routine admin deploys, prefer:
+
+```powershell
+npm run setup -- --deploy
+```
+
+That path is authoritative because it provisions the Pages project when missing, applies the project-level runtime binding for `SHEETFLARE_API_BASE_URL`, and verifies the live admin site afterward. Treat `npm run deploy:admin` as a lower-level fallback for an already-provisioned Pages project.
+
 Or deploy both in sequence:
 
 ```powershell
@@ -134,6 +171,19 @@ npx wrangler secret put ADMIN_BEARER_TOKEN --config apps/api/wrangler.jsonc
 npx wrangler secret put GOOGLE_DRIVE_WEBHOOK_SECRET --config apps/api/wrangler.jsonc
 npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
 ```
+
+Manual admin Pages fallback:
+
+```powershell
+npx wrangler pages project create sheetflare-admin --production-branch main
+"<ADMIN_UI_USERNAME>" | npx wrangler pages secret put ADMIN_UI_USERNAME --project-name sheetflare-admin
+"<ADMIN_UI_PASSWORD>" | npx wrangler pages secret put ADMIN_UI_PASSWORD --project-name sheetflare-admin
+"https://your-worker.example.workers.dev" | npx wrangler pages secret put SHEETFLARE_API_BASE_URL --project-name sheetflare-admin
+npm --workspace @sheetflare/admin run build
+npx wrangler pages deploy apps/admin/dist --project-name sheetflare-admin --branch main
+```
+
+`apps/admin/wrangler.jsonc` no longer carries a checked runtime API target. The deployed Pages project must supply `SHEETFLARE_API_BASE_URL` itself.
 
 Prefer your deployment system or setup flow for non-secret vars. Editing the checked repo defaults is only the manual fallback path.
 
@@ -159,6 +209,17 @@ $env:SHEETFLARE_ADMIN_CREDENTIAL = "<ADMIN_BEARER_TOKEN>"
 ```powershell
 npm run smoke
 ```
+
+Also verify the admin Pages project through its protected site URL:
+
+```powershell
+$pair = "<ADMIN_UI_USERNAME>:<ADMIN_UI_PASSWORD>"
+$encoded = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
+Invoke-WebRequest -Uri "https://sheetflare-admin.pages.dev/" -Headers @{ Authorization = "Basic $encoded" } | Select-Object StatusCode
+Invoke-WebRequest -Uri "https://sheetflare-admin.pages.dev/docs" -Headers @{ Authorization = "Basic $encoded" } | Select-Object StatusCode
+```
+
+Both should return `200`. If `/docs` fails while the raw Worker `/docs` succeeds, the Pages project runtime binding for `SHEETFLARE_API_BASE_URL` is the first thing to inspect.
 
 Optional: persist a smoke report artifact:
 
