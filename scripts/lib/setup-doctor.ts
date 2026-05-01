@@ -1,7 +1,7 @@
 import type { SetupConfig } from './setup-config';
 import type { SetupPrereqResult } from './setup-prereqs';
 import type { ResolvedSetupRuntimeState } from './setup-runtime';
-import { listDriveWatches } from './setup-drive-watches';
+import { listDriveWatchRetryAdvice, listDriveWatches } from './setup-drive-watches';
 import { getAdminPagesProjectName, getAdminPagesSiteUrl, listPagesProjects } from './setup-deploy';
 import { isPlaceholderGoogleClientEmail } from './setup-google';
 import { requestJson, ScriptError } from './runtime';
@@ -23,6 +23,7 @@ type SetupDoctorDependencies = {
   listPagesProjects?: typeof listPagesProjects;
   verifyAdminPagesDeployment?: typeof verifyAdminPagesDeployment;
   listDriveWatches?: typeof listDriveWatches;
+  listDriveWatchRetryAdvice?: typeof listDriveWatchRetryAdvice;
 };
 
 function createResult(
@@ -99,6 +100,12 @@ function getErroredWatchSpreadsheetIds(watches: Awaited<ReturnType<typeof listDr
     .map((watch) => watch.spreadsheetId);
 }
 
+function getRetryAdviceBySpreadsheetId(
+  retryAdvice: Awaited<ReturnType<typeof listDriveWatchRetryAdvice>>
+) {
+  return new Map(retryAdvice.map((entry) => [entry.spreadsheetId, entry] as const));
+}
+
 function getConfiguredGoogleCredentialRefs(config: SetupConfig) {
   const refs = new Set<string>([config.privateProject.googleCredentialRef ?? 'default']);
   if (config.publicReadProject) {
@@ -132,6 +139,7 @@ export async function runSetupDoctor(options: {
   const listPagesProjectsImpl = dependencies.listPagesProjects ?? listPagesProjects;
   const verifyAdminPagesDeploymentImpl = dependencies.verifyAdminPagesDeployment ?? verifyAdminPagesDeployment;
   const listDriveWatchesImpl = dependencies.listDriveWatches ?? listDriveWatches;
+  const listDriveWatchRetryAdviceImpl = dependencies.listDriveWatchRetryAdvice ?? listDriveWatchRetryAdvice;
 
   const googleClientEmail = options.runtimeState.googleClientEmail;
   const namedGoogleCredentials = options.runtimeState.namedGoogleCredentials;
@@ -335,18 +343,41 @@ export async function runSetupDoctor(options: {
         retries: 2,
         retryDelayMs: 1000
       });
+      const retryAdvice = await listDriveWatchRetryAdviceImpl({
+        baseUrl: options.runtimeState.apiUrl,
+        adminCredential: options.runtimeState.adminApiKey ?? options.runtimeState.adminBearerToken!
+      });
       const configuredSpreadsheetIds = getConfiguredSpreadsheetIds(options.config);
       const watchIds = new Set(watches.map((watch) => watch.spreadsheetId));
+      const retryAdviceBySpreadsheetId = getRetryAdviceBySpreadsheetId(retryAdvice);
       const missingSpreadsheetIds = configuredSpreadsheetIds.filter((spreadsheetId) => !watchIds.has(spreadsheetId));
       const expiredSpreadsheetIds = getExpiredWatchSpreadsheetIds(watches);
       const erroredSpreadsheetIds = getErroredWatchSpreadsheetIds(watches);
+      const cooldownSpreadsheetIds = missingSpreadsheetIds.filter(
+        (spreadsheetId) => retryAdviceBySpreadsheetId.get(spreadsheetId)?.status === 'cooldown-recommended'
+      );
+      const readyToRetrySpreadsheetIds = missingSpreadsheetIds.filter((spreadsheetId) => {
+        const advice = retryAdviceBySpreadsheetId.get(spreadsheetId);
+        return advice?.status !== 'cooldown-recommended';
+      });
 
-      if (missingSpreadsheetIds.length > 0) {
+      if (readyToRetrySpreadsheetIds.length > 0) {
         results.push(createResult(
           'Drive watch status',
           'warning',
-          `Configured spreadsheets are missing Drive watches: ${missingSpreadsheetIds.join(', ')}.`,
+          `Configured spreadsheets are missing Drive watches and are ready to retry: ${readyToRetrySpreadsheetIds.join(', ')}.`,
           'Run npm run ops:watch:drive, then re-check with npm run ops:watch:drive:status.'
+        ));
+      } else if (cooldownSpreadsheetIds.length > 0) {
+        const adviceSummary = cooldownSpreadsheetIds.map((spreadsheetId) => {
+          const advice = retryAdviceBySpreadsheetId.get(spreadsheetId);
+          return advice?.safeRetryAt ? `${spreadsheetId} (retry after ${advice.safeRetryAt})` : spreadsheetId;
+        });
+        results.push(createResult(
+          'Drive watch status',
+          'warning',
+          `Configured spreadsheets are intentionally missing Drive watches during the cooldown window: ${adviceSummary.join(', ')}.`,
+          'Wait until after the reported safe retry time, then run npm run ops:watch:drive.'
         ));
       } else if (expiredSpreadsheetIds.length > 0 || erroredSpreadsheetIds.length > 0) {
         const issues: string[] = [];

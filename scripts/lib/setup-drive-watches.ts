@@ -1,4 +1,9 @@
-import type { AdminListSpreadsheetWatchesResult, SpreadsheetWatch } from '@sheetflare/contracts';
+import type {
+  AdminListSpreadsheetWatchRetryAdviceResult,
+  AdminListSpreadsheetWatchesResult,
+  SpreadsheetWatch,
+  SpreadsheetWatchRetryAdvice
+} from '@sheetflare/contracts';
 import { requestJson } from './runtime';
 
 export type DriveWatchRegistration = {
@@ -62,4 +67,19 @@ export async function listDriveWatches(options: {
   }
 
   return [] satisfies SpreadsheetWatch[];
+}
+
+export async function listDriveWatchRetryAdvice(options: {
+  baseUrl: string;
+  adminCredential: string;
+}) {
+  const response = await requestJson<AdminListSpreadsheetWatchRetryAdviceResult>({
+    baseUrl: options.baseUrl,
+    path: '/v1/admin/system/google/drive/watches/retry-advice',
+    method: 'GET',
+    bearer: options.adminCredential,
+    expectedStatus: 200
+  });
+
+  return response.data?.data ?? ([] satisfies SpreadsheetWatchRetryAdvice[]);
 }

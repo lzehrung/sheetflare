@@ -1,3 +1,4 @@
+import type { SpreadsheetWatchRetryAdvice } from '@sheetflare/contracts';
 import type { SetupConfig } from './setup-config';
 import { describe, expect, it, vi } from 'vitest';
 import { getSetupDoctorFailureMessage, runSetupDoctor } from './setup-doctor';
@@ -40,6 +41,21 @@ const baseConfig: SetupConfig = {
     }
   }
 };
+
+function activeRetryAdvice(): SpreadsheetWatchRetryAdvice[] {
+  return [
+    {
+      spreadsheetId: 'sheet-1',
+      status: 'active-watch-present',
+      currentWatchExpirationAt: '2099-05-01T00:00:00.000Z',
+      lastKnownStoppedAt: null,
+      lastKnownExpirationAt: null,
+      safeRetryAt: null,
+      note: 'A known Drive watch is still active for this spreadsheet.',
+      projectSlugs: ['sheetflare-prod']
+    }
+  ];
+}
 
 describe('runSetupDoctor', () => {
   it('treats warnings as verification failures for setup --verify', () => {
@@ -106,7 +122,8 @@ describe('runSetupDoctor', () => {
           lastReindexError: null,
           projectSlugs: ['sheetflare-prod']
         }
-      ])
+      ]),
+      listDriveWatchRetryAdvice: vi.fn(async () => activeRetryAdvice())
     });
 
     expect(results.every((result) => result.status === 'ready')).toBe(true);
@@ -169,7 +186,19 @@ describe('runSetupDoctor', () => {
       })),
       listPagesProjects: vi.fn(async () => []),
       verifyAdminPagesDeployment: vi.fn(async () => {}),
-      listDriveWatches: vi.fn(async () => [])
+      listDriveWatches: vi.fn(async () => []),
+      listDriveWatchRetryAdvice: vi.fn(async (): Promise<SpreadsheetWatchRetryAdvice[]> => [
+        {
+          spreadsheetId: 'sheet-1',
+          status: 'ready-to-retry',
+          currentWatchExpirationAt: null,
+          lastKnownStoppedAt: null,
+          lastKnownExpirationAt: null,
+          safeRetryAt: null,
+          note: 'No active or previously stopped watch is recorded for this spreadsheet.',
+          projectSlugs: ['sheetflare-prod']
+        }
+      ])
     });
 
     expect(results).toEqual(
@@ -241,9 +270,66 @@ describe('runSetupDoctor', () => {
           lastReindexError: null,
           projectSlugs: ['sheetflare-prod']
         }
-      ])
+      ]),
+      listDriveWatchRetryAdvice: vi.fn(async () => activeRetryAdvice())
     });
 
     expect(results.every((result) => result.status === 'ready')).toBe(true);
+  });
+
+  it('warns with cooldown guidance instead of immediate retry when retry advice recommends waiting', async () => {
+    const results = await runSetupDoctor({
+      config: baseConfig,
+      runtimeState: {
+        googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+        namedGoogleCredentials: 'missing',
+        apiUrl: 'https://sheetflare-api.example.workers.dev',
+        adminUrl: 'https://sheetflare-admin.pages.dev',
+        adminBearerToken: 'bootstrap.secret',
+        adminUiUsername: null,
+        adminUiPassword: null,
+        adminApiKey: 'sfk_admin.secret',
+        privateReadKey: null,
+        mutationKey: null
+      },
+      prereqResults: []
+    }, {
+      fetchReady: vi.fn(async () => ({
+        ok: true,
+        checks: {
+          defaultGoogleCredential: 'configured' as const,
+          namedGoogleCredentials: 'missing' as const,
+          googleDriveWebhookSecret: 'configured' as const,
+          bootstrapAdmin: 'configured' as const
+        },
+        notes: []
+      })),
+      listPagesProjects: vi.fn(async () => []),
+      verifyAdminPagesDeployment: vi.fn(async () => {}),
+      listDriveWatches: vi.fn(async () => []),
+      listDriveWatchRetryAdvice: vi.fn(async (): Promise<SpreadsheetWatchRetryAdvice[]> => [
+        {
+          spreadsheetId: 'sheet-1',
+          status: 'cooldown-recommended',
+          currentWatchExpirationAt: null,
+          lastKnownStoppedAt: '2026-05-01T12:00:00.000Z',
+          lastKnownExpirationAt: '2026-05-02T12:00:00.000Z',
+          safeRetryAt: '2026-05-02T12:15:00.000Z',
+          note: 'Wait until after the last known watch expiration plus a short grace window before re-registering.',
+          projectSlugs: ['sheetflare-prod']
+        }
+      ])
+    });
+
+    expect(results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'Drive watch status',
+          status: 'warning',
+          summary: expect.stringContaining('cooldown window'),
+          remediation: 'Wait until after the reported safe retry time, then run npm run ops:watch:drive.'
+        })
+      ])
+    );
   });
 });

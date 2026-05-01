@@ -182,6 +182,8 @@ npx wrangler secret put GOOGLE_DRIVE_WEBHOOK_SECRET --config apps/api/wrangler.j
 npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
 ```
 
+Also set `GOOGLE_CLIENT_EMAIL` as a normal Worker variable before deploy. Do not omit it just because `GOOGLE_PRIVATE_KEY` is present.
+
 Manual admin Pages fallback:
 
 ```powershell

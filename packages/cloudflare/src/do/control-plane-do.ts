@@ -486,11 +486,12 @@ export class ControlPlaneDO {
 
     for (const registration of registrations) {
       const existing = existingWatches.get(registration.spreadsheetId) ?? null;
-      const watch = await this.createSpreadsheetWatch(registration.spreadsheetId, registration.googleCredentialRef, {
+      const createdWatch = await this.createSpreadsheetWatch(registration.spreadsheetId, registration.googleCredentialRef, {
         webhookUrl,
         token: webhookToken,
         expirationMs
       }, existing);
+      const watch = createdWatch.watch;
 
       this.ctx.storage.sql.exec(
         `
@@ -532,7 +533,7 @@ export class ControlPlaneDO {
         now
       );
 
-      if (existing) {
+      if (existing && !createdWatch.stoppedExistingWatch) {
         await this.stopExistingSpreadsheetWatch(existing);
       }
 
@@ -814,15 +815,38 @@ export class ControlPlaneDO {
     existingWatch: SpreadsheetWatchRow | null
   ) {
     try {
-      return await this.getSheetsClient(googleCredentialRef).watchSpreadsheetFile(spreadsheetId, request);
+      return {
+        watch: await this.getSheetsClient(googleCredentialRef).watchSpreadsheetFile(spreadsheetId, request),
+        stoppedExistingWatch: false
+      };
     } catch (error) {
       if (!existingWatch || !isDriveWatchSubscriptionQuotaError(error)) {
         throw error;
       }
 
       await this.stopExistingSpreadsheetWatch(existingWatch);
-      return this.getSheetsClient(googleCredentialRef).watchSpreadsheetFile(spreadsheetId, request);
+      try {
+        return {
+          watch: await this.getSheetsClient(googleCredentialRef).watchSpreadsheetFile(spreadsheetId, request),
+          stoppedExistingWatch: true
+        };
+      } catch (retryError) {
+        this.recordSpreadsheetWatchTombstone(existingWatch);
+        this.deleteSpreadsheetWatch(existingWatch.spreadsheet_id);
+        await this.scheduleNextAlarm();
+        throw retryError;
+      }
     }
+  }
+
+  private deleteSpreadsheetWatch(spreadsheetId: string) {
+    this.ctx.storage.sql.exec(
+      `
+      DELETE FROM spreadsheet_watches
+      WHERE spreadsheet_id = ?
+      `,
+      spreadsheetId
+    );
   }
 
   private async renewSpreadsheetWatch(watch: SpreadsheetWatchRow) {

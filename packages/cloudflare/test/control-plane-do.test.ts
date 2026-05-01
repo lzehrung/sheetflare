@@ -1164,6 +1164,128 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     });
   });
 
+  it('tombstones the known watch when quota fallback stop succeeds but the replacement still fails', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    const stopRequests: Array<{ id: string; resourceId: string }> = [];
+    let watchAttemptCount = 0;
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/drive/v3/files/sheet-1/watch')) {
+        watchAttemptCount += 1;
+        if (watchAttemptCount >= 2) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: 403,
+                message: 'Rate limit exceeded for creating file subscriptions.',
+                status: 'PERMISSION_DENIED'
+              }
+            }),
+            {
+              headers: {
+                'content-type': 'application/json'
+              },
+              status: 403
+            }
+          );
+        }
+      }
+
+      if (url.endsWith('/drive/v3/channels/stop')) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { id?: string; resourceId?: string };
+        stopRequests.push({
+          id: body.id ?? '',
+          resourceId: body.resourceId ?? ''
+        });
+      }
+
+      return fallbackFetch(input, init);
+    });
+    const { env } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30
+    });
+
+    await expect(doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30
+    })).rejects.toMatchObject({
+      status: 502
+    });
+
+    const listResponse = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.list'
+    });
+    expect((listResponse as {
+      type: 'control.spreadsheet-watches.list.result';
+      result: { data: Array<unknown> };
+    }).result.data).toEqual([]);
+
+    const retryAdviceResponse = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.retry-advice.list'
+    });
+    expect((retryAdviceResponse as {
+      type: 'control.spreadsheet-watches.retry-advice.list.result';
+      result: {
+        data: Array<{
+          spreadsheetId: string;
+          status: string;
+          lastKnownStoppedAt: string | null;
+          lastKnownExpirationAt: string | null;
+        }>;
+      };
+    }).result.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        status: 'cooldown-recommended',
+        lastKnownStoppedAt: expect.any(String),
+        lastKnownExpirationAt: expect.any(String)
+      })
+    ]);
+
+    expect(stopRequests).toContainEqual({
+      id: 'channel-sheet-1',
+      resourceId: 'resource-sheet-1'
+    });
+  });
+
   it('uses a longer renewal retry window for persistent watch configuration errors', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));

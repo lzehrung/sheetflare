@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { listDriveWatches, registerDriveWatches } from './setup-drive-watches';
+import { listDriveWatchRetryAdvice, listDriveWatches, registerDriveWatches } from './setup-drive-watches';
 
 describe('registerDriveWatches', () => {
   afterEach(() => {
@@ -149,5 +149,43 @@ describe('registerDriveWatches', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(sleep).toHaveBeenCalledOnce();
+  });
+
+  it('lists Drive watch retry advice through the admin api', async () => {
+    const fetchMock = vi.fn(async () => Response.json({
+      data: [
+        {
+          spreadsheetId: 'sheet-1',
+          status: 'cooldown-recommended',
+          currentWatchExpirationAt: null,
+          lastKnownStoppedAt: '2026-05-01T12:00:00.000Z',
+          lastKnownExpirationAt: '2026-05-02T12:00:00.000Z',
+          safeRetryAt: '2026-05-02T12:15:00.000Z',
+          note: 'Wait before retrying.',
+          projectSlugs: ['sheetflare-prod']
+        }
+      ]
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(listDriveWatchRetryAdvice({
+      baseUrl: 'https://example.workers.dev',
+      adminCredential: 'sfk_admin.secret'
+    })).resolves.toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        status: 'cooldown-recommended'
+      })
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://example.workers.dev/v1/admin/system/google/drive/watches/retry-advice',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({
+          authorization: 'Bearer sfk_admin.secret'
+        })
+      })
+    );
   });
 });
