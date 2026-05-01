@@ -15,6 +15,12 @@ npm install
 npm run setup
 ```
 
+Cloudflare auth note:
+
+- `npx wrangler login` is fine for normal interactive operator use.
+- Expect to re-authenticate periodically when using Wrangler's browser-backed OAuth login.
+- For unattended deploys, CI, or long-lived scripted sessions, prefer `CLOUDFLARE_API_TOKEN`.
+
 The setup command can:
 
 - write `sheetflare.setup.json`
@@ -25,7 +31,7 @@ The setup command can:
 - apply the admin Pages runtime binding to the deployed API base URL
 - deploy the API Worker
 - deploy the admin UI
-- verify the protected admin site root and proxied `/docs`
+- verify the protected admin site root plus proxied `/ready`, `/docs`, and `/v1/admin/projects`
 - bootstrap the first project and keys
 - run smoke validation
 
@@ -44,7 +50,7 @@ Rerun notes:
 - `npm run setup -- --deploy` requires admin-site auth secrets for the admin Pages deploy. Setup reuses `.sheetflare.setup.local.json` when available, or falls back to `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD`. It also ensures the Pages project exists and applies `SHEETFLARE_API_BASE_URL` at the Pages project level before the deploy.
 - `npm run setup -- --smoke` accepts either a scoped admin API key or the bootstrap admin credential through local setup state or `SHEETFLARE_ADMIN_CREDENTIAL`.
 - `npm run setup -- --apply-secrets --provision-google` can create the Google project, enable Sheets and Drive APIs, create the service account, and mint a key JSON before applying Worker secrets. Use `--google-project` and `--google-service-account` when the default names derived from the setup profile are not what you want.
-- `npm run setup -- --verify` is the post-deploy confidence pass. It checks Worker readiness, protected admin proxy health, and Drive watch coverage using the same operator-facing surfaces documented elsewhere. It exits non-zero on warnings as well as blocking failures, so a clean pass means the full verification surface succeeded.
+- `npm run setup -- --verify` is the post-deploy confidence pass. It checks Worker readiness, the protected admin root, proxied `/ready`, proxied `/docs`, the proxied `/v1/admin/projects` JSON surface, and Drive watch coverage using the same operator-facing surfaces documented elsewhere. It exits non-zero on warnings as well as blocking failures, so a clean pass means the full verification surface succeeded.
 
 `.sheetflare.setup.local.json` is secret material. It is gitignored and intended to stay local to the operator machine.
 
@@ -184,10 +190,13 @@ npx wrangler pages project create sheetflare-admin --production-branch main
 "<ADMIN_UI_PASSWORD>" | npx wrangler pages secret put ADMIN_UI_PASSWORD --project-name sheetflare-admin
 "https://your-worker.example.workers.dev" | npx wrangler pages secret put SHEETFLARE_API_BASE_URL --project-name sheetflare-admin
 npm --workspace @sheetflare/admin run build
-npx wrangler pages deploy apps/admin/dist --project-name sheetflare-admin --branch main
+Push-Location apps/admin
+npx wrangler pages deploy --project-name sheetflare-admin --branch main
+Pop-Location
 ```
 
 `apps/admin/wrangler.jsonc` no longer carries a checked runtime API target. The deployed Pages project must supply `SHEETFLARE_API_BASE_URL` itself.
+Deploy the admin site from the `apps/admin` project root. A bare `apps/admin/dist` upload from repo root can omit the Pages `functions/` directory and break proxied routes like `/v1/admin/projects`.
 
 Prefer your deployment system or setup flow for non-secret vars. Editing the checked repo defaults is only the manual fallback path.
 

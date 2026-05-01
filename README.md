@@ -80,6 +80,8 @@ npx wrangler login
 npm run setup -- --apply-secrets --provision-google
 ```
 
+`npx wrangler login` is fine for interactive local use. Expect to log back in periodically when using Wrangler's OAuth session. For unattended deploys or CI, prefer `CLOUDFLARE_API_TOKEN`.
+
 Use `--google-project` and `--google-service-account` when you want explicit names instead of the default profile-derived ones such as `sheetflare-prod` or `sheetflare-staging`.
 
 If you are maintaining this repository's own shared staging environment, use [docs/contributor-staging.md](./docs/contributor-staging.md).

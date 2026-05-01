@@ -35,7 +35,6 @@ describe('setup deploy command builders', () => {
       'wrangler@4.85.0',
       'pages',
       'deploy',
-      'dist',
       '--project-name',
       'sheetflare-admin',
       '--branch',

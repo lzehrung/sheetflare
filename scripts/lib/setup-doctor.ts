@@ -306,7 +306,7 @@ export async function runSetupDoctor(options: {
         results.push(createResult(
           'Admin Pages verification',
           'ready',
-          `Verified protected admin root and proxied /docs at ${adminUrl}.`,
+          `Verified the protected admin root plus proxied /ready, /docs, and /v1/admin/projects at ${adminUrl}.`,
           null
         ));
       } catch (error) {

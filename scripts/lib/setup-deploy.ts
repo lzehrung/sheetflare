@@ -134,7 +134,7 @@ export function buildApiDeployCommand(configPath: string) {
 }
 
 export function buildAdminDeployCommand(projectName: string) {
-  return ['wrangler@4.85.0', 'pages', 'deploy', 'dist', '--project-name', projectName, '--branch', 'main'];
+  return ['wrangler@4.85.0', 'pages', 'deploy', '--project-name', projectName, '--branch', 'main'];
 }
 
 export function buildPagesProjectListCommand() {
