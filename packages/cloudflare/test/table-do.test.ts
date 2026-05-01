@@ -3362,7 +3362,7 @@ describe('TableDO', () => {
       result: { data: { lastSyncStartedAt: string | null; lastSyncCompletedAt: string | null; stale: boolean; rowCount: number } };
     }).result.data).toMatchObject({
       lastSyncStartedAt: '2026-04-26T12:00:00.000Z',
-      lastSyncCompletedAt: '2026-04-26T12:00:00.000Z',
+      lastSyncCompletedAt: '2026-04-26T12:10:00.000Z',
       stale: false,
       rowCount: 1
     });

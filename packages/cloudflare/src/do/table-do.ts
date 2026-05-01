@@ -1288,6 +1288,7 @@ export class TableDO {
 
   private markCacheFreshAfterMutation(config: ResolvedTableConfig, headers: string[]) {
     const syncMeta = this.getSyncMeta();
+    const completedAt = new Date().toISOString();
     this.setMeta('headers', JSON.stringify(headers));
     this.setMeta('config.signature', buildCacheConfigSignature(config));
     if (Object.keys(config.fieldRules).length === 0) {
@@ -1299,7 +1300,7 @@ export class TableDO {
       status: 'ready',
       rowCount: this.countCachedRows(),
       lastSyncStartedAt: syncMeta.lastSyncStartedAt,
-      lastSyncCompletedAt: syncMeta.lastSyncCompletedAt,
+      lastSyncCompletedAt: completedAt,
       lastSyncError: null
     });
   }
