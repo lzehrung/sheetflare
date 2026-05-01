@@ -145,6 +145,8 @@ For a public anonymous read surface, create a separate project with `defaultAuth
 - a value should be normalized before write, for example trimmed/lowercased email
 - a field should reject non-numeric, non-boolean, or non-ISO date inputs
 
+Raw sheet reads remain string-first. If a column needs typed validation or typed indexed filtering, declare that explicitly with `fieldRules.type` instead of relying on the cell text to be inferred.
+
 ## Check Cache Status
 
 Set the target table:

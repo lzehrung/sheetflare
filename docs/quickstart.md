@@ -175,7 +175,9 @@ Typical uses:
 - finite string options such as `status`
 - unique values such as `email`
 - normalized fields such as trimmed/lowercased email addresses
-- typed fields such as numeric scores or ISO dates
+- explicitly typed fields such as numeric scores or ISO dates
+
+Sheetflare reads raw sheet cell text as strings by default. Add `fieldRules.type` only when a field should be treated as a number, boolean, date, or datetime for validation and indexed query behavior.
 
 ## 6. Manual fallback paths
 

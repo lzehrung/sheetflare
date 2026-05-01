@@ -125,6 +125,7 @@ Bootstrap and deployment steps are documented in [docs/quickstart.md](./docs/qui
 - Mutation lookup uses a narrow scan of the managed ID column plus targeted row reads instead of rescanning full row payloads, which reduces write-path cost on larger sheets while preserving correctness.
 - Read-only columns are never targeted by API writes, which lets a sheet expose formula-derived or operator-managed values without API updates flattening them.
 - `fieldRules` are enforced on API writes. They do not prevent direct Google Sheets edits from introducing invalid or duplicate values later.
+- Normal sheet reads stay string-first. Sheetflare does not infer numbers or booleans from raw cell text; use explicit `fieldRules.type` when a field needs deterministic typed validation or indexed numeric/boolean query behavior.
 - Cache status now includes `validation`, which summarizes field-rule drift found during the last full sync without blocking normal reads.
 
 ## Cache And Sync
