@@ -682,6 +682,8 @@ describe('App', () => {
     expect(screen.getByText(/active \/ expires/i)).toBeTruthy();
     const spreadsheetLink = screen.getByRole('link', { name: 'Open in Google Sheets' });
     expect(spreadsheetLink.getAttribute('href')).toBe('https://docs.google.com/spreadsheets/d/sheet-1/edit');
+    const apiDocsLink = screen.getByRole('link', { name: 'Open API docs' });
+    expect(apiDocsLink.getAttribute('href')).toBe('/docs');
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh if stale' }));
     await screen.findByText('Refreshing cache for demo/users if stale complete.');
