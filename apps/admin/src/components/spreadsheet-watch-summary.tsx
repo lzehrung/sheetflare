@@ -5,7 +5,38 @@ type SpreadsheetWatchSummaryProps = {
 };
 
 export function formatSpreadsheetWatchTimestamp(value: string | null) {
-  return value ? new Date(value).toLocaleString() : 'Not yet';
+  if (!value) {
+    return 'Not yet';
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  const localTimestamp = new Intl.DateTimeFormat(undefined, {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+    timeZoneName: 'short'
+  }).format(date);
+  const utcTimestamp = new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+    timeZone: 'UTC',
+    timeZoneName: 'short'
+  }).format(date);
+
+  return `${localTimestamp} (${utcTimestamp})`;
 }
 
 function isSpreadsheetWatchExpired(expirationAt: string | null) {
