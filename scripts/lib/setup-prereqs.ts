@@ -1,12 +1,8 @@
 import { access } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
-import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { promisify } from 'node:util';
 import { checkGcloudAuthPrereq } from './setup-google';
-import { getCommandName } from './process';
-
-const execFileAsync = promisify(execFile);
+import { getCommandName, runCommand } from './process';
 const setupPrereqRequire = createRequire(import.meta.url);
 
 export type SetupPrereqStatus = 'ready' | 'warning' | 'blocked';
@@ -40,29 +36,20 @@ type SetupPrereqOptions = {
   includeGcloudAuth?: boolean;
 };
 
+export async function runPrereqCommand(command: string, args: string[]) {
+  const result = await runCommand(command, args, {
+    echoStdout: false,
+    echoStderr: false
+  });
+  return {
+    code: result.code ?? 1,
+    stdout: result.stdout,
+    stderr: result.stderr
+  };
+}
+
 async function defaultCommandRunner(command: string, args: string[]) {
-  try {
-    const result = await execFileAsync(command, args, {
-      encoding: 'utf8'
-    });
-    return {
-      code: 0,
-      stdout: result.stdout,
-      stderr: result.stderr
-    };
-  } catch (error) {
-    const execError = error as {
-      code?: number;
-      stdout?: string;
-      stderr?: string;
-      message?: string;
-    };
-    return {
-      code: typeof execError.code === 'number' ? execError.code : 1,
-      stdout: execError.stdout ?? '',
-      stderr: execError.stderr ?? execError.message ?? ''
-    };
-  }
+  return runPrereqCommand(command, args);
 }
 
 async function defaultPathExists(path: string) {

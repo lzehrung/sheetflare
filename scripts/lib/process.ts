@@ -7,6 +7,10 @@ type ProcessTermination = {
   error?: Error;
 };
 
+export function shouldUseWindowsShell(command: string, platform = process.platform) {
+  return platform === 'win32' && /\.(cmd|bat)$/i.test(command);
+}
+
 export function getCommandName(base: string) {
   return process.platform === 'win32' ? `${base}.cmd` : base;
 }
@@ -25,6 +29,7 @@ export function spawnCommand(
       ...process.env,
       ...options?.env
     },
+    ...(shouldUseWindowsShell(command) ? { shell: true } : {}),
     stdio: 'inherit'
   });
 }
@@ -46,6 +51,7 @@ export async function runCommand(
       ...process.env,
       ...options?.env
     },
+    ...(shouldUseWindowsShell(command) ? { shell: true } : {}),
     stdio: 'pipe'
   });
 
