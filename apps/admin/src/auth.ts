@@ -1,5 +1,7 @@
+import { adminCredentialHeaderName } from '../shared/admin-credential';
+
 export const adminCredentialStorageKey = 'sheetflare.adminCredential';
-export const adminCredentialHeaderName = 'x-sheetflare-admin-credential';
+export { adminCredentialHeaderName };
 
 export interface StorageLike {
   getItem(key: string): string | null;

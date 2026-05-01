@@ -1,9 +1,19 @@
-import { adminCredentialHeaderName } from '../../src/auth';
+import { adminCredentialHeaderName } from '../../shared/admin-credential';
 import type { AdminPagesEnv } from './env';
 
 export interface ProxyContext {
   env: AdminPagesEnv;
   request: Request;
+}
+
+function createProxyErrorResponse(message: string, status: number) {
+  return new Response(message, {
+    headers: {
+      'cache-control': 'no-store',
+      'content-type': 'text/plain; charset=utf-8'
+    },
+    status
+  });
 }
 
 function resolveApiBaseUrl(env: AdminPagesEnv) {
@@ -64,8 +74,23 @@ function copyResponseHeaders(response: Response) {
 }
 
 export async function proxyToApi(context: ProxyContext) {
-  const baseUrl = resolveApiBaseUrl(context.env);
-  const upstreamResponse = await fetch(createForwardRequest(context.request, baseUrl));
+  let baseUrl: URL;
+  try {
+    baseUrl = resolveApiBaseUrl(context.env);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Admin Pages upstream configuration is invalid.';
+    return createProxyErrorResponse(message, 500);
+  }
+
+  let upstreamResponse: Response;
+  try {
+    upstreamResponse = await fetch(createForwardRequest(context.request, baseUrl));
+  } catch (error) {
+    const message = error instanceof Error
+      ? `Admin Pages could not reach the Sheetflare API upstream: ${error.message}`
+      : 'Admin Pages could not reach the Sheetflare API upstream.';
+    return createProxyErrorResponse(message, 502);
+  }
 
   return new Response(upstreamResponse.body, {
     headers: copyResponseHeaders(upstreamResponse),
