@@ -224,6 +224,7 @@ export function SelectedProjectPanel({
     detailState.status === 'ready'
       ? `https://docs.google.com/spreadsheets/d/${encodeURIComponent(detailState.project.spreadsheetId)}/edit`
       : null;
+  const apiDocsUrl = detailState.status === 'ready' ? '/docs' : null;
 
   return (
     <section className="panel mainPanel">
@@ -269,6 +270,14 @@ export function SelectedProjectPanel({
                     <a href={spreadsheetUrl} target="_blank" rel="noreferrer">
                       Open in Google Sheets
                     </a>
+                  ) : null}
+                  {apiDocsUrl ? (
+                    <>
+                      {' '}·{' '}
+                      <a href={apiDocsUrl} target="_blank" rel="noreferrer">
+                        Open API docs
+                      </a>
+                    </>
                   ) : null}
                 </dd>
               </div>
