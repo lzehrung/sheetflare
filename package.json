@@ -48,6 +48,7 @@
     "ops:cache:health": "tsx scripts/check-cache-health.ts",
     "ops:watch:drive": "tsx scripts/register-drive-watches.ts",
     "ops:watch:drive:status": "tsx scripts/get-drive-watch-status.ts",
+    "ops:watch:drive:stop": "tsx scripts/stop-drive-watches.ts",
     "ops:reindex": "tsx scripts/reindex-table.ts",
     "smoke:staging": "npm run smoke",
     "load:staging": "npm run load"

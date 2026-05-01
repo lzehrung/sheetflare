@@ -9,6 +9,7 @@ import {
   adminInspectSpreadsheetTabResultSchema,
   adminListSpreadsheetWatchesResultSchema,
   adminRegisterSpreadsheetWatchesInputSchema,
+  adminStopSpreadsheetWatchesInputSchema,
   adminRegisterSpreadsheetWatchesResultSchema,
   adminListApiKeysResultSchema,
   adminListProjectsResultSchema,
@@ -44,6 +45,7 @@ import {
   type AdminInspectSpreadsheetTabResult,
   type AdminListSpreadsheetWatchesResult,
   type AdminRegisterSpreadsheetWatchesInput,
+  type AdminStopSpreadsheetWatchesInput,
   type AdminRegisterSpreadsheetWatchesResult,
   type AdminListSpreadsheetTabsResult,
   type ApiKeyPrincipal,
@@ -1087,6 +1089,27 @@ const listSpreadsheetWatchesRoute = createRoute({
   }
 });
 
+const stopSpreadsheetWatchesRoute = createRoute({
+  method: 'post',
+  path: '/v1/admin/system/google/drive/watches/stop',
+  tags: ['System'],
+  security: adminSecurity,
+  request: {
+    body: {
+      content: jsonContent(adminStopSpreadsheetWatchesInputSchema),
+      description: 'Stop one known spreadsheet watch or all known spreadsheet watches'
+    }
+  },
+  responses: {
+    200: {
+      description: 'Stop and remove known Google Drive spreadsheet watches',
+      content: jsonContent(adminRegisterSpreadsheetWatchesResultSchema)
+    },
+    400: badRequestResponse,
+    401: unauthorizedResponse
+  }
+});
+
 const googleDriveNotificationRoute = createRoute({
   method: 'post',
   path: '/v1/system/google/drive/notifications',
@@ -1646,6 +1669,23 @@ function createApp() {
       (response as {
         type: 'control.spreadsheet-watches.list.result';
         result: AdminListSpreadsheetWatchesResult;
+      }).result
+    );
+  });
+
+  app.openapi(stopSpreadsheetWatchesRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    assertGlobalAdminScope(auth, 'admin:projects');
+    const input = await parseJsonBody(c, adminStopSpreadsheetWatchesInputSchema) satisfies AdminStopSpreadsheetWatchesInput;
+    const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+      type: 'control.spreadsheet-watches.stop',
+      input
+    });
+
+    return c.json(
+      (response as {
+        type: 'control.spreadsheet-watches.stop.result';
+        result: AdminRegisterSpreadsheetWatchesResult;
       }).result
     );
   });

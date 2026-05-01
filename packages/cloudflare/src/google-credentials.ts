@@ -3,8 +3,8 @@ import type { GoogleServiceAccountConfig } from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from './types';
 
 type NamedGoogleCredential = {
-  clientEmail: string;
-  privateKey: string;
+  clientEmail: string | undefined;
+  privateKey: string | undefined;
 };
 
 type GoogleCredentialMap = Record<string, NamedGoogleCredential>;
@@ -12,8 +12,8 @@ type GoogleCredentialMap = Record<string, NamedGoogleCredential>;
 const defaultGoogleCredentialRef = 'default';
 
 function normalizeGoogleCredential(value: NamedGoogleCredential, ref: string): GoogleServiceAccountConfig {
-  const clientEmail = value.clientEmail.trim();
-  const privateKey = value.privateKey.trim();
+  const clientEmail = value.clientEmail?.trim() ?? '';
+  const privateKey = value.privateKey?.trim() ?? '';
 
   if (!clientEmail || !privateKey) {
     throw new BadRequestError(`Google credential "${ref}" is incomplete.`, {

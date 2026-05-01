@@ -215,6 +215,32 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'control.spreadsheet-watches.stop') {
+      return Response.json({
+        type: 'control.spreadsheet-watches.stop.result',
+        result: {
+          data: [
+            {
+              spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
+              channelId: 'channel-1',
+              resourceId: 'resource-1',
+              resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+              expirationAt: '2026-05-03T00:00:00.000Z',
+              lastWatchError: null,
+              lastNotificationAt: '2026-04-26T00:00:00.000Z',
+              pendingChangedAt: null,
+              debounceUntil: null,
+              lastReindexStartedAt: null,
+              lastReindexCompletedAt: '2026-04-26T00:00:10.000Z',
+              lastReindexError: null,
+              projectSlugs: ['demo']
+            }
+          ]
+        }
+      });
+    }
+
     if (body.type === 'control.spreadsheet-watch.notify') {
       return Response.json({
         type: 'control.spreadsheet-watch.notify.result',
@@ -749,6 +775,55 @@ describe('api routes', () => {
       ]
     });
     expect(env.__controlPlaneRequests.at(-1)?.type).toBe('control.spreadsheet-watches.list');
+  });
+
+  it('stops known Drive spreadsheet watches through a global admin route', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> };
+    const response = await app.request(
+      '/v1/admin/system/google/drive/watches/stop',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          spreadsheetId: 'sheet-1'
+        })
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: [
+        {
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'default',
+          channelId: 'channel-1',
+          resourceId: 'resource-1',
+          resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
+          expirationAt: '2026-05-03T00:00:00.000Z',
+          lastWatchError: null,
+          lastNotificationAt: '2026-04-26T00:00:00.000Z',
+          pendingChangedAt: null,
+          debounceUntil: null,
+          lastReindexStartedAt: null,
+          lastReindexCompletedAt: '2026-04-26T00:00:10.000Z',
+          lastReindexError: null,
+          projectSlugs: ['demo']
+        }
+      ]
+    });
+    expect(env.__controlPlaneRequests.at(-1)).toMatchObject({
+      type: 'control.spreadsheet-watches.stop',
+      body: {
+        input: {
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    });
   });
 
   it('accepts verified Google Drive webhook notifications without edge rate limiting', async () => {

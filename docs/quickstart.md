@@ -374,6 +374,25 @@ Inspect current watch state, including expiration and any last watch error:
 npm run ops:watch:drive:status
 ```
 
+Stop known Drive watches before retrying registration if you need to clear the current locally tracked channels:
+
+```powershell
+npm run ops:watch:drive:stop
+```
+
+```powershell
+$env:SHEETFLARE_DRIVE_WATCH_SPREADSHEET_ID = "your-spreadsheet-id"
+npm run ops:watch:drive:stop
+```
+
+If registration fails with `Rate limit exceeded for creating file subscriptions.`, Google is still counting one or more existing file subscriptions. Stop the known watch, wait for Google to release stale subscriptions, and then retry `npm run ops:watch:drive`.
+
+Google Drive watch references:
+
+- https://developers.google.com/workspace/drive/api/guides/push
+- https://developers.google.com/workspace/drive/api/reference/rest/v3/files/watch
+- https://developers.google.com/workspace/drive/api/reference/rest/v3/channels/stop
+
 Run the load and churn harness:
 
 ```powershell

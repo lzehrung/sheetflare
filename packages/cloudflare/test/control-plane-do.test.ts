@@ -567,6 +567,100 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     });
   });
 
+  it('stops and removes known spreadsheet watches on explicit operator request', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    const stopRequests: Array<{ id: string; resourceId: string }> = [];
+    const fetchHandler = createSheetsAndDriveFetch(sheet);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/drive/v3/channels/stop')) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { id?: string; resourceId?: string };
+        stopRequests.push({
+          id: body.id ?? '',
+          resourceId: body.resourceId ?? ''
+        });
+      }
+
+      return fetchHandler(input, init);
+    });
+    const { env } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30
+    });
+
+    const stopped = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.stop',
+      input: {
+        spreadsheetId: 'sheet-1'
+      }
+    });
+
+    expect((stopped as {
+      type: 'control.spreadsheet-watches.stop.result';
+      result: {
+        data: Array<{
+          spreadsheetId: string;
+          channelId: string;
+          resourceId: string;
+        }>;
+      };
+    }).result.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        channelId: 'channel-sheet-1',
+        resourceId: 'resource-sheet-1'
+      })
+    ]);
+
+    expect(stopRequests).toContainEqual({
+      id: 'channel-sheet-1',
+      resourceId: 'resource-sheet-1'
+    });
+
+    const remaining = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.list'
+    });
+
+    expect((remaining as {
+      type: 'control.spreadsheet-watches.list.result';
+      result: { data: unknown[] };
+    }).result.data).toEqual([]);
+  });
+
   it('debounces Drive notifications and auto-reindexes affected tables when the alarm fires', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-29T15:00:00.000Z'));
@@ -934,6 +1028,113 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     vi.useRealTimers();
   });
 
+  it('retries watch registration once after stopping the known watch when Google rejects a replacement for file-subscription quota', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    const stopRequests: Array<{ id: string; resourceId: string }> = [];
+    let watchAttemptCount = 0;
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/drive/v3/files/sheet-1/watch')) {
+        watchAttemptCount += 1;
+        if (watchAttemptCount === 2) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: 403,
+                message: 'Rate limit exceeded for creating file subscriptions.',
+                status: 'PERMISSION_DENIED'
+              }
+            }),
+            {
+              headers: {
+                'content-type': 'application/json'
+              },
+              status: 403
+            }
+          );
+        }
+      }
+
+      if (url.endsWith('/drive/v3/channels/stop')) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { id?: string; resourceId?: string };
+        stopRequests.push({
+          id: body.id ?? '',
+          resourceId: body.resourceId ?? ''
+        });
+      }
+
+      return fallbackFetch(input, init);
+    });
+    const { env } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30
+    });
+
+    const response = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30
+    });
+
+    expect((response as {
+      type: 'control.spreadsheet-watches.register.result';
+      result: {
+        data: Array<{
+          spreadsheetId: string;
+          channelId: string;
+          resourceId: string;
+        }>;
+      };
+    }).result.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        channelId: 'channel-sheet-1-2',
+        resourceId: 'resource-sheet-1-2'
+      })
+    ]);
+
+    expect(stopRequests).toContainEqual({
+      id: 'channel-sheet-1',
+      resourceId: 'resource-sheet-1'
+    });
+  });
+
   it('uses a longer renewal retry window for persistent watch configuration errors', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
@@ -1009,5 +1210,92 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     ).toBe(Date.parse('2026-04-29T11:05:01.000Z'));
 
     vi.useRealTimers();
+  });
+
+  it('returns structured Google watch registration errors with upstream details', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/drive/v3/files/sheet-1/watch')) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: 403,
+              message: 'The caller does not have permission',
+              status: 'PERMISSION_DENIED'
+            }
+          }),
+          {
+            headers: {
+              'content-type': 'application/json'
+            },
+            status: 403
+          }
+        );
+      }
+
+      return createSheetsAndDriveFetch(sheet)(input, init);
+    });
+    const { env } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    const response = await controlPlane.fetch('https://do.internal/rpc', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        type: 'control.spreadsheet-watches.register',
+        webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+        webhookToken: 'secret-token',
+        debounceSeconds: 30
+      } satisfies {
+        type: 'control.spreadsheet-watches.register';
+        webhookUrl: string;
+        webhookToken: string;
+        debounceSeconds: number;
+      })
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'BAD_GATEWAY',
+        message: 'Google Sheets authentication or permission check failed.',
+        details: {
+          status: 403,
+          message: 'The caller does not have permission'
+        }
+      }
+    });
   });
 });

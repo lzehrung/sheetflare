@@ -79,4 +79,38 @@ describe('handleAuthenticatedRequest', () => {
     expect(response.headers.get('x-frame-options')).toBe('DENY');
     await expect(response.text()).resolves.toContain('Sheetflare Admin');
   });
+
+  it('relaxes the docs CSP just enough for Scalar to load and initialize', async () => {
+    const response = await handleAuthenticatedRequest({
+      env: {
+        ADMIN_UI_PASSWORD: 'secret-password',
+        ADMIN_UI_USERNAME: 'admin-user'
+      },
+      next: async () =>
+        new Response(`<!doctype html>
+<html>
+  <body>
+    <div id="app"></div>
+    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+    <script>
+      Scalar.createApiReference('#app', { url: '/doc' });
+    </script>
+  </body>
+</html>`, {
+          headers: {
+            'content-type': 'text/html; charset=utf-8'
+          }
+        }),
+      request: new Request('https://sheetflare-admin.example.pages.dev/docs', {
+        headers: {
+          authorization: createBasicAuthorizationHeader('admin-user', 'secret-password')
+        }
+      })
+    });
+
+    const contentSecurityPolicy = response.headers.get('content-security-policy');
+    expect(contentSecurityPolicy).toContain("default-src 'self'");
+    expect(contentSecurityPolicy).toContain("script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'");
+    expect(contentSecurityPolicy).toContain("style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'");
+  });
 });

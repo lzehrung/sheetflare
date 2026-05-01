@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NotFoundError } from '@sheetflare/contracts';
+import { BadRequestError, NotFoundError } from '@sheetflare/contracts';
 import { defaultGoogleCredentialRef, resolveGoogleCredential, type CloudflareEnv } from '../src';
 
 function createEnv(overrides?: Partial<CloudflareEnv>): CloudflareEnv {
@@ -40,5 +40,16 @@ describe('resolveGoogleCredential', () => {
 
   it('fails clearly when a named credential does not exist', () => {
     expect(() => resolveGoogleCredential(createEnv(), 'missing')).toThrowError(NotFoundError);
+  });
+
+  it('fails clearly when the default credential is missing required secrets', () => {
+    expect(() =>
+      resolveGoogleCredential(
+        createEnv({
+          GOOGLE_PRIVATE_KEY: undefined
+        }),
+        defaultGoogleCredentialRef
+      )
+    ).toThrowError(BadRequestError);
   });
 });

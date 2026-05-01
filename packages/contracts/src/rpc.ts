@@ -1,5 +1,6 @@
 import type {
   AdminRegisterSpreadsheetWatchesResult,
+  AdminStopSpreadsheetWatchesInput,
   AdminListSpreadsheetWatchesResult,
   AdminCreateApiKeyInput,
   AdminCreateApiKeyResult,
@@ -30,6 +31,7 @@ export type ControlPlaneDoRequest =
   | { type: 'control.project.upsert'; summary: { slug: string; name: string; spreadsheetId: string; googleCredentialRef: string; tableCount: number; updatedAt: string } }
   | { type: 'control.spreadsheet-watches.list' }
   | { type: 'control.spreadsheet-watches.register'; webhookUrl: string; webhookToken: string; debounceSeconds: number; expirationMs?: number | null }
+  | { type: 'control.spreadsheet-watches.stop'; input: AdminStopSpreadsheetWatchesInput }
   | { type: 'control.spreadsheet-watch.notify'; channelId: string; resourceId: string; resourceState: string; messageNumber: string | null; changedAt: string; channelExpiration: string | null }
   | { type: 'control.api-key.create'; input: AdminCreateApiKeyInput }
   | { type: 'control.api-keys.list'; projectSlug?: string | null }
@@ -43,6 +45,7 @@ export type ControlPlaneDoResponse =
   | { type: 'control.project.upsert.result'; result: { ok: true } }
   | { type: 'control.spreadsheet-watches.list.result'; result: AdminListSpreadsheetWatchesResult }
   | { type: 'control.spreadsheet-watches.register.result'; result: AdminRegisterSpreadsheetWatchesResult }
+  | { type: 'control.spreadsheet-watches.stop.result'; result: AdminRegisterSpreadsheetWatchesResult }
   | { type: 'control.spreadsheet-watch.notify.result'; result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null } }
   | { type: 'control.api-key.create.result'; result: AdminCreateApiKeyResult }
   | { type: 'control.api-keys.list.result'; result: AdminListApiKeysResult }

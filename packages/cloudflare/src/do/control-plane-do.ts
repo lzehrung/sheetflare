@@ -1,4 +1,4 @@
-import { ServiceUnavailableError } from '@sheetflare/contracts';
+import { AppError, ServiceUnavailableError, toErrorResponse } from '@sheetflare/contracts';
 import type {
   AdminListSpreadsheetWatchesResult,
   AdminRegisterSpreadsheetWatchesResult,
@@ -183,9 +183,14 @@ export class ControlPlaneDO {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
-    const body = (await request.json()) as ControlPlaneDoRequest;
-    const result = await this.handle(body);
-    return Response.json(result);
+    try {
+      const body = (await request.json()) as ControlPlaneDoRequest;
+      const result = await this.handle(body);
+      return Response.json(result);
+    } catch (error) {
+      const { status, body } = toErrorResponse(error);
+      return Response.json(body, { status });
+    }
   }
 
   private async handle(body: ControlPlaneDoRequest): Promise<ControlPlaneDoResponse> {
@@ -210,6 +215,11 @@ export class ControlPlaneDO {
         return {
           type: 'control.spreadsheet-watches.register.result',
           result: await this.registerSpreadsheetWatches(body.webhookUrl, body.webhookToken, body.debounceSeconds, body.expirationMs ?? null)
+        };
+      case 'control.spreadsheet-watches.stop':
+        return {
+          type: 'control.spreadsheet-watches.stop.result',
+          result: await this.stopSpreadsheetWatches(body.input.spreadsheetId ?? null)
         };
       case 'control.spreadsheet-watch.notify':
         return {
@@ -453,14 +463,11 @@ export class ControlPlaneDO {
 
     for (const registration of registrations) {
       const existing = existingWatches.get(registration.spreadsheetId) ?? null;
-      const watch = await this.getSheetsClient(registration.googleCredentialRef).watchSpreadsheetFile(
-        registration.spreadsheetId,
-        {
-          webhookUrl,
-          token: webhookToken,
-          expirationMs
-        }
-      );
+      const watch = await this.createSpreadsheetWatch(registration.spreadsheetId, registration.googleCredentialRef, {
+        webhookUrl,
+        token: webhookToken,
+        expirationMs
+      }, existing);
 
       this.ctx.storage.sql.exec(
         `
@@ -513,6 +520,33 @@ export class ControlPlaneDO {
 
     return {
       data: results
+    };
+  }
+
+  private async stopSpreadsheetWatches(spreadsheetId: string | null): Promise<AdminRegisterSpreadsheetWatchesResult> {
+    const watches = spreadsheetId
+      ? this.listSpreadsheetWatches().filter((watch) => watch.spreadsheet_id === spreadsheetId)
+      : this.listSpreadsheetWatches();
+    const projectSlugsBySpreadsheetId = this.getProjectSlugsBySpreadsheetId();
+    const stopped: AdminRegisterSpreadsheetWatchesResult['data'] = [];
+
+    for (const watch of watches) {
+      await this.stopExistingSpreadsheetWatch(watch);
+      stopped.push(
+        this.mapSpreadsheetWatch(watch, projectSlugsBySpreadsheetId.get(watch.spreadsheet_id) ?? [])
+      );
+      this.ctx.storage.sql.exec(
+        `
+        DELETE FROM spreadsheet_watches
+        WHERE spreadsheet_id = ?
+        `,
+        watch.spreadsheet_id
+      );
+    }
+
+    await this.scheduleNextAlarm();
+    return {
+      data: stopped
     };
   }
 
@@ -706,6 +740,28 @@ export class ControlPlaneDO {
     }
   }
 
+  private async createSpreadsheetWatch(
+    spreadsheetId: string,
+    googleCredentialRef: string,
+    request: {
+      webhookUrl: string;
+      token: string;
+      expirationMs: number | null;
+    },
+    existingWatch: SpreadsheetWatchRow | null
+  ) {
+    try {
+      return await this.getSheetsClient(googleCredentialRef).watchSpreadsheetFile(spreadsheetId, request);
+    } catch (error) {
+      if (!existingWatch || !isDriveWatchSubscriptionQuotaError(error)) {
+        throw error;
+      }
+
+      await this.stopExistingSpreadsheetWatch(existingWatch);
+      return this.getSheetsClient(googleCredentialRef).watchSpreadsheetFile(spreadsheetId, request);
+    }
+  }
+
   private async renewSpreadsheetWatch(watch: SpreadsheetWatchRow) {
     const webhookToken = this.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim();
     if (!watch.webhook_url?.trim()) {
@@ -755,10 +811,7 @@ export class ControlPlaneDO {
 
       await this.stopExistingSpreadsheetWatch(watch);
     } catch (error) {
-      this.recordWatchError(
-        watch.spreadsheet_id,
-        error instanceof Error ? error.message : String(error)
-      );
+      this.recordWatchError(watch.spreadsheet_id, describeWatchError(error));
     }
   }
 
@@ -1101,4 +1154,36 @@ function getWatchRenewRetryDelayMs(lastWatchError: string | null) {
 function isNonRetriableWatchConfigurationError(lastWatchError: string | null) {
   return lastWatchError === 'Spreadsheet watch is missing its stored webhook URL.'
     || lastWatchError === 'GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.';
+}
+
+function isDriveWatchSubscriptionQuotaError(error: unknown) {
+  if (!(error instanceof AppError) || error.code !== 'BAD_GATEWAY') {
+    return false;
+  }
+
+  const detailsMessage =
+    typeof error.details === 'object'
+    && error.details !== null
+    && 'message' in error.details
+    && typeof error.details.message === 'string'
+      ? error.details.message
+      : '';
+
+  return detailsMessage.includes('Rate limit exceeded for creating file subscriptions.');
+}
+
+function describeWatchError(error: unknown) {
+  if (!(error instanceof AppError)) {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  const detailsMessage =
+    typeof error.details === 'object'
+    && error.details !== null
+    && 'message' in error.details
+    && typeof error.details.message === 'string'
+      ? error.details.message
+      : null;
+
+  return detailsMessage ? `${error.message} ${detailsMessage}` : error.message;
 }

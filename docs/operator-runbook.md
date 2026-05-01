@@ -222,6 +222,17 @@ Inspect current watch status:
 npm run ops:watch:drive:status
 ```
 
+Stop all known spreadsheet watches or one known spreadsheet watch before re-registering:
+
+```powershell
+npm run ops:watch:drive:stop
+```
+
+```powershell
+$env:SHEETFLARE_DRIVE_WATCH_SPREADSHEET_ID = "your-spreadsheet-id"
+npm run ops:watch:drive:stop
+```
+
 Optional overrides:
 
 ```powershell
@@ -239,8 +250,14 @@ Re-run this after:
 Operational notes:
 
 - Sheetflare renews existing Drive watches before they expire when the control-plane alarm is healthy
+- manual re-registration now retries once after stopping the currently known watch when Google rejects replacement with a file-subscription quota error
 - `expirationAt` and `lastWatchError` from `npm run ops:watch:drive:status` are the primary signals for renewal health
 - if a watch has expired or `lastWatchError` remains non-null, rerun `npm run ops:watch:drive` and investigate Worker logs
+- if Google returns `Rate limit exceeded for creating file subscriptions.`, stop known watches with `npm run ops:watch:drive:stop`, wait for Google to release stale subscriptions, then retry registration
+- Google Drive watch behavior is documented at:
+  - https://developers.google.com/workspace/drive/api/guides/push
+  - https://developers.google.com/workspace/drive/api/reference/rest/v3/files/watch
+  - https://developers.google.com/workspace/drive/api/reference/rest/v3/channels/stop
 
 ## Force Reindex
 

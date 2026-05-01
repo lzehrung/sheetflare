@@ -3,24 +3,37 @@ import type { AdminPagesEnv } from './env';
 export const adminSiteRealm = 'Sheetflare Admin';
 
 const textEncoder = new TextEncoder();
-const securityHeaders = {
-  'content-security-policy': [
-    "default-src 'self'",
-    "base-uri 'none'",
-    "connect-src 'self'",
-    "font-src 'self'",
-    "frame-ancestors 'none'",
-    "img-src 'self' data:",
-    "object-src 'none'",
-    "script-src 'self'",
-    "style-src 'self'",
-    "form-action 'self'"
-  ].join('; '),
+const standardContentSecurityPolicy = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "connect-src 'self'",
+  "font-src 'self'",
+  "frame-ancestors 'none'",
+  "img-src 'self' data:",
+  "object-src 'none'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "form-action 'self'"
+].join('; ');
+const baseSecurityHeaders = {
   'referrer-policy': 'no-referrer',
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
   'x-robots-tag': 'noindex, nofollow, noarchive'
 } as const;
+const docsScriptHost = 'https://cdn.jsdelivr.net';
+const docsContentSecurityPolicy = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "connect-src 'self'",
+  `font-src 'self' data: ${docsScriptHost}`,
+  "frame-ancestors 'none'",
+  "img-src 'self' data: https:",
+  "object-src 'none'",
+  `script-src 'self' ${docsScriptHost} 'unsafe-inline'`,
+  `style-src 'self' ${docsScriptHost} 'unsafe-inline'`,
+  "form-action 'self'"
+].join('; ');
 
 interface BasicCredentials {
   password: string;
@@ -33,21 +46,32 @@ export interface MiddlewareContext {
   request: Request;
 }
 
-function applySecurityHeaders(response: Response) {
+function isDocsRequest(request: Request) {
+  return new URL(request.url).pathname === '/docs';
+}
+
+async function applySecurityHeaders(request: Request, response: Response) {
   const headers = new Headers(response.headers);
-  for (const [name, value] of Object.entries(securityHeaders)) {
+  const responseBody: BodyInit | null = response.body;
+  const contentSecurityPolicy = isDocsRequest(request) && response.headers.get('content-type')?.includes('text/html')
+    ? docsContentSecurityPolicy
+    : standardContentSecurityPolicy;
+  headers.set('content-security-policy', contentSecurityPolicy);
+
+  for (const [name, value] of Object.entries(baseSecurityHeaders)) {
     headers.set(name, value);
   }
 
-  return new Response(response.body, {
+  return new Response(responseBody, {
     headers,
     status: response.status,
     statusText: response.statusText
   });
 }
 
-function createBasicAuthChallengeResponse(message: string, status = 401) {
+async function createBasicAuthChallengeResponse(message: string, status = 401) {
   return applySecurityHeaders(
+    new Request('https://sheetflare-admin.invalid/'),
     new Response(message, {
       headers: {
         'cache-control': 'no-store',
@@ -59,8 +83,9 @@ function createBasicAuthChallengeResponse(message: string, status = 401) {
   );
 }
 
-function createConfigurationErrorResponse(message: string) {
+async function createConfigurationErrorResponse(message: string) {
   return applySecurityHeaders(
+    new Request('https://sheetflare-admin.invalid/'),
     new Response(message, {
       headers: {
         'cache-control': 'no-store',
@@ -139,9 +164,9 @@ export async function handleAuthenticatedRequest(context: MiddlewareContext) {
   const authorizationResult = isAuthorizedRequest(context.request, context.env);
   if (!authorizationResult.ok) {
     return authorizationResult.reason === 'misconfigured'
-      ? createConfigurationErrorResponse('Admin UI auth is not configured.')
-      : createBasicAuthChallengeResponse('Admin UI authentication required.');
+      ? await createConfigurationErrorResponse('Admin UI auth is not configured.')
+      : await createBasicAuthChallengeResponse('Admin UI authentication required.');
   }
 
-  return applySecurityHeaders(await context.next());
+  return applySecurityHeaders(context.request, await context.next());
 }
