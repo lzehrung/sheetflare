@@ -1,4 +1,4 @@
-import { adminCredentialHeaderName } from '../../shared/admin-credential';
+import { adminCredentialHeaderName } from '../../src/auth';
 import type { AdminPagesEnv } from './env';
 
 export interface ProxyContext {
