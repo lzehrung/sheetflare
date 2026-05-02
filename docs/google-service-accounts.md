@@ -141,6 +141,8 @@ Expected shape:
 }
 ```
 
+The runtime also accepts the Google-generated service-account field names `client_email` and `private_key` for named credentials.
+
 Then set each Sheetflare project's `googleCredentialRef` to the matching key, for example:
 
 - `staging`

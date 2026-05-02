@@ -673,14 +673,27 @@ function getNamedGoogleCredentialsStatus(env: Env) {
     if (
       typeof entry !== 'object' ||
       entry === null ||
-      Array.isArray(entry) ||
-      !('client_email' in entry) ||
-      !('private_key' in entry) ||
-      typeof entry.client_email !== 'string' ||
-      entry.client_email.trim().length === 0 ||
-      typeof entry.private_key !== 'string' ||
-      entry.private_key.trim().length === 0
+      Array.isArray(entry)
     ) {
+      return 'invalid' as const;
+    }
+
+    const hasSnakeCaseCredential =
+      'client_email' in entry &&
+      'private_key' in entry &&
+      typeof entry.client_email === 'string' &&
+      entry.client_email.trim().length > 0 &&
+      typeof entry.private_key === 'string' &&
+      entry.private_key.trim().length > 0;
+    const hasCamelCaseCredential =
+      'clientEmail' in entry &&
+      'privateKey' in entry &&
+      typeof entry.clientEmail === 'string' &&
+      entry.clientEmail.trim().length > 0 &&
+      typeof entry.privateKey === 'string' &&
+      entry.privateKey.trim().length > 0;
+
+    if (!hasSnakeCaseCredential && !hasCamelCaseCredential) {
       return 'invalid' as const;
     }
   }
@@ -1482,7 +1495,7 @@ function createApp() {
     } else if (!hasDefaultGoogleCredential && namedGoogleCredentials === 'configured') {
       notes.push('Default Google service-account credential is not configured, but named GOOGLE_CREDENTIALS_JSON entries are available for project-specific refs.');
     } else if (namedGoogleCredentials === 'invalid') {
-      notes.push('GOOGLE_CREDENTIALS_JSON is present but invalid. Each named credential must include non-empty client_email and private_key fields.');
+      notes.push('GOOGLE_CREDENTIALS_JSON is present but invalid. Each named credential must include non-empty client_email/private_key or clientEmail/privateKey fields.');
     }
 
     if (!hasBootstrapAdmin) {

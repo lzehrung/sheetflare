@@ -51,15 +51,22 @@ function parseGoogleCredentialMap(env: CloudflareEnv): GoogleCredentialMap {
       throw new BadRequestError(`Google credential "${ref}" must be an object with clientEmail and privateKey.`);
     }
 
-    const clientEmail = 'clientEmail' in value && typeof value.clientEmail === 'string'
-      ? value.clientEmail
-      : null;
-    const privateKey = 'privateKey' in value && typeof value.privateKey === 'string'
-      ? value.privateKey
-      : null;
+    let clientEmail: string | null = null;
+    if ('clientEmail' in value && typeof value.clientEmail === 'string') {
+      clientEmail = value.clientEmail;
+    } else if ('client_email' in value && typeof value.client_email === 'string') {
+      clientEmail = value.client_email;
+    }
+
+    let privateKey: string | null = null;
+    if ('privateKey' in value && typeof value.privateKey === 'string') {
+      privateKey = value.privateKey;
+    } else if ('private_key' in value && typeof value.private_key === 'string') {
+      privateKey = value.private_key;
+    }
 
     if (!clientEmail || !privateKey) {
-      throw new BadRequestError(`Google credential "${ref}" must include string clientEmail and privateKey fields.`);
+      throw new BadRequestError(`Google credential "${ref}" must include string clientEmail/privateKey or client_email/private_key fields.`);
     }
 
     result[ref] = {

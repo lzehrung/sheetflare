@@ -1193,6 +1193,29 @@ describe('api routes', () => {
     });
   });
 
+  it('accepts documented named Google credential field names in /ready', async () => {
+    const app = createApp();
+    const response = await app.request('/ready', {}, createEnv({
+      googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
+      googlePrivateKey: '',
+      googleCredentialsJson: JSON.stringify({
+        prod: {
+          clientEmail: 'service@example.com',
+          privateKey: 'secret'
+        }
+      })
+    }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      checks: {
+        defaultGoogleCredential: 'missing',
+        namedGoogleCredentials: 'configured'
+      }
+    });
+  });
+
   it('reports invalid named Google credentials distinctly in /ready', async () => {
     const app = createApp();
     const response = await app.request('/ready', {}, createEnv({
@@ -1214,7 +1237,7 @@ describe('api routes', () => {
         bootstrapAdmin: 'configured'
       },
       notes: [
-        'GOOGLE_CREDENTIALS_JSON is present but invalid. Each named credential must include non-empty client_email and private_key fields.',
+        'GOOGLE_CREDENTIALS_JSON is present but invalid. Each named credential must include non-empty client_email/private_key or clientEmail/privateKey fields.',
         'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
       ]
     });

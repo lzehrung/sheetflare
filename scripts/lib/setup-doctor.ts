@@ -182,7 +182,7 @@ export async function runSetupDoctor(options: {
     results.push(createResult(
       'Google credential',
       'blocked',
-      'A configured project uses a named Google credential ref, but GOOGLE_CREDENTIALS_JSON is missing required client_email/private_key fields or is not valid JSON.',
+      'A configured project uses a named Google credential ref, but GOOGLE_CREDENTIALS_JSON is missing required client_email/private_key or clientEmail/privateKey fields or is not valid JSON.',
       'Fix GOOGLE_CREDENTIALS_JSON, then rerun npm run setup -- --verify.'
     ));
   } else if (hasDefaultGoogleCredential && namedGoogleCredentials === 'configured') {
@@ -234,7 +234,7 @@ export async function runSetupDoctor(options: {
           'API readiness',
           'blocked',
           'API /ready reports GOOGLE_CREDENTIALS_JSON as invalid.',
-          'Fix GOOGLE_CREDENTIALS_JSON so every named entry has non-empty client_email and private_key fields, then redeploy the Worker.'
+          'Fix GOOGLE_CREDENTIALS_JSON so every named entry has non-empty client_email/private_key or clientEmail/privateKey fields, then redeploy the Worker.'
         ));
       } else if (ready.checks.googleDriveWebhookSecret !== 'configured') {
         results.push(createResult(
