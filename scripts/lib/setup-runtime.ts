@@ -32,21 +32,30 @@ export function resolveSetupRuntimeState(localState: SetupLocalState | null): Re
     apiUrl: resolveValue(localState?.apiUrl, getEnv('SHEETFLARE_BASE_URL')),
     adminUrl: resolveValue(localState?.adminUrl),
     adminBearerToken: resolveValue(
-      localState?.adminBearerToken,
       getEnv('SHEETFLARE_ADMIN_CREDENTIAL'),
       getEnv('ADMIN_BEARER_TOKEN')
     ),
     adminUiUsername: resolveValue(localState?.adminUiUsername, getEnv('ADMIN_UI_USERNAME')),
     adminUiPassword: resolveValue(localState?.adminUiPassword, getEnv('ADMIN_UI_PASSWORD')),
-    adminApiKey: resolveValue(localState?.adminApiKey, getEnv('SHEETFLARE_ADMIN_CREDENTIAL')),
-    privateReadKey: resolveValue(localState?.privateReadKey, getEnv('SHEETFLARE_PRIVATE_READ_KEY')),
-    mutationKey: resolveValue(localState?.mutationKey, getEnv('SHEETFLARE_MUTATION_KEY'))
+    adminApiKey: resolveValue(getEnv('SHEETFLARE_ADMIN_CREDENTIAL')),
+    privateReadKey: resolveValue(getEnv('SHEETFLARE_PRIVATE_READ_KEY')),
+    mutationKey: resolveValue(getEnv('SHEETFLARE_MUTATION_KEY'))
   };
 }
 
 export function resolvePreferredAdminCredential(state: Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'>) {
   return resolveValue(state.adminApiKey, state.adminBearerToken);
 }
+
+export type SetupSecretsSummary = {
+  adminUiUsername: string | null;
+  adminUiPassword: string | null;
+  localStatePath: string | null;
+  adminBearerToken?: string | null;
+  adminApiKey?: string | null;
+  privateReadKey?: string | null;
+  mutationKey?: string | null;
+};
 
 export function summarizeSetupSecrets(options: {
   showSecrets: boolean;
@@ -57,7 +66,7 @@ export function summarizeSetupSecrets(options: {
   adminApiKey: string | null;
   privateReadKey: string | null;
   mutationKey: string | null;
-}) {
+}): SetupSecretsSummary {
   if (options.showSecrets) {
     return {
       adminBearerToken: options.adminBearerToken,
@@ -70,15 +79,14 @@ export function summarizeSetupSecrets(options: {
     };
   }
 
+  const redactedLocalState = redactSetupLocalState(createSetupLocalState({
+    adminUiUsername: options.adminUiUsername,
+    adminUiPassword: options.adminUiPassword
+  }));
+
   return {
-    ...redactSetupLocalState(createSetupLocalState({
-      adminBearerToken: options.adminBearerToken,
-      adminUiUsername: options.adminUiUsername,
-      adminUiPassword: options.adminUiPassword,
-      adminApiKey: options.adminApiKey,
-      privateReadKey: options.privateReadKey,
-      mutationKey: options.mutationKey
-    })),
+    adminUiUsername: redactedLocalState.adminUiUsername,
+    adminUiPassword: redactedLocalState.adminUiPassword,
     localStatePath: options.localStatePath
   };
 }

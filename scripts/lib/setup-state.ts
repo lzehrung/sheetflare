@@ -6,12 +6,8 @@ export type SetupLocalState = {
   googleClientEmail?: string;
   apiUrl?: string;
   adminUrl?: string;
-  adminBearerToken?: string;
   adminUiUsername?: string;
   adminUiPassword?: string;
-  adminApiKey?: string;
-  privateReadKey?: string;
-  mutationKey?: string;
 };
 
 type SetupLocalStateInputValue = SetupLocalState[keyof SetupLocalState] | null | undefined;
@@ -19,12 +15,8 @@ const allowedSetupLocalStateKeys = new Set<keyof SetupLocalState>([
   'googleClientEmail',
   'apiUrl',
   'adminUrl',
-  'adminBearerToken',
   'adminUiUsername',
-  'adminUiPassword',
-  'adminApiKey',
-  'privateReadKey',
-  'mutationKey'
+  'adminUiPassword'
 ]);
 
 function isMissingFileError(error: unknown) {
@@ -110,11 +102,7 @@ export function redactSetupLocalState(state: SetupLocalState) {
     googleClientEmail: state.googleClientEmail ?? null,
     apiUrl: state.apiUrl ?? null,
     adminUrl: state.adminUrl ?? null,
-    adminBearerToken: redactValue(state.adminBearerToken),
     adminUiUsername: state.adminUiUsername ?? null,
     adminUiPassword: redactValue(state.adminUiPassword),
-    adminApiKey: redactValue(state.adminApiKey),
-    privateReadKey: redactValue(state.privateReadKey),
-    mutationKey: redactValue(state.mutationKey)
   };
 }

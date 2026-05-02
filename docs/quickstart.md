@@ -107,7 +107,7 @@ Setup writes a checked non-secret config file at repo root:
 sheetflare.setup.json
 ```
 
-When setup applies secrets, deploys, or bootstraps, it creates or updates `.sheetflare.setup.local.json` beside the checked config. That local state file stores deployment URLs and generated credentials so reruns can stay noninteractive. A config-only run may not create it. It is secret material, it is gitignored, and it should stay on the operator machine only.
+When setup applies secrets, deploys, or bootstraps, it creates or updates `.sheetflare.setup.local.json` beside the checked config. That local state file stores deployment URLs and reusable setup metadata so reruns can stay partially noninteractive. It no longer persists bootstrap or API-key credentials; provide those again through the environment or prompts when needed. A config-only run may not create it. It is still gitignored and should stay on the operator machine only.
 
 The generated config is reusable. Common reruns:
 
@@ -122,7 +122,7 @@ npm run setup -- --verify
 Notes for reruns:
 
 - `npm run setup -- --deploy` will redeploy the admin UI only when `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD` are available from local setup state or the environment.
-- `npm run setup -- --smoke` can use either a scoped admin API key or the bootstrap admin credential from local setup state or `SHEETFLARE_ADMIN_CREDENTIAL`.
+- `npm run setup -- --smoke` can use either a scoped admin API key or the bootstrap admin credential from `SHEETFLARE_ADMIN_CREDENTIAL` or an interactive prompt. It no longer reuses those credentials from local setup state.
 - `npm run setup -- --verify` checks the resolved Google credential source, API `/ready`, protected admin root, proxied `/docs`, and Drive watch coverage for the spreadsheets declared in the setup config.
 
 ## 4. What setup still expects from you
@@ -326,6 +326,7 @@ Healthy output should show:
 - `staleReason: "fresh"` after healthy activity or reindex
 - `lastSyncError: null`
 - `validation.status: "ok"` unless the last full sync detected direct sheet drift against configured `fieldRules`
+- `validation.validatedAt` shows when that validation snapshot was last recomputed
 - `externalChange.pending: false` unless a Drive notification has queued a debounced auto-reindex
 
 `lastSyncStartedAt`, `lastSyncCompletedAt`, and `validation` refer to the last full rebuild from Google Sheets, not the most recent successful point mutation.

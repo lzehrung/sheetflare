@@ -607,7 +607,7 @@ export function SelectedProjectPanel({
                         <summary className="disclosureSummary">
                           <div>
                             <h3>Diagnostics</h3>
-                            <p className="muted compact">Timestamps, freshness, validation drift, and last sync error.</p>
+                            <p className="muted compact">Timestamps, freshness, validation drift from the last full sync, and last sync error.</p>
                           </div>
                         </summary>
                         <dl className="facts compactFacts">

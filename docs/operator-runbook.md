@@ -188,6 +188,7 @@ Validation interpretation:
 
 - `validation.status: "ok"`: the last full sync did not detect field-rule drift
 - `validation.status: "warning"`: the last full sync found rows that violate configured `fieldRules`, for example duplicates after normalization or invalid enum/type values
+- `validation.validatedAt`: when that validation snapshot was last recomputed during a full sync
 - `validation.issues`: a capped sample for operator triage, not an exhaustive dump
 - `externalChange.pending`: Drive notification arrived and the debounce window has not completed yet
 - `externalChange.debounceUntil`: when the queued automatic reindex is due

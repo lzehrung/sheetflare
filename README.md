@@ -64,7 +64,7 @@ For the normal setup flow:
 4. Use [docs/deploy.md](./docs/deploy.md) for CI deployment details, manual fallback commands, and Cloudflare token scopes.
 5. Use [docs/operator-runbook.md](./docs/operator-runbook.md) for day-2 operations and failure handling.
 
-`npm run setup` writes `sheetflare.setup.json`, keeps reusable local secret state in `.sheetflare.setup.local.json`, can apply secrets, can deploy, can bootstrap the first project and keys, automatically registers Google Drive watches when deploy or bootstrap provide enough context, and can run smoke validation. The local state file is secret material, stays untracked, and should not be shared. For reruns from an existing config:
+`npm run setup` writes `sheetflare.setup.json`, keeps reusable local setup metadata in `.sheetflare.setup.local.json`, can apply secrets, can deploy, can bootstrap the first project and keys, automatically registers Google Drive watches when deploy or bootstrap provide enough context, and can run smoke validation. The local state file stays untracked, may still contain admin-site basic-auth material, and should not be shared. For reruns from an existing config:
 
 - `npm run setup -- --apply-secrets`
 - `npm run setup -- --deploy`
@@ -127,6 +127,7 @@ Bootstrap and deployment steps are documented in [docs/quickstart.md](./docs/qui
 - `fieldRules` are enforced on API writes. They do not prevent direct Google Sheets edits from introducing invalid or duplicate values later.
 - Normal sheet reads stay string-first. Sheetflare does not infer numbers or booleans from raw cell text; use explicit `fieldRules.type` when a field needs deterministic typed validation or indexed numeric/boolean query behavior.
 - Cache status now includes `validation`, which summarizes field-rule drift found during the last full sync without blocking normal reads.
+- `validation.validatedAt` tells you when that validation snapshot was last recomputed. API writes can make the cache fresh again without recomputing validation drift immediately.
 
 ## Cache And Sync
 
@@ -208,7 +209,7 @@ Performance notes:
   - force reindex
 - Table creation now supports `readOnlyFields` for columns that should stay sheet-managed.
 - Table creation also supports optional `fieldRules` for required, unique, enum, normalize, and type validation.
-- Credential persistence is opt-in for scoped admin API keys only. Bootstrap admin tokens stay session-only.
+- Admin credentials are not stored in the browser. Paste a scoped admin API key or bootstrap token when you need control-plane access.
 - Paste either the bootstrap admin token or a scoped admin API key into the auth panel, but prefer scoped keys for routine admin use.
 
 ## Notes

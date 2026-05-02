@@ -20,7 +20,8 @@ function createCacheStatus(overrides?: Partial<TableCacheStatus>): TableCacheSta
     validation: {
       status: 'ok',
       issueCount: 0,
-      issues: []
+      issues: [],
+      validatedAt: '2026-04-29T18:00:01.000Z'
     },
     externalChange: {
       pending: false,
@@ -48,7 +49,8 @@ describe('cache-health helpers', () => {
                 code: 'UNIQUE',
                 message: 'email must be unique.'
               }
-            ]
+            ],
+            validatedAt: '2026-04-29T18:00:01.000Z'
           }
         })
       )
@@ -80,7 +82,8 @@ describe('cache-health helpers', () => {
         validation: {
           status: 'warning',
           issueCount: 2,
-          issues: []
+          issues: [],
+          validatedAt: '2026-04-29T18:00:01.000Z'
         }
       })
     );
@@ -104,7 +107,8 @@ describe('cache-health helpers', () => {
           validation: {
             status: 'warning',
             issueCount: 1,
-            issues: []
+            issues: [],
+            validatedAt: '2026-04-29T18:00:01.000Z'
           }
         })
       )

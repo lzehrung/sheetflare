@@ -24,14 +24,14 @@ describe('resolveSetupRuntimeState', () => {
     expect(resolveSetupRuntimeState({
       googleClientEmail: 'local-service-account@example.com',
       apiUrl: 'https://local.workers.dev',
-      adminBearerToken: 'bearer.local.secret',
-      privateReadKey: 'sfk_local.read'
+      adminUiUsername: 'operator@example.com'
     })).toMatchObject({
       googleClientEmail: 'local-service-account@example.com',
       namedGoogleCredentials: 'missing',
       apiUrl: 'https://local.workers.dev',
-      adminBearerToken: 'bearer.local.secret',
-      privateReadKey: 'sfk_local.read'
+      adminBearerToken: 'sfk_env.secret',
+      adminUiUsername: 'operator@example.com',
+      privateReadKey: 'sfk_env.read'
     });
   });
 
@@ -95,15 +95,8 @@ describe('summarizeSetupSecrets', () => {
       privateReadKey: 'sfk_read.secret',
       mutationKey: 'sfk_mutation.secret'
     })).toEqual({
-      googleClientEmail: null,
-      apiUrl: null,
-      adminUrl: null,
-      adminBearerToken: 'abcd...lmno',
       adminUiUsername: 'operator@example.com',
       adminUiPassword: 'supe...cret',
-      adminApiKey: 'sfk_...cret',
-      privateReadKey: 'sfk_...cret',
-      mutationKey: 'sfk_...cret',
       localStatePath: 'E:/repo/.sheetflare.setup.local.json'
     });
   });
@@ -140,16 +133,22 @@ describe('summarizeSetupSecrets', () => {
       privateReadKey: 'sfk_read.secret',
       mutationKey: 'sfk_mutation.secret'
     })).toEqual({
-      googleClientEmail: null,
-      apiUrl: null,
-      adminUrl: null,
-      adminBearerToken: 'abcd...lmno',
       adminUiUsername: 'operator@example.com',
       adminUiPassword: 'supe...cret',
-      adminApiKey: 'sfk_...cret',
-      privateReadKey: 'sfk_...cret',
-      mutationKey: 'sfk_...cret',
       localStatePath: null
     });
+  });
+
+  it('does not include runtime api keys in the default terminal summary', () => {
+    expect(summarizeSetupSecrets({
+      showSecrets: false,
+      localStatePath: 'E:/repo/.sheetflare.setup.local.json',
+      adminBearerToken: 'bearer.secret',
+      adminUiUsername: 'operator@example.com',
+      adminUiPassword: 'supersecret',
+      adminApiKey: 'sfk_admin.secret',
+      privateReadKey: 'sfk_read.secret',
+      mutationKey: 'sfk_mutation.secret'
+    })).not.toHaveProperty('adminBearerToken');
   });
 });

@@ -21,6 +21,10 @@ function formatValidationIssues(cache: TableCacheStatus) {
     .join('; ');
 }
 
+function formatValidationTimestamp(cache: TableCacheStatus) {
+  return formatTimestamp(cache.validation.validatedAt);
+}
+
 function formatExternalChangeSummary(cache: TableCacheStatus) {
   if (!cache.externalChange.pending) {
     return cache.externalChange.lastAutoReindexAt
@@ -45,6 +49,10 @@ export function CacheStatusSummary({ cache }: CacheStatusSummaryProps) {
       <div>
         <dt>Validation</dt>
         <dd>{formatValidationSummary(cache)}</dd>
+      </div>
+      <div>
+        <dt>Validation Snapshot</dt>
+        <dd>{formatValidationTimestamp(cache)}</dd>
       </div>
       <div>
         <dt>External Change</dt>

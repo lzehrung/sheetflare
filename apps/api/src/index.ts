@@ -84,6 +84,7 @@ type AppVariables = {
     credential: string;
     record: ApiKeyPrincipal | null;
   };
+  verifiedApiKeyRateLimitApplied?: boolean;
   rateLimit?: {
     limit: number;
     remaining: number;
@@ -109,7 +110,7 @@ const healthResponseSchema = z.object({
 });
 
 const readyResponseSchema = z.object({
-  ok: z.literal(true),
+  ok: z.boolean(),
   service: z.string(),
   checks: z.object({
     controlPlane: z.literal('ok'),
@@ -286,6 +287,28 @@ const apiKeyTouchIntervalMs = 5 * 60 * 1000;
 const maxRecentApiKeyTouches = 10_000;
 const recentApiKeyTouches = new Map<string, number>();
 
+function pruneRecentApiKeyTouches(nowMs: number) {
+  if (recentApiKeyTouches.size < maxRecentApiKeyTouches) {
+    return;
+  }
+
+  const cutoffMs = nowMs - apiKeyTouchIntervalMs;
+  for (const [cachedApiKeyId, cachedTouchedAtMs] of recentApiKeyTouches) {
+    if (cachedTouchedAtMs < cutoffMs) {
+      recentApiKeyTouches.delete(cachedApiKeyId);
+    }
+  }
+
+  while (recentApiKeyTouches.size >= maxRecentApiKeyTouches) {
+    const oldestEntry = recentApiKeyTouches.entries().next().value;
+    if (!oldestEntry) {
+      break;
+    }
+
+    recentApiKeyTouches.delete(oldestEntry[0]);
+  }
+}
+
 function getControlPlaneStub(env: Env) {
   return env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
 }
@@ -333,7 +356,7 @@ async function verifyApiKeyCredential(env: Env, credential: string): Promise<Api
   const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
     type: 'control.api-key.verify',
     apiKeyId: parsed.apiKeyId,
-    hash: await hashApiKeySecret(parsed.secret)
+    hash: await hashCredentialMaterial(parsed.secret)
   });
 
   return (response as {
@@ -484,11 +507,6 @@ async function resolveRateLimitPrincipal(c: AppContext) {
     if (bootstrapAdminCredential && credential === bootstrapAdminCredential) {
       return 'bootstrap-admin';
     }
-
-    const record = await verifyApiKeyCredentialCached(c, credential);
-    if (record) {
-      return `api-key:${record.id}`;
-    }
   }
 
   return getRateLimitPrincipal(c);
@@ -538,8 +556,8 @@ async function enforceRateLimit(c: AppContext) {
   }
 }
 
-async function hashApiKeySecret(secret: string) {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
+async function hashCredentialMaterial(value: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
 }
 
@@ -550,15 +568,7 @@ async function touchApiKeyIfNeeded(env: Env, apiKeyId: string) {
     return;
   }
 
-  if (recentApiKeyTouches.size >= maxRecentApiKeyTouches) {
-    const cutoffMs = nowMs - apiKeyTouchIntervalMs;
-    for (const [cachedApiKeyId, cachedTouchedAtMs] of recentApiKeyTouches) {
-      if (cachedTouchedAtMs < cutoffMs) {
-        recentApiKeyTouches.delete(cachedApiKeyId);
-      }
-    }
-  }
-
+  pruneRecentApiKeyTouches(nowMs);
   recentApiKeyTouches.set(apiKeyId, nowMs);
   await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
     type: 'control.api-key.touch',
@@ -569,6 +579,57 @@ async function touchApiKeyIfNeeded(env: Env, apiKeyId: string) {
 
 function getRequestPrincipal(c: AppContext) {
   return c.get('authPrincipal') ?? 'anonymous';
+}
+
+async function enforceVerifiedApiKeyRateLimit(c: AppContext, apiKeyId: string) {
+  if (c.get('verifiedApiKeyRateLimitApplied')) {
+    return;
+  }
+
+  const config = getRateLimitConfiguration(c.env);
+  if (config.maxRequests <= 0) {
+    c.set('verifiedApiKeyRateLimitApplied', true);
+    return;
+  }
+
+  const existingContext = c.get('rateLimitContext');
+  const routeFamily = existingContext?.routeFamily ?? getRateLimitRouteFamily(c.req.path);
+  const operationKey = existingContext?.operationKey ?? getRateLimitOperationKey(c.req.path, c.req.method);
+  const principal = `api-key:${apiKeyId}`;
+  const response = await doRpc<RateLimitDoResponse>(getRateLimitStub(c.env, `${routeFamily}:${principal}`), {
+    type: 'rate-limit.check',
+    key: operationKey,
+    limit: config.maxRequests,
+    windowSeconds: config.windowSeconds
+  });
+
+  const result = (response as {
+    type: 'rate-limit.check.result';
+    result: { allowed: boolean; remaining: number; resetAtMs: number };
+  }).result;
+
+  c.set('rateLimit', {
+    limit: config.maxRequests,
+    remaining: result.remaining,
+    resetAtMs: result.resetAtMs
+  });
+  c.set('rateLimitContext', {
+    principal,
+    routeFamily,
+    operationKey
+  });
+  c.set('verifiedApiKeyRateLimitApplied', true);
+
+  if (!result.allowed) {
+    throw new TooManyRequestsError('Rate limit exceeded.', {
+      principal,
+      routeFamily,
+      operationKey,
+      maxRequests: config.maxRequests,
+      windowSeconds: config.windowSeconds,
+      resetAt: new Date(result.resetAtMs).toISOString()
+    });
+  }
 }
 
 function getBootstrapAdminCredential(env: Env) {
@@ -662,6 +723,7 @@ async function authenticateRequest(c: AppContext): Promise<AuthContext> {
     throw new UnauthorizedError('Invalid API key.');
   }
 
+  await enforceVerifiedApiKeyRateLimit(c, record.id);
   c.set('authPrincipal', `api-key:${record.id}`);
   await touchApiKeyIfNeeded(c.env, record.id);
 
@@ -777,7 +839,26 @@ function parsePathParams<TSchema extends z.ZodType>(c: { req: { param(): Record<
 }
 
 async function parseJsonBody<TSchema extends z.ZodType>(c: { req: { json(): Promise<unknown> } }, schema: TSchema): Promise<z.infer<TSchema>> {
-  return schema.parse(await c.req.json());
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    throw new BadRequestError('Malformed JSON in request body.');
+  }
+
+  return schema.parse(body);
+}
+
+function normalizeRequestError(error: unknown) {
+  if (error instanceof AppError) {
+    return error;
+  }
+
+  if (error instanceof Error && error.message.startsWith('Malformed JSON in request body')) {
+    return new BadRequestError('Malformed JSON in request body.');
+  }
+
+  return error;
 }
 
 function parseListRowsQuery(c: { req: { query(name: string): string | undefined } }): ListRowsQuery {
@@ -822,6 +903,10 @@ const readyRoute = createRoute({
   responses: {
     200: {
       description: 'Readiness check',
+      content: jsonContent(readyResponseSchema)
+    },
+    503: {
+      description: 'Readiness check failed',
       content: jsonContent(readyResponseSchema)
     }
   }
@@ -1328,6 +1413,7 @@ function createApp() {
   });
 
   app.onError((error, c) => {
+    const normalizedError = normalizeRequestError(error);
     const rateLimitContext = c.get('rateLimitContext');
     const rateLimit = c.get('rateLimit');
     console.error(
@@ -1343,14 +1429,14 @@ function createApp() {
         rateLimitLimit: rateLimit?.limit ?? null,
         rateLimitRemaining: rateLimit?.remaining ?? null,
         rateLimitResetAt: rateLimit ? new Date(rateLimit.resetAtMs).toISOString() : null,
-        errorName: error instanceof Error ? error.name : 'UnknownError',
-        errorMessage: error instanceof Error ? error.message : String(error),
-        errorDetails: error instanceof AppError ? error.details ?? null : null,
-        errorStack: error instanceof Error ? error.stack ?? null : null
+        errorName: normalizedError instanceof Error ? normalizedError.name : 'UnknownError',
+        errorMessage: normalizedError instanceof Error ? normalizedError.message : String(normalizedError),
+        errorDetails: normalizedError instanceof AppError ? normalizedError.details ?? null : null,
+        errorStack: normalizedError instanceof Error ? normalizedError.stack ?? null : null
       })
     );
-    const rpcErrorResponse = error instanceof DurableRpcError ? parseDurableRpcErrorResponse(error) : null;
-    const { status, body } = rpcErrorResponse ?? toErrorResponse(error);
+    const rpcErrorResponse = normalizedError instanceof DurableRpcError ? parseDurableRpcErrorResponse(normalizedError) : null;
+    const { status, body } = rpcErrorResponse ?? toErrorResponse(normalizedError);
     const response = new Response(JSON.stringify(body), {
       status,
       headers: {
@@ -1386,6 +1472,7 @@ function createApp() {
 
     const hasDefaultGoogleCredential = hasConfiguredDefaultGoogleCredential(c.env);
     const namedGoogleCredentials = getNamedGoogleCredentialsStatus(c.env);
+    const hasAnyGoogleCredential = hasDefaultGoogleCredential || namedGoogleCredentials === 'configured';
     const hasDriveWebhookSecret = Boolean(c.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim());
     const hasBootstrapAdmin = Boolean(c.env.ADMIN_BEARER_TOKEN?.trim());
     const notes: string[] = [];
@@ -1409,7 +1496,7 @@ function createApp() {
     notes.push('This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.');
 
     return c.json({
-      ok: true,
+      ok: hasAnyGoogleCredential,
       service: 'sheetflare-api',
       checks: {
         controlPlane: 'ok',
@@ -1420,7 +1507,7 @@ function createApp() {
         bootstrapAdmin: hasBootstrapAdmin ? 'configured' : 'missing'
       },
       notes
-    });
+    }, hasAnyGoogleCredential ? 200 : 503);
   });
 
   app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', {
@@ -1904,5 +1991,22 @@ function createApp() {
 
 const app = createApp();
 
-export { ControlPlaneDO, ProjectDO, TableDO, RateLimitDO, createApp };
+function resetRecentApiKeyTouchesForTests() {
+  recentApiKeyTouches.clear();
+}
+
+function getRecentApiKeyTouchCacheSizeForTests() {
+  return recentApiKeyTouches.size;
+}
+
+export {
+  ControlPlaneDO,
+  ProjectDO,
+  TableDO,
+  RateLimitDO,
+  createApp,
+  touchApiKeyIfNeeded as __touchApiKeyIfNeededForTests,
+  resetRecentApiKeyTouchesForTests as __resetRecentApiKeyTouchesForTests,
+  getRecentApiKeyTouchCacheSizeForTests as __getRecentApiKeyTouchCacheSizeForTests
+};
 export default app;

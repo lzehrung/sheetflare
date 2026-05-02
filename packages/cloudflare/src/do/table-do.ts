@@ -27,6 +27,7 @@ import {
   compareStableStrings,
   compareQueryValues,
   compareRangeQueryValues,
+  coerceRowFilter,
   coerceFieldRuleValue,
   decodeQueryCursor,
   encodeQueryCursor,
@@ -229,7 +230,8 @@ function buildCacheConfigSignature(config: {
 const emptyValidationSummary: TableValidationSummary = {
   status: 'ok',
   issueCount: 0,
-  issues: []
+  issues: [],
+  validatedAt: null
 };
 
 function getProjectStub(env: CloudflareEnv, projectSlug: string) {
@@ -857,7 +859,6 @@ export class TableDO {
       const rows = snapshot.rows;
       assertUniqueManagedRowIds(rows, config.idColumn);
       const schema = inferTableSchema(headers, rows);
-      const validation = this.buildValidationSummary(rows, config);
       this.clearCacheTables('staging');
 
       for (const row of rows) {
@@ -869,6 +870,7 @@ export class TableDO {
       this.promoteStagingCache();
 
       const completedAt = new Date().toISOString();
+      const validation = this.buildValidationSummary(rows, config, completedAt);
       this.setMeta('headers', JSON.stringify(headers));
       this.setMeta('schema', JSON.stringify(schema));
       this.setMeta('config.signature', buildCacheConfigSignature(config));
@@ -1188,7 +1190,13 @@ export class TableDO {
     }
 
     try {
-      return JSON.parse(raw) as TableValidationSummary;
+      const parsed = JSON.parse(raw) as Partial<TableValidationSummary>;
+      return {
+        status: parsed.status === 'warning' ? 'warning' : 'ok',
+        issueCount: typeof parsed.issueCount === 'number' ? parsed.issueCount : 0,
+        issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+        validatedAt: parsed.validatedAt ?? null
+      };
     } catch {
       return emptyValidationSummary;
     }
@@ -1291,11 +1299,6 @@ export class TableDO {
     const completedAt = new Date().toISOString();
     this.setMeta('headers', JSON.stringify(headers));
     this.setMeta('config.signature', buildCacheConfigSignature(config));
-    if (Object.keys(config.fieldRules).length === 0) {
-      this.setMeta('validation.summary', JSON.stringify(emptyValidationSummary));
-    } else {
-      this.setMeta('validation.summary', JSON.stringify(this.buildValidationSummary(this.listCachedRows(), config)));
-    }
     this.setSyncMeta({
       status: 'ready',
       rowCount: this.countCachedRows(),
@@ -1305,9 +1308,16 @@ export class TableDO {
     });
   }
 
-  private buildValidationSummary(rows: readonly RowEnvelope[], config: ResolvedTableConfig): TableValidationSummary {
+  private buildValidationSummary(
+    rows: readonly RowEnvelope[],
+    config: ResolvedTableConfig,
+    validatedAt: string
+  ): TableValidationSummary {
     if (Object.keys(config.fieldRules).length === 0) {
-      return emptyValidationSummary;
+      return {
+        ...emptyValidationSummary,
+        validatedAt
+      };
     }
 
     const maxIssues = 10;
@@ -1366,11 +1376,15 @@ export class TableDO {
     }
 
     return issueCount === 0
-      ? emptyValidationSummary
+      ? {
+          ...emptyValidationSummary,
+          validatedAt
+        }
       : {
           status: 'warning',
           issueCount,
-          issues
+          issues,
+          validatedAt
         };
   }
 
@@ -1500,7 +1514,7 @@ export class TableDO {
   }
 
   private queryCachedRows(config: GoogleSheetTableConfig, rawQuery: ListRowsQuery) {
-    const query = normalizeListQuery(rawQuery);
+    const query = this.normalizeQueryForConfig(config, rawQuery);
     const fingerprint = getListQueryFingerprint(query);
     const cursor = decodeQueryCursor(query.cursor, fingerprint, query.sort);
     const filterPlan = buildFilterSql(query.filter, config.indexedFields);
@@ -1866,6 +1880,18 @@ export class TableDO {
     if (value === undefined) return null;
     if (Array.isArray(value)) return JSON.stringify(value);
     return value;
+  }
+
+  private normalizeQueryForConfig(config: GoogleSheetTableConfig, rawQuery: ListRowsQuery) {
+    const query = normalizeListQuery(rawQuery);
+    if (!query.filter) {
+      return query;
+    }
+
+    return {
+      ...query,
+      filter: coerceRowFilter(query.filter, config.fieldRules)
+    };
   }
 
   private matchesFilter(

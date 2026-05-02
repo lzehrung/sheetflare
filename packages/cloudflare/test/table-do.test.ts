@@ -2695,9 +2695,8 @@ describe('TableDO', () => {
         };
       };
     }).result.data.validation).toMatchObject({
-      status: 'ok',
-      issueCount: 0,
-      issues: []
+      status: 'warning',
+      issueCount: 1
     });
   });
 
@@ -3360,19 +3359,39 @@ describe('TableDO', () => {
 
     expect((cacheStatusBeforeMutation as {
       type: 'table.cache.get.result';
-      result: { data: { lastSyncStartedAt: string | null; lastSyncCompletedAt: string | null } };
+      result: {
+        data: {
+          lastSyncStartedAt: string | null;
+          lastSyncCompletedAt: string | null;
+          validation: { validatedAt: string | null };
+        };
+      };
     }).result.data).toMatchObject({
       lastSyncStartedAt: '2026-04-26T12:00:00.000Z',
-      lastSyncCompletedAt: '2026-04-26T12:00:00.000Z'
+      lastSyncCompletedAt: '2026-04-26T12:00:00.000Z',
+      validation: {
+        validatedAt: '2026-04-26T12:00:00.000Z'
+      }
     });
     expect((cacheStatusAfterMutation as {
       type: 'table.cache.get.result';
-      result: { data: { lastSyncStartedAt: string | null; lastSyncCompletedAt: string | null; stale: boolean; rowCount: number } };
+      result: {
+        data: {
+          lastSyncStartedAt: string | null;
+          lastSyncCompletedAt: string | null;
+          stale: boolean;
+          rowCount: number;
+          validation: { validatedAt: string | null };
+        };
+      };
     }).result.data).toMatchObject({
       lastSyncStartedAt: '2026-04-26T12:00:00.000Z',
       lastSyncCompletedAt: '2026-04-26T12:10:00.000Z',
       stale: false,
-      rowCount: 1
+      rowCount: 1,
+      validation: {
+        validatedAt: '2026-04-26T12:00:00.000Z'
+      }
     });
 
     vi.useRealTimers();
@@ -4248,6 +4267,230 @@ describe('TableDO', () => {
     );
 
     expect((response as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-2', 'row-3', 'row-4']);
+  });
+
+  it('does not rebuild the full validation summary again after a successful mutation', async () => {
+    const env = createTestEnv();
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Grace']
+      ],
+      requestedRanges: []
+    };
+
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const validationSpy = vi.spyOn(
+      TableDO.prototype as unknown as {
+        buildValidationSummary: (rows: readonly unknown[], config: unknown) => unknown;
+      },
+      'buildValidationSummary'
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          fieldRules: {
+            name: {
+              required: true
+            }
+          },
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.row.update',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        rowId: 'row-1',
+        input: {
+          values: {
+            name: 'Adele'
+          }
+        }
+      }
+    );
+
+    expect((response as {
+      type: 'table.row.update.result';
+      result: { data: { values: { name: string } } };
+    }).result.data.values.name).toBe('Adele');
+    expect(validationSpy).toHaveBeenCalledTimes(1);
+    validationSpy.mockRestore();
+  });
+
+  it('round-trips typed numeric field values through indexed string filters', async () => {
+    const env = createTestEnv();
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'score'],
+        ['row-1', '10'],
+        ['row-2', '11'],
+        ['row-3', '']
+      ],
+      requestedRanges: []
+    };
+
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['score'],
+          fieldRules: {
+            score: {
+              type: 'number'
+            }
+          },
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const allRowsResponse = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          sort: 'rowNumber:asc'
+        }
+      }
+    );
+
+    const returnedScore = (allRowsResponse as {
+      type: 'table.rows.list.result';
+      result: { data: Array<{ values: { score: string | null } }> };
+    }).result.data[0]?.values.score;
+
+    expect(returnedScore).toBe('10');
+
+    const filteredResponse = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          sort: 'rowNumber:asc',
+          filter: {
+            score: {
+              eq: returnedScore
+            }
+          }
+        }
+      }
+    );
+
+    expect((filteredResponse as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-1']);
+  });
+
+  it('applies typed string filters consistently when another predicate forces a full scan', async () => {
+    const env = createTestEnv();
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name', 'score'],
+        ['row-1', 'Ada', '10'],
+        ['row-2', 'Grace', '11'],
+        ['row-3', 'Bob', '10']
+      ],
+      requestedRanges: []
+    };
+
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['name', 'score'],
+          fieldRules: {
+            score: {
+              type: 'number'
+            }
+          },
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          sort: 'rowNumber:asc',
+          filter: {
+            name: {
+              contains: 'a'
+            },
+            score: {
+              eq: '10'
+            }
+          }
+        }
+      }
+    );
+
+    expect((response as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-1']);
   });
 
   it('uses the configured full-scan threshold override when rejecting scan-heavy queries', async () => {
