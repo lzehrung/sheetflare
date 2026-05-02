@@ -10,7 +10,7 @@ import {
   UnauthorizedError,
   toErrorResponse
 } from '@sheetflare/contracts';
-import type { z } from 'zod';
+import { ZodError, type z } from 'zod';
 
 export interface DurableRpcResponseLike {
   ok: boolean;
@@ -35,7 +35,7 @@ export class DurableRpcError extends Error {
   }
 }
 
-function createAppErrorFromBody(error: { code: string; message: string; details?: unknown }) {
+function createAppErrorFromBody(error: { code: string; message: string; details?: unknown }, status: number) {
   switch (error.code) {
     case 'BAD_GATEWAY':
       return new BadGatewayError(error.message, error.details);
@@ -54,11 +54,11 @@ function createAppErrorFromBody(error: { code: string; message: string; details?
     case 'UNAUTHORIZED':
       return new UnauthorizedError(error.message, error.details);
     default:
-      return new AppError(error.message, error.code, 500, error.details);
+      return new AppError(error.message, error.code, status, error.details);
   }
 }
 
-function parseDurableRpcError(responseText: string) {
+function parseDurableRpcError(responseText: string, status: number) {
   try {
     const parsed = JSON.parse(responseText) as {
       error?: {
@@ -73,11 +73,14 @@ function parseDurableRpcError(responseText: string) {
       typeof parsed.error.code === 'string' &&
       typeof parsed.error.message === 'string'
     ) {
-      return createAppErrorFromBody({
-        code: parsed.error.code,
-        message: parsed.error.message,
-        details: parsed.error.details
-      });
+      return createAppErrorFromBody(
+        {
+          code: parsed.error.code,
+          message: parsed.error.message,
+          details: parsed.error.details
+        },
+        status
+      );
     }
   } catch {
     return null;
@@ -100,7 +103,7 @@ export async function doRpc<TResponse>(
 
   if (!response.ok) {
     const responseText = await response.text();
-    const parsedError = parseDurableRpcError(responseText);
+    const parsedError = parseDurableRpcError(responseText, response.status);
     if (parsedError) {
       throw parsedError;
     }
@@ -130,6 +133,17 @@ export async function parseDurableObjectRpcRequest<TRequest>(
 }
 
 export function durableObjectErrorResponse(error: unknown): Response {
+  if (!(error instanceof AppError) && !(error instanceof ZodError)) {
+    console.error(
+      JSON.stringify({
+        event: 'durable_object.error',
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+        errorMessage: error instanceof Error ? error.message : String(error),
+        errorStack: error instanceof Error ? error.stack ?? null : null
+      })
+    );
+  }
+
   const { status, body } = toErrorResponse(error);
   return Response.json(body, { status });
 }

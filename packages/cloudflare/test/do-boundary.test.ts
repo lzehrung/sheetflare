@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { ProjectDO, TableDO, type CloudflareEnv } from '../src';
+import { describe, expect, it, vi } from 'vitest';
+import { doRpc, durableObjectErrorResponse, ProjectDO, TableDO, type CloudflareEnv } from '../src';
 import { createDurableObjectNamespace } from './support/do-harness';
 
 function createEnv(): CloudflareEnv {
@@ -15,6 +15,52 @@ function createEnv(): CloudflareEnv {
 }
 
 describe('Durable Object RPC boundaries', () => {
+  it('preserves the original status for unknown structured RPC error codes', async () => {
+    const stub = {
+      async fetch() {
+        return Response.json({
+          error: {
+            code: 'LOCKED',
+            message: 'Resource is locked.',
+            details: {
+              retryAfterSeconds: 30
+            }
+          }
+        }, { status: 423 });
+      }
+    };
+
+    await expect(doRpc(stub, { type: 'test' })).rejects.toMatchObject({
+      name: 'AppError',
+      code: 'LOCKED',
+      status: 423,
+      details: {
+        retryAfterSeconds: 30
+      }
+    });
+  });
+
+  it('logs unexpected Durable Object errors before returning the generic boundary response', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const response = durableObjectErrorResponse(new Error('database password leaked'));
+
+      expect(response.status).toBe(500);
+      await expect(response.json()).resolves.toEqual({
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: 'Internal server error.',
+          details: null
+        }
+      });
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"event":"durable_object.error"'));
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"errorMessage":"database password leaked"'));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it('serializes ProjectDO contract errors as JSON error responses', async () => {
     const env = createEnv();
     const response = await env.PROJECT_DO
