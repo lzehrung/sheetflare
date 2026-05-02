@@ -65,7 +65,7 @@ Treat `ADMIN_BEARER_TOKEN` as break-glass only.
 For routine scripts, set `SHEETFLARE_ADMIN_CREDENTIAL` to the scoped admin API key instead.
 Project-scoped admin keys with `admin:keys` can create keys only for their own project and only with scopes the caller already has.
 
-Project deletion is destructive for Sheetflare-managed control-plane state only. It clears configured table caches before removing project metadata, revokes API keys scoped to that project, and stops Google Drive watches for spreadsheets no remaining project uses. It does not delete the upstream Google spreadsheet. Delete requests are idempotent, so retrying an already-completed delete returns success.
+Project deletion is destructive for Sheetflare-managed control-plane state only. It clears configured table caches before removing project metadata, revokes API keys scoped to that project, and stops Google Drive watches for spreadsheets no remaining projects use. It does not delete the upstream Google spreadsheet. Delete requests are idempotent, so retrying an already-completed delete returns success.
 
 For Google credential setup details, use [google-service-accounts.md](./google-service-accounts.md).
 
