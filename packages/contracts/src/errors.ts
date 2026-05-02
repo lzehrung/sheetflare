@@ -96,13 +96,12 @@ export function toErrorResponse(error: unknown) {
     };
   }
 
-  const message = error instanceof Error ? error.message : 'Unexpected error';
   return {
     status: 500,
     body: {
       error: {
         code: 'INTERNAL_ERROR',
-        message,
+        message: 'Internal server error.',
         details: null
       }
     }

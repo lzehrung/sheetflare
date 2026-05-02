@@ -1319,7 +1319,7 @@ describe('api routes', () => {
     expect(await response.json()).toEqual({
       error: {
         code: 'INTERNAL_ERROR',
-        message: 'Durable Object RPC failed with 500.',
+        message: 'Internal server error.',
         details: null
       }
     });
