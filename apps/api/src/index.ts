@@ -786,6 +786,16 @@ function assertProjectScope(auth: AuthContext, scope: ApiScope, projectSlug: str
   }
 }
 
+function assertCredentialProjectBoundary(auth: AuthContext, projectSlug: string) {
+  if (auth.kind !== 'api-key') {
+    return;
+  }
+
+  if (auth.record.projectSlug && auth.record.projectSlug !== projectSlug) {
+    throw new UnauthorizedError();
+  }
+}
+
 async function loadProject(c: { env: Env }, projectSlug: string) {
   const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, projectSlug), {
     type: 'project.get',
@@ -1664,6 +1674,7 @@ function createApp() {
   app.openapi(listRowsRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
+    assertCredentialProjectBoundary(auth, params.project);
     if (auth.kind === 'anonymous') {
       await requirePublicReadProject(c, params.project);
     }
@@ -1687,6 +1698,7 @@ function createApp() {
   app.openapi(getSchemaRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
+    assertCredentialProjectBoundary(auth, params.project);
     if (auth.kind === 'anonymous') {
       await requirePublicReadProject(c, params.project);
     }
@@ -1857,6 +1869,7 @@ function createApp() {
   app.openapi(getRowRoute, async (c) => {
     const params = parsePathParams(c, rowParamsSchema);
     const auth = await authenticateRequest(c);
+    assertCredentialProjectBoundary(auth, params.project);
     if (auth.kind === 'anonymous') {
       await requirePublicReadProject(c, params.project);
     }

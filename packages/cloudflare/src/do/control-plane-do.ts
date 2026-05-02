@@ -1,4 +1,4 @@
-import { AppError, ServiceUnavailableError, toErrorResponse } from '@sheetflare/contracts';
+import { AppError, ServiceUnavailableError } from '@sheetflare/contracts';
 import type {
   AdminListSpreadsheetWatchRetryAdviceResult,
   AdminListSpreadsheetWatchesResult,
@@ -16,9 +16,10 @@ import type {
   TableDoResponse,
   TableRequestContext
 } from '@sheetflare/contracts';
+import { controlPlaneDoRequestSchema } from '@sheetflare/contracts';
 import { GoogleSheetsService } from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from '../types';
-import { doRpc } from '../rpc';
+import { doRpc, durableObjectErrorResponse, parseDurableObjectRpcRequest } from '../rpc';
 import { resolveGoogleCredential } from '../google-credentials';
 
 type RegistryRow = {
@@ -202,12 +203,11 @@ export class ControlPlaneDO {
     }
 
     try {
-      const body = (await request.json()) as ControlPlaneDoRequest;
+      const body = await parseDurableObjectRpcRequest(request, controlPlaneDoRequestSchema);
       const result = await this.handle(body);
       return Response.json(result);
     } catch (error) {
-      const { status, body } = toErrorResponse(error);
-      return Response.json(body, { status });
+      return durableObjectErrorResponse(error);
     }
   }
 

@@ -12,6 +12,7 @@ import {
   type RowEnvelope,
   type RowRecord,
   type TableCacheStatus,
+  tableDoRequestSchema,
   type TableDoRequest,
   type TableRequestContext,
   type TableDoResponse,
@@ -49,7 +50,7 @@ import {
 } from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from '../types';
 import { getMaxFullScanRows } from '../config';
-import { doRpc } from '../rpc';
+import { doRpc, durableObjectErrorResponse, parseDurableObjectRpcRequest } from '../rpc';
 import { resolveGoogleCredential } from '../google-credentials';
 
 type TableMetaRow = {
@@ -369,9 +370,13 @@ export class TableDO {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
-    const body = (await request.json()) as TableDoRequest;
-    const result = await this.handle(body);
-    return Response.json(result);
+    try {
+      const body = await parseDurableObjectRpcRequest(request, tableDoRequestSchema);
+      const result = await this.handle(body);
+      return Response.json(result);
+    } catch (error) {
+      return durableObjectErrorResponse(error);
+    }
   }
 
   private async handle(body: TableDoRequest): Promise<TableDoResponse> {

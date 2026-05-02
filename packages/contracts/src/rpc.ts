@@ -1,46 +1,264 @@
+import { z } from 'zod';
 import type {
   AdminRegisterSpreadsheetWatchesResult,
-  AdminStopSpreadsheetWatchesInput,
   AdminListSpreadsheetWatchRetryAdviceResult,
   AdminListSpreadsheetWatchesResult,
-  AdminCreateApiKeyInput,
   AdminCreateApiKeyResult,
   AdminGetProjectResult,
   AdminInspectSpreadsheetTabResult,
   AdminListApiKeysResult,
   AdminListProjectsResult,
   AdminListSpreadsheetTabsResult,
-  CreateProjectInput,
-  CreateRowInput,
-  CreateTableInput,
   DeleteRowResult,
   GetTableCacheStatusResult,
   GetRowResult,
   GetSchemaResult,
   RefreshTableCacheResult,
   ReindexTableResult,
-  UpdateRowInput,
   UpdateRowResult,
   UpsertTableResult
 } from './api';
+import {
+  adminCreateApiKeyInputSchema,
+  adminStopSpreadsheetWatchesInputSchema,
+  createProjectInputSchema,
+  createRowInputSchema,
+  updateRowInputSchema
+} from './api';
 import type { ApiKeyPrincipal } from './auth';
+import { apiKeyIdSchema, projectSlugSchema, rowIdSchema, tableSlugSchema } from './ids';
 import type { ProjectConfig, TableConfig } from './project';
-import type { ListRowsQuery, ListRowsResult } from './table';
+import { fieldRulesSchema, maxIndexedFieldCount, tableConfigSchema } from './project';
+import type { ListRowsResult } from './table';
+import { listRowsQuerySchema } from './table';
 
-export type ControlPlaneDoRequest =
-  | { type: 'control.projects.list' }
-  | { type: 'control.project.upsert'; summary: { slug: string; name: string; spreadsheetId: string; googleCredentialRef: string; tableCount: number; updatedAt: string } }
-  | { type: 'control.spreadsheet-watches.list' }
-  | { type: 'control.spreadsheet-watches.retry-advice.list' }
-  | { type: 'control.spreadsheet-watches.register'; webhookUrl: string; webhookToken: string; debounceSeconds: number; expirationMs?: number | null }
-  | { type: 'control.spreadsheet-watches.stop'; input: AdminStopSpreadsheetWatchesInput }
-  | { type: 'control.spreadsheet-watch.notify'; channelId: string; resourceId: string; resourceState: string; messageNumber: string | null; changedAt: string; channelExpiration: string | null }
-  | { type: 'control.api-key.create'; input: AdminCreateApiKeyInput }
-  | { type: 'control.api-keys.list'; projectSlug?: string | null }
-  | { type: 'control.api-key.get'; apiKeyId: string }
-  | { type: 'control.api-key.verify'; apiKeyId: string; hash: string }
-  | { type: 'control.api-key.touch'; apiKeyId: string; usedAt: string }
-  | { type: 'control.api-key.revoke'; apiKeyId: string; revokedAt: string };
+export const tableRequestContextSchema = z.object({
+  requestId: z.string().min(1),
+  route: z.string().min(1),
+  principal: z.string().min(1),
+  syncSource: z.enum(['request', 'external-change']).optional()
+});
+
+export const resolvedTableConfigSnapshotSchema = tableConfigSchema.extend({
+  spreadsheetId: z.string().min(1),
+  googleCredentialRef: z.string().min(1)
+});
+
+const createTableRpcInputSchema = z.object({
+  tableSlug: tableSlugSchema,
+  sheetTabName: z.string().min(1),
+  sheetGid: z.number().int().nonnegative().optional(),
+  idColumn: z.string().min(1).optional(),
+  indexedFields: z.array(z.string().min(1)).max(maxIndexedFieldCount).optional(),
+  readOnlyFields: z.array(z.string().min(1)).optional(),
+  fieldRules: fieldRulesSchema.optional(),
+  headerRow: z.number().int().positive().optional(),
+  dataStartRow: z.number().int().positive().optional(),
+  readEnabled: z.boolean().optional(),
+  createEnabled: z.boolean().optional(),
+  updateEnabled: z.boolean().optional(),
+  deleteEnabled: z.boolean().optional(),
+  cacheTtlSeconds: z.number().int().nonnegative().optional()
+});
+
+export const controlPlaneDoRequestSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('control.projects.list') }),
+  z.object({
+    type: z.literal('control.project.upsert'),
+    summary: z.object({
+      slug: projectSlugSchema,
+      name: z.string().min(1),
+      spreadsheetId: z.string().min(1),
+      googleCredentialRef: z.string().min(1),
+      tableCount: z.number().int().nonnegative(),
+      updatedAt: z.string().datetime()
+    })
+  }),
+  z.object({ type: z.literal('control.spreadsheet-watches.list') }),
+  z.object({ type: z.literal('control.spreadsheet-watches.retry-advice.list') }),
+  z.object({
+    type: z.literal('control.spreadsheet-watches.register'),
+    webhookUrl: z.string().url(),
+    webhookToken: z.string().min(1),
+    debounceSeconds: z.number().int().positive(),
+    expirationMs: z.number().int().positive().nullable().optional()
+  }),
+  z.object({
+    type: z.literal('control.spreadsheet-watches.stop'),
+    input: adminStopSpreadsheetWatchesInputSchema
+  }),
+  z.object({
+    type: z.literal('control.spreadsheet-watch.notify'),
+    channelId: z.string().min(1),
+    resourceId: z.string().min(1),
+    resourceState: z.string().min(1),
+    messageNumber: z.string().nullable(),
+    changedAt: z.string().datetime(),
+    channelExpiration: z.string().nullable()
+  }),
+  z.object({
+    type: z.literal('control.api-key.create'),
+    input: adminCreateApiKeyInputSchema
+  }),
+  z.object({
+    type: z.literal('control.api-keys.list'),
+    projectSlug: projectSlugSchema.nullable().optional()
+  }),
+  z.object({
+    type: z.literal('control.api-key.get'),
+    apiKeyId: apiKeyIdSchema
+  }),
+  z.object({
+    type: z.literal('control.api-key.verify'),
+    apiKeyId: apiKeyIdSchema,
+    hash: z.string().min(1)
+  }),
+  z.object({
+    type: z.literal('control.api-key.touch'),
+    apiKeyId: apiKeyIdSchema,
+    usedAt: z.string().datetime()
+  }),
+  z.object({
+    type: z.literal('control.api-key.revoke'),
+    apiKeyId: apiKeyIdSchema,
+    revokedAt: z.string().datetime()
+  })
+]);
+
+export const projectDoRequestSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('project.get'),
+    projectSlug: projectSlugSchema
+  }),
+  z.object({
+    type: z.literal('project.access.get'),
+    projectSlug: projectSlugSchema
+  }),
+  z.object({
+    type: z.literal('project.create'),
+    input: createProjectInputSchema,
+    allowExisting: z.boolean().optional()
+  }),
+  z.object({
+    type: z.literal('project.table.create'),
+    projectSlug: projectSlugSchema,
+    input: createTableRpcInputSchema,
+    allowExisting: z.boolean().optional()
+  }),
+  z.object({
+    type: z.literal('project.table.list'),
+    projectSlug: projectSlugSchema
+  }),
+  z.object({
+    type: z.literal('project.table.get'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema
+  }),
+  z.object({
+    type: z.literal('project.table.resolve'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema
+  }),
+  z.object({
+    type: z.literal('project.spreadsheet.tabs.list'),
+    projectSlug: projectSlugSchema
+  }),
+  z.object({
+    type: z.literal('project.spreadsheet.tab.inspect'),
+    projectSlug: projectSlugSchema,
+    tab: z.string().min(1),
+    headerRow: z.number().int().positive().optional()
+  })
+]);
+
+export const tableDoRequestSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('table.rows.list'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    query: listRowsQuerySchema,
+    resolvedConfig: resolvedTableConfigSnapshotSchema.optional(),
+    requestContext: tableRequestContextSchema.optional()
+  }),
+  z.object({
+    type: z.literal('table.row.get'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    rowId: rowIdSchema,
+    resolvedConfig: resolvedTableConfigSnapshotSchema.optional(),
+    requestContext: tableRequestContextSchema.optional()
+  }),
+  z.object({
+    type: z.literal('table.row.create'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    input: createRowInputSchema,
+    requestContext: tableRequestContextSchema.optional()
+  }),
+  z.object({
+    type: z.literal('table.row.update'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    rowId: rowIdSchema,
+    input: updateRowInputSchema,
+    requestContext: tableRequestContextSchema.optional()
+  }),
+  z.object({
+    type: z.literal('table.row.delete'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    rowId: rowIdSchema,
+    requestContext: tableRequestContextSchema.optional()
+  }),
+  z.object({
+    type: z.literal('table.schema.get'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    resolvedConfig: resolvedTableConfigSnapshotSchema.optional(),
+    requestContext: tableRequestContextSchema.optional()
+  }),
+  z.object({
+    type: z.literal('table.cache.get'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    resolvedConfig: resolvedTableConfigSnapshotSchema.optional(),
+    requestContext: tableRequestContextSchema.optional()
+  }),
+  z.object({
+    type: z.literal('table.cache.refresh'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    resolvedConfig: resolvedTableConfigSnapshotSchema.optional(),
+    requestContext: tableRequestContextSchema.optional()
+  }),
+  z.object({
+    type: z.literal('table.external-change.record'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    changedAt: z.string().datetime(),
+    debounceUntil: z.string().datetime().nullable(),
+    requestContext: tableRequestContextSchema.optional()
+  }),
+  z.object({
+    type: z.literal('table.reindex'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    resolvedConfig: resolvedTableConfigSnapshotSchema.optional(),
+    requestContext: tableRequestContextSchema.optional()
+  })
+]);
+
+export const rateLimitDoRequestSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('rate-limit.check'),
+    key: z.string().min(1),
+    limit: z.number(),
+    windowSeconds: z.number(),
+    nowMs: z.number().optional()
+  })
+]);
+
+export type ControlPlaneDoRequest = z.infer<typeof controlPlaneDoRequestSchema>;
 
 export type ControlPlaneDoResponse =
   | { type: 'control.projects.list.result'; result: AdminListProjectsResult }
@@ -57,16 +275,7 @@ export type ControlPlaneDoResponse =
   | { type: 'control.api-key.touch.result'; result: { ok: true } }
   | { type: 'control.api-key.revoke.result'; result: { ok: true } };
 
-export type ProjectDoRequest =
-  | { type: 'project.get'; projectSlug: string }
-  | { type: 'project.access.get'; projectSlug: string }
-  | { type: 'project.create'; input: CreateProjectInput; allowExisting?: boolean }
-  | { type: 'project.table.create'; projectSlug: string; input: CreateTableInput; allowExisting?: boolean }
-  | { type: 'project.table.list'; projectSlug: string }
-  | { type: 'project.table.get'; projectSlug: string; tableSlug: string }
-  | { type: 'project.table.resolve'; projectSlug: string; tableSlug: string }
-  | { type: 'project.spreadsheet.tabs.list'; projectSlug: string }
-  | { type: 'project.spreadsheet.tab.inspect'; projectSlug: string; tab: string; headerRow?: number };
+export type ProjectDoRequest = z.infer<typeof projectDoRequestSchema>;
 
 export type ProjectDoResponse =
   | { type: 'project.get.result'; result: AdminGetProjectResult }
@@ -79,10 +288,7 @@ export type ProjectDoResponse =
   | { type: 'project.spreadsheet.tabs.list.result'; result: AdminListSpreadsheetTabsResult }
   | { type: 'project.spreadsheet.tab.inspect.result'; result: AdminInspectSpreadsheetTabResult };
 
-export type ResolvedTableConfigSnapshot = TableConfig & {
-  spreadsheetId: string;
-  googleCredentialRef: string;
-};
+export type ResolvedTableConfigSnapshot = z.infer<typeof resolvedTableConfigSnapshotSchema>;
 
 export type ResolvedProjectTableResult = {
   project: Pick<ProjectConfig, 'slug' | 'spreadsheetId' | 'googleCredentialRef' | 'defaultAuthMode'>;
@@ -92,17 +298,7 @@ export type ResolvedProjectTableResult = {
 
 export type ProjectAccessResult = Pick<ProjectConfig, 'slug' | 'defaultAuthMode'>;
 
-export type TableDoRequest =
-  | { type: 'table.rows.list'; projectSlug: string; tableSlug: string; query: ListRowsQuery; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext }
-  | { type: 'table.row.get'; projectSlug: string; tableSlug: string; rowId: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext }
-  | { type: 'table.row.create'; projectSlug: string; tableSlug: string; input: CreateRowInput; requestContext?: TableRequestContext }
-  | { type: 'table.row.update'; projectSlug: string; tableSlug: string; rowId: string; input: UpdateRowInput; requestContext?: TableRequestContext }
-  | { type: 'table.row.delete'; projectSlug: string; tableSlug: string; rowId: string; requestContext?: TableRequestContext }
-  | { type: 'table.schema.get'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext }
-  | { type: 'table.cache.get'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext }
-  | { type: 'table.cache.refresh'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext }
-  | { type: 'table.external-change.record'; projectSlug: string; tableSlug: string; changedAt: string; debounceUntil: string | null; requestContext?: TableRequestContext }
-  | { type: 'table.reindex'; projectSlug: string; tableSlug: string; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext };
+export type TableDoRequest = z.infer<typeof tableDoRequestSchema>;
 
 export type TableDoResponse =
   | { type: 'table.rows.list.result'; result: ListRowsResult }
@@ -116,21 +312,9 @@ export type TableDoResponse =
   | { type: 'table.external-change.record.result'; result: { ok: true } }
   | { type: 'table.reindex.result'; result: ReindexTableResult };
 
-export type TableRequestContext = {
-  requestId: string;
-  route: string;
-  principal: string;
-  syncSource?: 'request' | 'external-change';
-};
+export type TableRequestContext = z.infer<typeof tableRequestContextSchema>;
 
-export type RateLimitDoRequest =
-  | {
-      type: 'rate-limit.check';
-      key: string;
-      limit: number;
-      windowSeconds: number;
-      nowMs?: number;
-    };
+export type RateLimitDoRequest = z.infer<typeof rateLimitDoRequestSchema>;
 
 export type RateLimitDoResponse =
   | {

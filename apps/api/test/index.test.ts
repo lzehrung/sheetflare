@@ -1332,6 +1332,24 @@ describe('api routes', () => {
     expect(env.__projectRequests).not.toContain('project.table.resolve');
   });
 
+  it('rejects wrong-project scoped read keys before resolving private table existence', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __projectRequests: string[] };
+
+    const response = await app.request(
+      '/v1/projects/other/tables/users/rows',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(401);
+    expect(env.__projectRequests).toEqual([]);
+  });
+
   it('preserves internal project access failures instead of rewriting them as unauthorized', async () => {
     const app = createApp();
     const response = await app.request('/v1/projects/demo/tables/users/rows', {}, createEnv({

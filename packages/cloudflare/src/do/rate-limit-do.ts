@@ -1,4 +1,5 @@
-import type { RateLimitDoRequest, RateLimitDoResponse } from '@sheetflare/contracts';
+import { rateLimitDoRequestSchema, type RateLimitDoRequest, type RateLimitDoResponse } from '@sheetflare/contracts';
+import { durableObjectErrorResponse, parseDurableObjectRpcRequest } from '../rpc';
 
 type WindowRow = {
   bucket_key: string;
@@ -40,9 +41,13 @@ export class RateLimitDO {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
-    const body = (await request.json()) as RateLimitDoRequest;
-    const result = this.handle(body);
-    return Response.json(result);
+    try {
+      const body = await parseDurableObjectRpcRequest(request, rateLimitDoRequestSchema);
+      const result = this.handle(body);
+      return Response.json(result);
+    } catch (error) {
+      return durableObjectErrorResponse(error);
+    }
   }
 
   private handle(body: RateLimitDoRequest): RateLimitDoResponse {

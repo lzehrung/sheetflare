@@ -11,6 +11,7 @@ import {
   NotFoundError,
   type ProjectAccessResult,
   type ProjectConfig,
+  projectDoRequestSchema,
   type ProjectDoRequest,
   type ProjectDoResponse,
   type ProjectSummary,
@@ -20,7 +21,7 @@ import {
 import { normalizeFieldRules } from '@sheetflare/domain';
 import { GoogleSheetsService } from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from '../types';
-import { doRpc } from '../rpc';
+import { doRpc, durableObjectErrorResponse, parseDurableObjectRpcRequest } from '../rpc';
 import { defaultGoogleCredentialRef, resolveGoogleCredential } from '../google-credentials';
 
 type ProjectRow = {
@@ -144,9 +145,13 @@ export class ProjectDO {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
-    const body = (await request.json()) as ProjectDoRequest;
-    const result = await this.handle(body);
-    return Response.json(result);
+    try {
+      const body = await parseDurableObjectRpcRequest(request, projectDoRequestSchema);
+      const result = await this.handle(body);
+      return Response.json(result);
+    } catch (error) {
+      return durableObjectErrorResponse(error);
+    }
   }
 
   private async handle(body: ProjectDoRequest): Promise<ProjectDoResponse> {
