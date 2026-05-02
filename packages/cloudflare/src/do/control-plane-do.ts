@@ -88,6 +88,7 @@ const minWatchRenewLeadMs = 5 * 60 * 1000;
 const maxWatchRenewLeadMs = 24 * 60 * 60 * 1000;
 const watchRenewRetryMs = 5 * 60 * 1000;
 const watchRenewConfigRetryMs = 60 * 60 * 1000;
+const watchRenewQuotaRetryGraceMs = 15 * 60 * 1000;
 const watchRetryAdviceGraceMs = 15 * 60 * 1000;
 
 export class ControlPlaneDO {
@@ -526,6 +527,7 @@ export class ControlPlaneDO {
         expirationMs
       }, existing);
       const watch = createdWatch.watch;
+      const storedExpirationDurationMs = getActualWatchDurationMs(watch.expirationAt, expirationDurationMs);
 
       this.ctx.storage.sql.exec(
         `
@@ -555,7 +557,7 @@ export class ControlPlaneDO {
         watch.expirationAt,
         debounceSeconds,
         webhookUrl,
-        expirationDurationMs,
+        storedExpirationDurationMs,
         null,
         null,
         existing?.last_notification_at ?? null,
@@ -907,6 +909,7 @@ export class ControlPlaneDO {
           expirationMs: Date.now() + durationMs
         }
       );
+      const storedExpirationDurationMs = getActualWatchDurationMs(renewedWatch.expirationAt, durationMs);
 
       this.ctx.storage.sql.exec(
         `
@@ -925,7 +928,7 @@ export class ControlPlaneDO {
         renewedWatch.resourceId,
         renewedWatch.resourceUri,
         renewedWatch.expirationAt,
-        durationMs,
+        storedExpirationDurationMs,
         now,
         watch.spreadsheet_id
       );
@@ -1105,6 +1108,10 @@ export class ControlPlaneDO {
     const renewalDueAtMs = expirationAtMs - renewalLeadMs;
     if (!watch.last_watch_error) {
       return renewalDueAtMs;
+    }
+
+    if (isDriveWatchSubscriptionQuotaMessage(watch.last_watch_error)) {
+      return Math.max(renewalDueAtMs, expirationAtMs + watchRenewQuotaRetryGraceMs);
     }
 
     const updatedAtMs = Date.parse(watch.updated_at);
@@ -1362,7 +1369,7 @@ function isDriveWatchSubscriptionQuotaError(error: unknown) {
       ? error.details.message
       : '';
 
-  return detailsMessage.includes('Rate limit exceeded for creating file subscriptions.');
+  return isDriveWatchSubscriptionQuotaMessage(detailsMessage);
 }
 
 function describeWatchError(error: unknown) {
@@ -1379,6 +1386,26 @@ function describeWatchError(error: unknown) {
       : null;
 
   return detailsMessage ? `${error.message} ${detailsMessage}` : error.message;
+}
+
+function isDriveWatchSubscriptionQuotaMessage(message: string | null) {
+  return message?.includes('Rate limit exceeded for creating file subscriptions.') ?? false;
+}
+
+function getActualWatchDurationMs(expirationAt: string | null, fallbackDurationMs: number) {
+  if (!expirationAt) {
+    return fallbackDurationMs;
+  }
+
+  const expirationAtMs = Date.parse(expirationAt);
+  if (Number.isNaN(expirationAtMs)) {
+    return fallbackDurationMs;
+  }
+
+  const actualDurationMs = expirationAtMs - Date.now();
+  return actualDurationMs > 0
+    ? Math.max(actualDurationMs, minWatchRenewLeadMs)
+    : fallbackDurationMs;
 }
 
 function getSpreadsheetWatchSafeRetryAt(tombstone: SpreadsheetWatchTombstoneRow) {

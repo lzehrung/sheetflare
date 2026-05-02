@@ -314,6 +314,76 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     ]);
   });
 
+  it('schedules renewal from the actual Drive watch expiration instead of the requested duration', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-02T20:00:00.000Z'));
+
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const watchMatch = url.match(/\/drive\/v3\/files\/([^/]+)\/watch/);
+      if (watchMatch) {
+        const spreadsheetId = decodeURIComponent(watchMatch[1] ?? '');
+        return Response.json({
+          id: `channel-${spreadsheetId}`,
+          resourceId: `resource-${spreadsheetId}`,
+          resourceUri: `https://www.googleapis.com/drive/v3/files/${spreadsheetId}`,
+          expiration: String(Date.parse('2026-05-03T20:00:00.000Z'))
+        });
+      }
+
+      return fallbackFetch(input, init);
+    });
+    const { env, controlPlaneNamespace } = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await doRpc<ControlPlaneDoResponse>(
+      env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane')),
+      {
+        type: 'control.spreadsheet-watches.register',
+        webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+        webhookToken: 'secret-token',
+        debounceSeconds: 30,
+        expirationMs: Date.parse('2026-05-09T20:00:00.000Z')
+      }
+    );
+
+    expect(
+      (controlPlaneNamespace as { getAlarm(name: string): number | null }).getAlarm('control-plane')
+    ).toBe(Date.parse('2026-05-03T14:00:00.000Z'));
+
+    vi.useRealTimers();
+  });
+
   it('lists spreadsheet watch status for operators', async () => {
     const sheet: SheetState = {
       rows: [
@@ -1476,6 +1546,106 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     expect(
       (controlPlaneNamespace as { getAlarm(name: string): number | null }).getAlarm('control-plane')
     ).toBe(Date.parse('2026-04-29T11:05:01.000Z'));
+
+    vi.useRealTimers();
+  });
+
+  it('waits until after the current watch expires before retrying renewal after Drive subscription quota errors', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    let watchAttemptCount = 0;
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/drive/v3/files/sheet-1/watch')) {
+        watchAttemptCount += 1;
+        if (watchAttemptCount === 2) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: 403,
+                message: 'Rate limit exceeded for creating file subscriptions.',
+                status: 'PERMISSION_DENIED'
+              }
+            }),
+            {
+              headers: {
+                'content-type': 'application/json'
+              },
+              status: 403
+            }
+          );
+        }
+      }
+
+      return fallbackFetch(input, init);
+    });
+    const { env, controlPlaneNamespace } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users'
+        }
+      }
+    );
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30,
+      expirationMs: Date.parse('2026-04-29T10:10:00.000Z')
+    });
+
+    vi.setSystemTime(new Date('2026-04-29T10:05:01.000Z'));
+    await (controlPlaneNamespace as { triggerAlarm(name: string): Promise<void>; getAlarm(name: string): number | null }).triggerAlarm('control-plane');
+
+    const response = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.list'
+    });
+
+    expect((response as {
+      type: 'control.spreadsheet-watches.list.result';
+      result: {
+        data: Array<{
+          spreadsheetId: string;
+          lastWatchError: string | null;
+        }>;
+      };
+    }).result.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        lastWatchError: 'Google Sheets authentication or permission check failed. Rate limit exceeded for creating file subscriptions.'
+      })
+    ]);
+    expect(
+      (controlPlaneNamespace as { getAlarm(name: string): number | null }).getAlarm('control-plane')
+    ).toBe(Date.parse('2026-04-29T10:25:00.000Z'));
 
     vi.useRealTimers();
   });
