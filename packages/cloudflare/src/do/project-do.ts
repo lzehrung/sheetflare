@@ -480,6 +480,7 @@ export class ProjectDO {
   }
 
   private async listTables(projectSlug: string): Promise<TableConfig[]> {
+    this.requireProjectRow(projectSlug);
     const rows = this.ctx.storage.sql
       .exec(`SELECT * FROM tables WHERE project_slug = ? ORDER BY table_slug ASC`, projectSlug)
       .toArray() as TableRow[];

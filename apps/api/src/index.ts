@@ -36,6 +36,7 @@ import {
   rowParamsSchema,
   tableConfigSchema,
   BadRequestError,
+  NotFoundError,
   ServiceUnavailableError,
   toErrorResponse,
   UnauthorizedError,
@@ -941,6 +942,18 @@ async function loadProjectTables(c: { env: Env }, projectSlug: string) {
   }).result.data;
 }
 
+async function loadProjectTablesForDelete(c: { env: Env }, projectSlug: string) {
+  try {
+    return await loadProjectTables(c, projectSlug);
+  } catch (error) {
+    if (error instanceof NotFoundError) {
+      return [];
+    }
+
+    throw error;
+  }
+}
+
 async function clearTableCacheState(c: AppContext, projectSlug: string, tableSlug: string, route: string) {
   await doRpc<TableDoResponse>(getTableStub(c.env, projectSlug, tableSlug), {
     type: 'table.cache.clear',
@@ -1748,7 +1761,7 @@ function createApp() {
     const auth = await authenticateRequest(c);
     const { project } = parsePathParams(c, adminProjectParamsSchema);
     assertProjectScope(auth, 'admin:projects', project);
-    const tables = await loadProjectTables(c, project);
+    const tables = await loadProjectTablesForDelete(c, project);
     for (const table of tables) {
       await clearTableCacheState(c, project, table.tableSlug, 'admin.projects.delete');
     }

@@ -490,6 +490,23 @@ describe('TableDO', () => {
     });
   });
 
+  it('rejects table listing when the parent project is missing', async () => {
+    const env = createTestEnv();
+
+    await expect(
+      doRpc<ProjectDoResponse>(
+        env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+        {
+          type: 'project.table.list',
+          projectSlug: 'demo'
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'NotFoundError',
+      message: 'Project demo was not found.'
+    });
+  });
+
   it('rejects table creation when the configured tab fields do not exist in the detected headers', async () => {
     const env = createTestEnv();
 

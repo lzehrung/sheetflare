@@ -522,10 +522,31 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'project.table.list') {
+      if (body.projectSlug === 'missing-project') {
+        return Response.json({
+          error: {
+            code: 'NOT_FOUND',
+            message: 'Project missing-project was not found.',
+            details: {
+              projectSlug: 'missing-project'
+            }
+          }
+        }, { status: 404 });
+      }
+
+      return Response.json({
+        type: 'project.table.list.result',
+        result: {
+          data: [table]
+        }
+      });
+    }
+
     return Response.json({
       type: 'project.table.list.result',
       result: {
-        data: body.projectSlug === 'missing-project' ? [] : [table]
+        data: [table]
       }
     });
   });
@@ -1164,6 +1185,30 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(409);
+  });
+
+  it('returns not found when listing tables for a missing project', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects/missing-project/tables',
+      {
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'NOT_FOUND',
+        message: 'Project missing-project was not found.',
+        details: {
+          projectSlug: 'missing-project'
+        }
+      }
+    });
   });
 
   it('deletes a configured table and clears its cached table state', async () => {
