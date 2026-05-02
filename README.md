@@ -221,6 +221,7 @@ Performance notes:
   - inspect cache status
   - force reindex
   - delete tables and projects with confirmation
+- Deleting a table clears its local cache before removing table metadata. Deleting a project clears configured table caches, revokes that project's scoped API keys, and stops Drive watches that no remaining project uses.
 - Table creation now supports `readOnlyFields` for columns that should stay sheet-managed.
 - Table creation also supports optional `fieldRules` for required, unique, enum, normalize, and type validation.
 - Admin credentials are not stored in the browser. Paste a scoped admin API key or bootstrap token when you need control-plane access.

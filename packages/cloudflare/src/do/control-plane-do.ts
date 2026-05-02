@@ -225,7 +225,7 @@ export class ControlPlaneDO {
           result: { ok: true }
         };
       case 'control.project.delete':
-        this.deleteProjectSummary(body.projectSlug);
+        await this.deleteProjectSummary(body.projectSlug);
         return {
           type: 'control.project.delete.result',
           result: { ok: true }
@@ -329,7 +329,19 @@ export class ControlPlaneDO {
     );
   }
 
-  private deleteProjectSummary(projectSlug: string) {
+  private async deleteProjectSummary(projectSlug: string) {
+    const revokedAt = new Date().toISOString();
+
+    this.ctx.storage.sql.exec(
+      `
+      UPDATE api_keys
+      SET revoked_at = ?
+      WHERE project_slug = ?
+        AND revoked_at IS NULL
+      `,
+      revokedAt,
+      projectSlug
+    );
     this.ctx.storage.sql.exec(
       `
       DELETE FROM project_registry
@@ -337,6 +349,12 @@ export class ControlPlaneDO {
       `,
       projectSlug
     );
+
+    const activeSpreadsheetIds = new Set(
+      this.getSpreadsheetRegistrations().map((registration) => registration.spreadsheetId)
+    );
+    await this.removeObsoleteSpreadsheetWatches(activeSpreadsheetIds);
+    await this.scheduleNextAlarm();
   }
 
   async alarm() {

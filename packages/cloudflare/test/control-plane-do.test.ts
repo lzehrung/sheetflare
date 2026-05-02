@@ -226,6 +226,12 @@ function createTestEnv(overrides?: Partial<CloudflareEnv>) {
   return { env, controlPlaneNamespace };
 }
 
+async function hashApiKeySecret(secret: string) {
+  const bytes = new TextEncoder().encode(secret);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
 describe('ControlPlaneDO Drive watch orchestration', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -688,6 +694,117 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     ]);
 
     vi.useRealTimers();
+  });
+
+  it('project deletion revokes project-scoped API keys and stops obsolete spreadsheet watches', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    const stopRequests: Array<{ id: string; resourceId: string }> = [];
+    const fetchHandler = createSheetsAndDriveFetch(sheet);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/drive/v3/channels/stop')) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { id?: string; resourceId?: string };
+        stopRequests.push({
+          id: body.id ?? '',
+          resourceId: body.resourceId ?? ''
+        });
+      }
+
+      return fetchHandler(input, init);
+    });
+    const { env } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    const project = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo'));
+
+    await doRpc<ProjectDoResponse>(project, {
+      type: 'project.create',
+      input: {
+        slug: 'demo',
+        name: 'Demo',
+        spreadsheetId: 'sheet-1'
+      }
+    });
+    await doRpc<ProjectDoResponse>(project, {
+      type: 'project.table.create',
+      projectSlug: 'demo',
+      input: {
+        tableSlug: 'users',
+        sheetTabName: 'Users'
+      }
+    });
+    const projectKeyResponse = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.api-key.create',
+      input: {
+        name: 'Demo project key',
+        projectSlug: 'demo',
+        scopes: ['table:read']
+      }
+    });
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.api-key.create',
+      input: {
+        name: 'Global admin key',
+        scopes: ['admin:projects']
+      }
+    });
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30
+    });
+
+    const projectKey = (projectKeyResponse as {
+      type: 'control.api-key.create.result';
+      result: { apiKey: string; record: { id: string } };
+    }).result;
+    const projectKeySecret = projectKey.apiKey.split('.')[1] ?? '';
+    await doRpc<ProjectDoResponse>(project, {
+      type: 'project.delete',
+      projectSlug: 'demo'
+    });
+    const keys = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.api-keys.list'
+    });
+    const verifyProjectKey = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.api-key.verify',
+      apiKeyId: projectKey.record.id,
+      hash: await hashApiKeySecret(projectKeySecret)
+    });
+    const watches = await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.list'
+    });
+
+    expect((keys as {
+      type: 'control.api-keys.list.result';
+      result: { data: Array<{ name: string; revokedAt: string | null }> };
+    }).result.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'Global admin key',
+        revokedAt: null
+      }),
+      expect.objectContaining({
+        name: 'Demo project key',
+        revokedAt: expect.any(String)
+      })
+    ]));
+    expect((verifyProjectKey as {
+      type: 'control.api-key.verify.result';
+      result: { record: unknown };
+    }).result.record).toBeNull();
+    expect((watches as {
+      type: 'control.spreadsheet-watches.list.result';
+      result: { data: Array<unknown> };
+    }).result.data).toEqual([]);
+    expect(stopRequests).toContainEqual({
+      id: 'channel-sheet-1',
+      resourceId: 'resource-sheet-1'
+    });
   });
 
   it('debounces Drive notifications and auto-reindexes affected tables when the alarm fires', async () => {

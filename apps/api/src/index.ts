@@ -917,6 +917,18 @@ async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug:
   }).result.data;
 }
 
+async function loadProjectTables(c: { env: Env }, projectSlug: string) {
+  const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, projectSlug), {
+    type: 'project.table.list',
+    projectSlug
+  });
+
+  return (response as {
+    type: 'project.table.list.result';
+    result: { data: UpsertTableResult['data'][] };
+  }).result.data;
+}
+
 async function clearTableCacheState(c: AppContext, projectSlug: string, tableSlug: string, route: string) {
   await doRpc<TableDoResponse>(getTableStub(c.env, projectSlug, tableSlug), {
     type: 'table.cache.clear',
@@ -1726,6 +1738,11 @@ function createApp() {
     const auth = await authenticateRequest(c);
     const { project } = parsePathParams(c, adminProjectParamsSchema);
     assertProjectScope(auth, 'admin:projects', project);
+    const tables = await loadProjectTables(c, project);
+    for (const table of tables) {
+      await clearTableCacheState(c, project, table.tableSlug, 'admin.projects.delete');
+    }
+
     const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
       type: 'project.delete',
       projectSlug: project
@@ -1734,10 +1751,6 @@ function createApp() {
       type: 'project.delete.result';
       result: DeleteProjectResult;
     }).result;
-
-    for (const tableSlug of result.deletedTables) {
-      await clearTableCacheState(c, project, tableSlug, 'admin.projects.delete');
-    }
 
     return c.json(result);
   });
@@ -1818,6 +1831,7 @@ function createApp() {
     const auth = await authenticateRequest(c);
     const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
     assertProjectScope(auth, 'admin:projects', project);
+    await clearTableCacheState(c, project, table, 'admin.tables.delete');
     const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
       type: 'project.table.delete',
       projectSlug: project,
@@ -1828,7 +1842,6 @@ function createApp() {
       result: DeleteTableResult;
     }).result;
 
-    await clearTableCacheState(c, project, table, 'admin.tables.delete');
     return c.json(result);
   });
 

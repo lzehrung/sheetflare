@@ -347,6 +347,108 @@ describe('TableDO', () => {
     });
   });
 
+  it('allows table delete retries to repair the project registry after local metadata is already gone', async () => {
+    const env = createTestEnv();
+    const projectStub = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo'));
+    const controlPlaneStub = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.create',
+      input: {
+        slug: 'demo',
+        name: 'Demo',
+        spreadsheetId: 'sheet-1'
+      }
+    });
+    await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.table.create',
+      projectSlug: 'demo',
+      input: {
+        tableSlug: 'users',
+        sheetTabName: 'Users'
+      }
+    });
+
+    await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.table.delete',
+      projectSlug: 'demo',
+      tableSlug: 'users'
+    });
+    const retriedDelete = await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.table.delete',
+      projectSlug: 'demo',
+      tableSlug: 'users'
+    });
+    const projects = await doRpc<ControlPlaneDoResponse>(controlPlaneStub, {
+      type: 'control.projects.list'
+    });
+
+    expect((retriedDelete as {
+      type: 'project.table.delete.result';
+      result: { ok: true; deletedTable: string };
+    }).result).toEqual({
+      ok: true,
+      deletedTable: 'users'
+    });
+    expect((projects as {
+      type: 'control.projects.list.result';
+      result: { data: Array<{ slug: string; tableCount: number }> };
+    }).result.data).toEqual([
+      expect.objectContaining({
+        slug: 'demo',
+        tableCount: 0
+      })
+    ]);
+  });
+
+  it('allows project delete retries to repair the registry after local metadata is already gone', async () => {
+    const env = createTestEnv();
+    const projectStub = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo'));
+    const controlPlaneStub = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.create',
+      input: {
+        slug: 'demo',
+        name: 'Demo',
+        spreadsheetId: 'sheet-1'
+      }
+    });
+    await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.table.create',
+      projectSlug: 'demo',
+      input: {
+        tableSlug: 'users',
+        sheetTabName: 'Users'
+      }
+    });
+
+    await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.delete',
+      projectSlug: 'demo'
+    });
+    const retriedDelete = await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.delete',
+      projectSlug: 'demo'
+    });
+    const projects = await doRpc<ControlPlaneDoResponse>(controlPlaneStub, {
+      type: 'control.projects.list'
+    });
+
+    expect((retriedDelete as {
+      type: 'project.delete.result';
+      result: { ok: true; deletedProject: string; deletedTables: string[] };
+    }).result).toEqual({
+      ok: true,
+      deletedProject: 'demo',
+      deletedTables: []
+    });
+    expect((projects as {
+      type: 'control.projects.list.result';
+      result: { data: Array<unknown> };
+    }).result.data).toEqual([]);
+  });
+
   it('rejects project creation when a named credential ref is missing', async () => {
     const env = createTestEnv();
 
@@ -4467,7 +4569,7 @@ describe('TableDO', () => {
 
     vi.stubGlobal('fetch', createSheetsFetch(sheet));
     const validationSpy = vi.spyOn(
-      TableDO.prototype as unknown as {
+      TableDO.prototype as {
         buildValidationSummary: (rows: readonly unknown[], config: unknown) => unknown;
       },
       'buildValidationSummary'

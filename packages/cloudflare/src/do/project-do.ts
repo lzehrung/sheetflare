@@ -397,7 +397,19 @@ export class ProjectDO {
 
   private async deleteTable(projectSlug: string, tableSlug: string): Promise<DeleteTableResult> {
     this.requireProjectRow(projectSlug);
-    await this.getTable(projectSlug, tableSlug);
+    const table = this.selectOptionalRow<TableRow>(
+      `SELECT * FROM tables WHERE project_slug = ? AND table_slug = ?`,
+      projectSlug,
+      tableSlug
+    );
+    if (!table) {
+      await this.syncRegistry(projectSlug);
+      return {
+        ok: true,
+        deletedTable: tableSlug
+      };
+    }
+
     const now = new Date().toISOString();
 
     this.ctx.storage.sql.exec(
@@ -415,7 +427,16 @@ export class ProjectDO {
   }
 
   private async deleteProject(projectSlug: string): Promise<DeleteProjectResult> {
-    this.requireProjectRow(projectSlug);
+    const project = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, projectSlug);
+    if (!project) {
+      await this.deleteRegistryProject(projectSlug);
+      return {
+        ok: true,
+        deletedProject: projectSlug,
+        deletedTables: []
+      };
+    }
+
     const tables = await this.listTables(projectSlug);
     const deletedTables = tables.map((table) => table.tableSlug);
 

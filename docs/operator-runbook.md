@@ -64,6 +64,8 @@ npm run ops:bootstrap
 Treat `ADMIN_BEARER_TOKEN` as break-glass only.
 For routine scripts, set `SHEETFLARE_ADMIN_CREDENTIAL` to the scoped admin API key instead.
 
+Project deletion is destructive for Sheetflare-managed control-plane state only. It clears configured table caches before removing project metadata, revokes API keys scoped to that project, and stops Google Drive watches for spreadsheets no remaining project uses. It does not delete the upstream Google spreadsheet.
+
 For Google credential setup details, use [google-service-accounts.md](./google-service-accounts.md).
 
 ## Bootstrap A New Spreadsheet-Backed Project

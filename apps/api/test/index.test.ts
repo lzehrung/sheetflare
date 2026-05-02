@@ -98,6 +98,7 @@ function createEnv(options?: {
   rateLimitAllowed?: boolean;
   defaultAuthMode?: 'private' | 'public-read';
   projectAccessStatus?: 200 | 404 | 500;
+  tableCacheClearStatus?: 200 | 503;
   googleClientEmail?: string;
   googlePrivateKey?: string;
   googleCredentialsJson?: string;
@@ -108,6 +109,7 @@ function createEnv(options?: {
   const projectRequests: string[] = [];
   const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }> = [];
   const controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> = [];
+  const durableObjectRequests: string[] = [];
   let verifyApiKeyCallCount = 0;
   let apiKeyTouchCallCount = 0;
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
@@ -321,6 +323,7 @@ function createEnv(options?: {
       };
     };
     projectRequests.push(body.type);
+    durableObjectRequests.push(body.type);
     const requestUrl = new URL(request.url);
     const table = {
       projectSlug: 'demo',
@@ -540,6 +543,7 @@ function createEnv(options?: {
       resolvedConfig: body.resolvedConfig,
       requestContext: body.requestContext
     });
+    durableObjectRequests.push(body.type);
 
     if (body.type === 'table.row.create') {
       return Response.json({
@@ -618,6 +622,16 @@ function createEnv(options?: {
     }
 
     if (body.type === 'table.cache.clear') {
+      if (options?.tableCacheClearStatus === 503) {
+        return Response.json({
+          error: {
+            code: 'SERVICE_UNAVAILABLE',
+            message: 'Cache clear unavailable.',
+            details: null
+          }
+        }, { status: 503 });
+      }
+
       return Response.json({
         type: 'table.cache.clear.result',
         result: {
@@ -690,6 +704,10 @@ function createEnv(options?: {
   });
   Object.defineProperty(env, '__controlPlaneRequests', {
     value: controlPlaneRequests,
+    enumerable: false
+  });
+  Object.defineProperty(env, '__durableObjectRequests', {
+    value: durableObjectRequests,
     enumerable: false
   });
   Object.defineProperty(env, '__verifyApiKeyCallCount', {
@@ -1153,6 +1171,7 @@ describe('api routes', () => {
     const env = createEnv() as Env & {
       __projectRequests: string[];
       __tableRequests: Array<{ type: string }>;
+      __durableObjectRequests: string[];
     };
     const response = await app.request(
       '/v1/admin/projects/demo/tables/users',
@@ -1172,6 +1191,31 @@ describe('api routes', () => {
     });
     expect(env.__projectRequests).toContain('project.table.delete');
     expect(env.__tableRequests.map((request) => request.type)).toContain('table.cache.clear');
+    expect(env.__durableObjectRequests.indexOf('table.cache.clear')).toBeLessThan(
+      env.__durableObjectRequests.indexOf('project.table.delete')
+    );
+  });
+
+  it('does not delete table metadata when its cached table state cannot be cleared first', async () => {
+    const app = createApp();
+    const env = createEnv({ tableCacheClearStatus: 503 }) as Env & {
+      __projectRequests: string[];
+      __tableRequests: Array<{ type: string }>;
+    };
+    const response = await app.request(
+      '/v1/admin/projects/demo/tables/users',
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(503);
+    expect(env.__tableRequests.map((request) => request.type)).toContain('table.cache.clear');
+    expect(env.__projectRequests).not.toContain('project.table.delete');
   });
 
   it('deletes a configured project and clears caches for its tables', async () => {
@@ -1179,6 +1223,7 @@ describe('api routes', () => {
     const env = createEnv() as Env & {
       __projectRequests: string[];
       __tableRequests: Array<{ type: string }>;
+      __durableObjectRequests: string[];
     };
     const response = await app.request(
       '/v1/admin/projects/demo',
@@ -1199,6 +1244,31 @@ describe('api routes', () => {
     });
     expect(env.__projectRequests).toContain('project.delete');
     expect(env.__tableRequests.map((request) => request.type)).toContain('table.cache.clear');
+    expect(env.__durableObjectRequests.indexOf('table.cache.clear')).toBeLessThan(
+      env.__durableObjectRequests.indexOf('project.delete')
+    );
+  });
+
+  it('does not delete project metadata when one of its table caches cannot be cleared first', async () => {
+    const app = createApp();
+    const env = createEnv({ tableCacheClearStatus: 503 }) as Env & {
+      __projectRequests: string[];
+      __tableRequests: Array<{ type: string }>;
+    };
+    const response = await app.request(
+      '/v1/admin/projects/demo',
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(503);
+    expect(env.__tableRequests.map((request) => request.type)).toContain('table.cache.clear');
+    expect(env.__projectRequests).not.toContain('project.delete');
   });
 
   it('reports internal readiness separately from liveness', async () => {

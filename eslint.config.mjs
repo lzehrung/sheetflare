@@ -32,7 +32,18 @@ export default tseslint.config(
     },
     rules: {
       'no-console': 'off',
-      'no-nested-ternary': 'error'
+      'no-nested-ternary': 'error',
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "TSAsExpression[typeAnnotation.type='TSAnyKeyword']",
+          message: 'Do not use `as any`; validate boundaries or improve the type model.'
+        },
+        {
+          selector: "TSAsExpression[typeAnnotation.type='TSUnknownKeyword']",
+          message: 'Do not use `as unknown`; validate boundaries or improve the type model.'
+        }
+      ]
     }
   },
   {
