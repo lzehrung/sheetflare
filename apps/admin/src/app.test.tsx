@@ -114,6 +114,7 @@ describe('App', () => {
 
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -1402,6 +1403,196 @@ describe('App', () => {
     await screen.findByText('Saving table demo/users complete.');
     expect(screen.getAllByText('1 tables').length).toBeGreaterThan(0);
     expect(spreadsheetWatchCalls).toBe(1);
+  });
+
+  it('deletes a table from the selected project after confirmation', async () => {
+    let tableDeleted = false;
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: tableDeleted ? 0 : 1,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: tableDeleted ? [] : [
+            {
+              projectSlug: 'demo',
+              tableSlug: 'users',
+              sheetTabName: 'Users',
+              idColumn: '_id',
+              indexedFields: ['_id'],
+              readOnlyFields: [],
+              fieldRules: {},
+              headerRow: 1,
+              dataStartRow: 2,
+              readEnabled: true,
+              createEnabled: true,
+              updateEnabled: true,
+              deleteEnabled: true,
+              cacheTtlSeconds: 15,
+              createdAt: '2026-04-26T00:00:00.000Z',
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects/demo/tables/users/cache') {
+        return createJsonResponse({
+          data: {
+            status: 'ready',
+            cacheTtlSeconds: 15,
+            stale: false,
+            staleReason: 'fresh',
+            rowCount: 0,
+            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
+            lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
+            lastSyncError: null,
+            validation: {
+              status: 'ok',
+              issueCount: 0,
+              issues: [],
+              validatedAt: '2026-04-26T00:00:01.000Z'
+            },
+            externalChange: {
+              pending: false,
+              lastChangedAt: null,
+              debounceUntil: null,
+              lastAutoReindexAt: null
+            }
+          }
+        });
+      }
+
+      if (url === '/v1/admin/projects/demo/tables/users' && method === 'DELETE') {
+        tableDeleted = true;
+        return createJsonResponse({
+          ok: true,
+          deletedTable: 'users'
+        });
+      }
+
+      if (url === '/v1/admin/projects/demo/spreadsheet/tabs') {
+        return createJsonResponse({ data: [] });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByTestId('table-card-users');
+    fireEvent.click(screen.getByRole('button', { name: 'Delete table' }));
+
+    await screen.findByText('Deleting table demo/users complete.');
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Delete table demo/users?'));
+    expect(screen.queryByTestId('table-card-users')).toBeNull();
+    expect(screen.getByText('No tables configured yet. Connect an existing tab to expose it through the API.')).toBeTruthy();
+  });
+
+  it('deletes the selected project after confirmation', async () => {
+    let projectDeleted = false;
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const spreadsheetWatchResponse = createSpreadsheetWatchStatusResponse(url);
+      if (spreadsheetWatchResponse) return spreadsheetWatchResponse;
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        return createJsonResponse({
+          data: projectDeleted ? [] : [
+            {
+              slug: 'demo',
+              name: 'Demo',
+              spreadsheetId: 'sheet-1',
+              tableCount: 0,
+              updatedAt: '2026-04-26T00:00:00.000Z'
+            }
+          ]
+        });
+      }
+
+      if (url === '/v1/admin/projects?project=demo') {
+        return createJsonResponse({
+          project: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'default',
+            defaultAuthMode: 'private',
+            createdAt: '2026-04-26T00:00:00.000Z',
+            updatedAt: '2026-04-26T00:00:00.000Z'
+          },
+          tables: []
+        });
+      }
+
+      if (url === '/v1/admin/projects/demo' && method === 'DELETE') {
+        projectDeleted = true;
+        return createJsonResponse({
+          ok: true,
+          deletedProject: 'demo',
+          deletedTables: []
+        });
+      }
+
+      if (url === '/v1/admin/keys?project=demo' || url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'secret-token' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByText('Demo');
+    fireEvent.click(screen.getByRole('button', { name: 'Delete project' }));
+
+    await screen.findByText('Deleting project demo complete.');
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Delete project demo'));
+    expect(screen.getByText('No projects yet. Add a project to connect your first spreadsheet.')).toBeTruthy();
   });
 
   it('loads spreadsheet tabs only after table setup is opened', async () => {

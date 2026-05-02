@@ -7,10 +7,13 @@ import {
   type ControlPlaneDoResponse,
   type CreateProjectInput,
   type CreateTableInput,
+  type DeleteProjectResult,
+  type DeleteTableResult,
   maxIndexedFieldCount,
   NotFoundError,
   type ProjectAccessResult,
   type ProjectConfig,
+  projectDoRequestSchema,
   type ProjectDoRequest,
   type ProjectDoResponse,
   type ProjectSummary,
@@ -20,7 +23,7 @@ import {
 import { normalizeFieldRules } from '@sheetflare/domain';
 import { GoogleSheetsService } from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from '../types';
-import { doRpc } from '../rpc';
+import { doRpc, durableObjectErrorResponse, parseDurableObjectRpcRequest } from '../rpc';
 import { defaultGoogleCredentialRef, resolveGoogleCredential } from '../google-credentials';
 
 type ProjectRow = {
@@ -144,9 +147,13 @@ export class ProjectDO {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
-    const body = (await request.json()) as ProjectDoRequest;
-    const result = await this.handle(body);
-    return Response.json(result);
+    try {
+      const body = await parseDurableObjectRpcRequest(request, projectDoRequestSchema);
+      const result = await this.handle(body);
+      return Response.json(result);
+    } catch (error) {
+      return durableObjectErrorResponse(error);
+    }
   }
 
   private async handle(body: ProjectDoRequest): Promise<ProjectDoResponse> {
@@ -172,6 +179,16 @@ export class ProjectDO {
         return {
           type: 'project.table.create.result',
           result: await this.createTable(body.projectSlug, body.input, body.allowExisting ?? false)
+        };
+      case 'project.table.delete':
+        return {
+          type: 'project.table.delete.result',
+          result: await this.deleteTable(body.projectSlug, body.tableSlug)
+        };
+      case 'project.delete':
+        return {
+          type: 'project.delete.result',
+          result: await this.deleteProject(body.projectSlug)
         };
       case 'project.table.list':
         return {
@@ -378,6 +395,70 @@ export class ProjectDO {
     return this.mapTable(table);
   }
 
+  private async deleteTable(projectSlug: string, tableSlug: string): Promise<DeleteTableResult> {
+    const project = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, projectSlug);
+    if (!project) {
+      await this.deleteRegistryProject(projectSlug);
+      return {
+        ok: true,
+        deletedTable: tableSlug
+      };
+    }
+
+    const table = this.selectOptionalRow<TableRow>(
+      `SELECT * FROM tables WHERE project_slug = ? AND table_slug = ?`,
+      projectSlug,
+      tableSlug
+    );
+    if (!table) {
+      await this.syncRegistry(projectSlug);
+      return {
+        ok: true,
+        deletedTable: tableSlug
+      };
+    }
+
+    const now = new Date().toISOString();
+
+    this.ctx.storage.sql.exec(
+      `DELETE FROM tables WHERE project_slug = ? AND table_slug = ?`,
+      projectSlug,
+      tableSlug
+    );
+    this.ctx.storage.sql.exec(`UPDATE project SET updated_at = ? WHERE slug = ?`, now, projectSlug);
+    await this.syncRegistry(projectSlug);
+
+    return {
+      ok: true,
+      deletedTable: tableSlug
+    };
+  }
+
+  private async deleteProject(projectSlug: string): Promise<DeleteProjectResult> {
+    const project = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, projectSlug);
+    if (!project) {
+      await this.deleteRegistryProject(projectSlug);
+      return {
+        ok: true,
+        deletedProject: projectSlug,
+        deletedTables: []
+      };
+    }
+
+    const tables = await this.listTables(projectSlug);
+    const deletedTables = tables.map((table) => table.tableSlug);
+
+    this.ctx.storage.sql.exec(`DELETE FROM tables WHERE project_slug = ?`, projectSlug);
+    this.ctx.storage.sql.exec(`DELETE FROM project WHERE slug = ?`, projectSlug);
+    await this.deleteRegistryProject(projectSlug);
+
+    return {
+      ok: true,
+      deletedProject: projectSlug,
+      deletedTables
+    };
+  }
+
   private async resolveProjectTable(projectSlug: string, tableSlug: string): Promise<ResolvedProjectTableResult> {
     const project = this.mapProject(this.requireProjectRow(projectSlug));
     const table = await this.getTable(projectSlug, tableSlug);
@@ -399,6 +480,7 @@ export class ProjectDO {
   }
 
   private async listTables(projectSlug: string): Promise<TableConfig[]> {
+    this.requireProjectRow(projectSlug);
     const rows = this.ctx.storage.sql
       .exec(`SELECT * FROM tables WHERE project_slug = ? ORDER BY table_slug ASC`, projectSlug)
       .toArray() as TableRow[];
@@ -464,6 +546,13 @@ export class ProjectDO {
     await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), {
       type: 'control.project.upsert',
       summary
+    });
+  }
+
+  private async deleteRegistryProject(projectSlug: string) {
+    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), {
+      type: 'control.project.delete',
+      projectSlug
     });
   }
 

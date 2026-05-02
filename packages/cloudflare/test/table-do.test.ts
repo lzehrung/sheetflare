@@ -347,6 +347,127 @@ describe('TableDO', () => {
     });
   });
 
+  it('allows table delete retries to repair the project registry after local metadata is already gone', async () => {
+    const env = createTestEnv();
+    const projectStub = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo'));
+    const controlPlaneStub = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.create',
+      input: {
+        slug: 'demo',
+        name: 'Demo',
+        spreadsheetId: 'sheet-1'
+      }
+    });
+    await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.table.create',
+      projectSlug: 'demo',
+      input: {
+        tableSlug: 'users',
+        sheetTabName: 'Users'
+      }
+    });
+
+    await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.table.delete',
+      projectSlug: 'demo',
+      tableSlug: 'users'
+    });
+    const retriedDelete = await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.table.delete',
+      projectSlug: 'demo',
+      tableSlug: 'users'
+    });
+    const projects = await doRpc<ControlPlaneDoResponse>(controlPlaneStub, {
+      type: 'control.projects.list'
+    });
+
+    expect((retriedDelete as {
+      type: 'project.table.delete.result';
+      result: { ok: true; deletedTable: string };
+    }).result).toEqual({
+      ok: true,
+      deletedTable: 'users'
+    });
+    expect((projects as {
+      type: 'control.projects.list.result';
+      result: { data: Array<{ slug: string; tableCount: number }> };
+    }).result.data).toEqual([
+      expect.objectContaining({
+        slug: 'demo',
+        tableCount: 0
+      })
+    ]);
+  });
+
+  it('treats table delete for an already-deleted project as an idempotent cleanup request', async () => {
+    const env = createTestEnv();
+    const projectStub = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo'));
+
+    const response = await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.table.delete',
+      projectSlug: 'demo',
+      tableSlug: 'users'
+    });
+
+    expect((response as {
+      type: 'project.table.delete.result';
+      result: { ok: true; deletedTable: string };
+    }).result).toEqual({
+      ok: true,
+      deletedTable: 'users'
+    });
+  });
+
+  it('allows project delete retries to repair the registry after local metadata is already gone', async () => {
+    const env = createTestEnv();
+    const projectStub = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo'));
+    const controlPlaneStub = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.create',
+      input: {
+        slug: 'demo',
+        name: 'Demo',
+        spreadsheetId: 'sheet-1'
+      }
+    });
+    await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.table.create',
+      projectSlug: 'demo',
+      input: {
+        tableSlug: 'users',
+        sheetTabName: 'Users'
+      }
+    });
+
+    await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.delete',
+      projectSlug: 'demo'
+    });
+    const retriedDelete = await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.delete',
+      projectSlug: 'demo'
+    });
+    const projects = await doRpc<ControlPlaneDoResponse>(controlPlaneStub, {
+      type: 'control.projects.list'
+    });
+
+    expect((retriedDelete as {
+      type: 'project.delete.result';
+      result: { ok: true; deletedProject: string; deletedTables: string[] };
+    }).result).toEqual({
+      ok: true,
+      deletedProject: 'demo',
+      deletedTables: []
+    });
+    expect((projects as {
+      type: 'control.projects.list.result';
+      result: { data: Array<unknown> };
+    }).result.data).toEqual([]);
+  });
+
   it('rejects project creation when a named credential ref is missing', async () => {
     const env = createTestEnv();
 
@@ -366,6 +487,23 @@ describe('TableDO', () => {
     ).rejects.toMatchObject({
       name: 'NotFoundError',
       message: 'Google credential "missing" was not found.'
+    });
+  });
+
+  it('rejects table listing when the parent project is missing', async () => {
+    const env = createTestEnv();
+
+    await expect(
+      doRpc<ProjectDoResponse>(
+        env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+        {
+          type: 'project.table.list',
+          projectSlug: 'demo'
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'NotFoundError',
+      message: 'Project demo was not found.'
     });
   });
 
@@ -4203,6 +4341,191 @@ describe('TableDO', () => {
     expect((containsResponse as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-3']);
   });
 
+  it('binds multiple indexed filter parameters in SQL placeholder order', async () => {
+    const env = createTestEnv();
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'email', 'status', 'name'],
+        ['row-1', 'ada@example.com', 'active', 'Ada'],
+        ['row-2', 'ada@example.com', 'inactive', 'Ada Old'],
+        ['row-3', 'grace@example.com', 'active', 'Grace']
+      ],
+      requestedRanges: []
+    };
+
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['email', 'status', 'name'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          sort: 'rowNumber:asc',
+          filter: {
+            email: {
+              eq: 'ada@example.com'
+            },
+            status: {
+              eq: 'active'
+            }
+          }
+        }
+      }
+    );
+
+    expect((response as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-1']);
+  });
+
+  it('binds indexed sort parameters before indexed filter condition parameters', async () => {
+    const env = createTestEnv();
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status', 'name'],
+        ['row-1', 'active', 'Zoe'],
+        ['row-2', 'inactive', 'Ada'],
+        ['row-3', 'active', 'Bea']
+      ],
+      requestedRanges: []
+    };
+
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['status', 'name'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          sort: 'name:asc',
+          filter: {
+            status: {
+              eq: 'active'
+            }
+          }
+        }
+      }
+    );
+
+    expect((response as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-3', 'row-1']);
+  });
+
+  it('treats SQL-shaped indexed field names and filter values as bound values', async () => {
+    const env = createTestEnv();
+    const suspiciousFieldName = "status') OR 1=1 --";
+    const suspiciousValue = "active' OR '1'='1";
+    const sheet: SheetState = {
+      rows: [
+        ['_id', suspiciousFieldName],
+        ['row-1', 'active'],
+        ['row-2', suspiciousValue],
+        ['row-3', 'inactive']
+      ],
+      requestedRanges: []
+    };
+
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: [suspiciousFieldName],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          sort: 'rowNumber:asc',
+          filter: {
+            [suspiciousFieldName]: {
+              eq: suspiciousValue
+            }
+          }
+        }
+      }
+    );
+
+    expect((response as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-2']);
+  });
+
   it('applies indexed neq filters consistently across null and mismatched kinds', async () => {
     const env = createTestEnv();
     const sheet: SheetState = {
@@ -4282,7 +4605,7 @@ describe('TableDO', () => {
 
     vi.stubGlobal('fetch', createSheetsFetch(sheet));
     const validationSpy = vi.spyOn(
-      TableDO.prototype as unknown as {
+      TableDO.prototype as {
         buildValidationSummary: (rows: readonly unknown[], config: unknown) => unknown;
       },
       'buildValidationSummary'

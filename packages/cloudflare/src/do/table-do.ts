@@ -12,6 +12,7 @@ import {
   type RowEnvelope,
   type RowRecord,
   type TableCacheStatus,
+  tableDoRequestSchema,
   type TableDoRequest,
   type TableRequestContext,
   type TableDoResponse,
@@ -49,7 +50,7 @@ import {
 } from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from '../types';
 import { getMaxFullScanRows } from '../config';
-import { doRpc } from '../rpc';
+import { doRpc, durableObjectErrorResponse, parseDurableObjectRpcRequest } from '../rpc';
 import { resolveGoogleCredential } from '../google-credentials';
 
 type TableMetaRow = {
@@ -369,9 +370,13 @@ export class TableDO {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
-    const body = (await request.json()) as TableDoRequest;
-    const result = await this.handle(body);
-    return Response.json(result);
+    try {
+      const body = await parseDurableObjectRpcRequest(request, tableDoRequestSchema);
+      const result = await this.handle(body);
+      return Response.json(result);
+    } catch (error) {
+      return durableObjectErrorResponse(error);
+    }
   }
 
   private async handle(body: TableDoRequest): Promise<TableDoResponse> {
@@ -416,6 +421,12 @@ export class TableDO {
         return {
           type: 'table.cache.refresh.result',
           result: await this.refreshCacheIfStale(body.projectSlug, body.tableSlug, body.resolvedConfig, requestContext)
+        };
+      case 'table.cache.clear':
+        this.clearCacheState();
+        return {
+          type: 'table.cache.clear.result',
+          result: { ok: true }
         };
       case 'table.external-change.record':
         return {
@@ -1253,6 +1264,13 @@ export class TableDO {
     );
   }
 
+  private clearCacheState() {
+    this.clearCacheTables('live');
+    this.clearCacheTables('staging');
+    this.ctx.storage.sql.exec(`DELETE FROM meta`);
+    this.activeSync = null;
+  }
+
   private getSyncMeta(): SyncMeta {
     return {
       status: (this.getMeta('sync.status') as SyncMeta['status'] | null) ?? 'idle',
@@ -1554,8 +1572,9 @@ export class TableDO {
 
     const rows = this.ctx.storage.sql.exec(
       sql,
-      ...filterPlan.parameters,
+      ...filterPlan.joinParameters,
       ...sortPlan.parameters,
+      ...filterPlan.conditionParameters,
       ...cursorPlan.parameters,
       query.limit + 1
     ).toArray() as Array<

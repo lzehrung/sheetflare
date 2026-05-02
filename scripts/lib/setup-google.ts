@@ -86,7 +86,9 @@ export function getNamedGoogleCredentialsStatus(rawValue: string | null | undefi
       return 'invalid';
     }
 
-    if (!isNonEmptyString(entry.client_email) || !isNonEmptyString(entry.private_key)) {
+    const hasSnakeCaseCredential = isNonEmptyString(entry.client_email) && isNonEmptyString(entry.private_key);
+    const hasCamelCaseCredential = isNonEmptyString(entry.clientEmail) && isNonEmptyString(entry.privateKey);
+    if (!hasSnakeCaseCredential && !hasCamelCaseCredential) {
       return 'invalid';
     }
   }

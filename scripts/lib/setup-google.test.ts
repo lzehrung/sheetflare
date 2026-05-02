@@ -38,6 +38,12 @@ describe('google setup defaults', () => {
         private_key: 'secret'
       }
     }))).toBe('configured');
+    expect(getNamedGoogleCredentialsStatus(JSON.stringify({
+      prod: {
+        clientEmail: 'service@example.com',
+        privateKey: 'secret'
+      }
+    }))).toBe('configured');
   });
 
   it('validates project and service-account names clearly', () => {

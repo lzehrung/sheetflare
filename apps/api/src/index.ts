@@ -23,7 +23,9 @@ import {
   createRowInputSchema,
   createRowResultSchema,
   createTableInputSchema,
+  deleteProjectResultSchema,
   deleteRowResultSchema,
+  deleteTableResultSchema,
   getRowResultSchema,
   getSchemaResultSchema,
   getTableCacheStatusResultSchema,
@@ -34,6 +36,7 @@ import {
   rowParamsSchema,
   tableConfigSchema,
   BadRequestError,
+  NotFoundError,
   ServiceUnavailableError,
   toErrorResponse,
   UnauthorizedError,
@@ -57,6 +60,8 @@ import {
   type CreateRowInput,
   type CreateTableInput,
   type CreateRowResult,
+  type DeleteProjectResult,
+  type DeleteTableResult,
   type GetRowResult,
   type GetSchemaResult,
   type GetTableCacheStatusResult,
@@ -286,6 +291,9 @@ const optionalBearerSecurity = [{ bearerAuth: [] }, {}];
 const apiKeyTouchIntervalMs = 5 * 60 * 1000;
 const maxRecentApiKeyTouches = 10_000;
 const recentApiKeyTouches = new Map<string, number>();
+const corsAllowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
+const corsAllowedHeaders = 'Authorization, Content-Type';
+const corsExposedHeaders = 'X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset';
 
 function pruneRecentApiKeyTouches(nowMs: number) {
   if (recentApiKeyTouches.size < maxRecentApiKeyTouches) {
@@ -323,6 +331,63 @@ function getTableStub(env: Env, projectSlug: string, tableSlug: string) {
 
 function getRateLimitStub(env: Env, shardKey: string) {
   return env.RATE_LIMIT_DO.get(env.RATE_LIMIT_DO.idFromName(`rate-limit:${shardKey}`));
+}
+
+function getAllowedCorsOrigin(request: Request, env: Env) {
+  const origin = request.headers.get('origin')?.trim();
+  const configuredOrigins = env.SHEETFLARE_ALLOWED_ORIGINS?.split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0) ?? [];
+
+  if (!origin || configuredOrigins.length === 0) {
+    return null;
+  }
+
+  if (configuredOrigins.includes('*')) {
+    return '*';
+  }
+
+  return configuredOrigins.includes(origin) ? origin : null;
+}
+
+function applyCorsHeaders(response: Response, request: Request, env: Env) {
+  const allowedOrigin = getAllowedCorsOrigin(request, env);
+  if (!allowedOrigin) {
+    return;
+  }
+
+  response.headers.set('access-control-allow-origin', allowedOrigin);
+  response.headers.set('access-control-expose-headers', corsExposedHeaders);
+  response.headers.append('vary', 'Origin');
+}
+
+function createCorsPreflightResponse(request: Request, env: Env) {
+  const allowedOrigin = getAllowedCorsOrigin(request, env);
+  if (!allowedOrigin) {
+    return new Response(JSON.stringify({
+      error: {
+        code: 'FORBIDDEN',
+        message: 'CORS origin is not allowed.',
+        details: null
+      }
+    }), {
+      status: 403,
+      headers: {
+        'content-type': 'application/json'
+      }
+    });
+  }
+
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'access-control-allow-origin': allowedOrigin,
+      'access-control-allow-methods': corsAllowedMethods,
+      'access-control-allow-headers': corsAllowedHeaders,
+      'access-control-max-age': '600',
+      'vary': 'Origin'
+    }
+  });
 }
 
 function parseApiKey(value: string) {
@@ -420,6 +485,10 @@ function getRateLimitOperationKey(
     return 'admin.projects.upsert';
   }
 
+  if (/\/v1\/admin\/projects\/[^/]+$/.test(path) && normalizedMethod === 'DELETE') {
+    return 'admin.projects.delete';
+  }
+
   if (path === '/v1/admin/keys' && normalizedMethod === 'GET') {
     return 'admin.keys.list';
   }
@@ -434,6 +503,10 @@ function getRateLimitOperationKey(
 
   if (path.startsWith('/v1/admin/projects/') && path.endsWith('/tables') && normalizedMethod === 'POST') {
     return 'admin.tables.upsert';
+  }
+
+  if (/\/v1\/admin\/projects\/[^/]+\/tables\/[^/]+$/.test(path) && normalizedMethod === 'DELETE') {
+    return 'admin.tables.delete';
   }
 
   if (path.startsWith('/v1/admin/projects/') && path.endsWith('/spreadsheet/tabs') && normalizedMethod === 'GET') {
@@ -673,14 +746,27 @@ function getNamedGoogleCredentialsStatus(env: Env) {
     if (
       typeof entry !== 'object' ||
       entry === null ||
-      Array.isArray(entry) ||
-      !('client_email' in entry) ||
-      !('private_key' in entry) ||
-      typeof entry.client_email !== 'string' ||
-      entry.client_email.trim().length === 0 ||
-      typeof entry.private_key !== 'string' ||
-      entry.private_key.trim().length === 0
+      Array.isArray(entry)
     ) {
+      return 'invalid' as const;
+    }
+
+    const hasSnakeCaseCredential =
+      'client_email' in entry &&
+      'private_key' in entry &&
+      typeof entry.client_email === 'string' &&
+      entry.client_email.trim().length > 0 &&
+      typeof entry.private_key === 'string' &&
+      entry.private_key.trim().length > 0;
+    const hasCamelCaseCredential =
+      'clientEmail' in entry &&
+      'privateKey' in entry &&
+      typeof entry.clientEmail === 'string' &&
+      entry.clientEmail.trim().length > 0 &&
+      typeof entry.privateKey === 'string' &&
+      entry.privateKey.trim().length > 0;
+
+    if (!hasSnakeCaseCredential && !hasCamelCaseCredential) {
       return 'invalid' as const;
     }
   }
@@ -773,6 +859,28 @@ function assertProjectScope(auth: AuthContext, scope: ApiScope, projectSlug: str
   }
 }
 
+function assertCredentialProjectBoundary(auth: AuthContext, projectSlug: string) {
+  if (auth.kind !== 'api-key') {
+    return;
+  }
+
+  if (auth.record.projectSlug && auth.record.projectSlug !== projectSlug) {
+    throw new UnauthorizedError();
+  }
+}
+
+function assertProjectScopedKeyCanDelegateScopes(auth: AuthContext, requestedScopes: readonly ApiScope[]) {
+  if (auth.kind !== 'api-key' || !auth.record.projectSlug) {
+    return;
+  }
+
+  const callerScopes = new Set(auth.record.scopes);
+  const unauthorizedScopes = requestedScopes.filter((scope) => !callerScopes.has(scope));
+  if (unauthorizedScopes.length > 0) {
+    throw new UnauthorizedError('Project-scoped API keys can only delegate scopes they already have.');
+  }
+}
+
 async function loadProject(c: { env: Env }, projectSlug: string) {
   const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, projectSlug), {
     type: 'project.get',
@@ -801,6 +909,10 @@ async function requirePublicReadProject(c: { env: Env }, projectSlug: string) {
       throw new UnauthorizedError();
     }
   } catch (error) {
+    if (error instanceof NotFoundError) {
+      throw new UnauthorizedError();
+    }
+
     if (error instanceof DurableRpcError && error.status === 404) {
       throw new UnauthorizedError();
     }
@@ -820,6 +932,39 @@ async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug:
     type: 'project.table.resolve.result';
     result: { data: ResolvedProjectTableResult };
   }).result.data;
+}
+
+async function loadProjectTables(c: { env: Env }, projectSlug: string) {
+  const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, projectSlug), {
+    type: 'project.table.list',
+    projectSlug
+  });
+
+  return (response as {
+    type: 'project.table.list.result';
+    result: { data: UpsertTableResult['data'][] };
+  }).result.data;
+}
+
+async function loadProjectTablesForDelete(c: { env: Env }, projectSlug: string) {
+  try {
+    return await loadProjectTables(c, projectSlug);
+  } catch (error) {
+    if (error instanceof NotFoundError) {
+      return [];
+    }
+
+    throw error;
+  }
+}
+
+async function clearTableCacheState(c: AppContext, projectSlug: string, tableSlug: string, route: string) {
+  await doRpc<TableDoResponse>(getTableStub(c.env, projectSlug, tableSlug), {
+    type: 'table.cache.clear',
+    projectSlug,
+    tableSlug,
+    requestContext: buildTableRequestContext(c, route)
+  });
 }
 
 async function getApiKeyRecord(c: { env: Env }, apiKeyId: string) {
@@ -959,6 +1104,23 @@ const adminCreateProjectRoute = createRoute({
   }
 });
 
+const adminDeleteProjectRoute = createRoute({
+  method: 'delete',
+  path: '/v1/admin/projects/{project}',
+  tags: ['Projects'],
+  security: adminSecurity,
+  request: {
+    params: adminProjectParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'Delete a configured project, or confirm it is already absent, and clear caches for its tables',
+      content: jsonContent(deleteProjectResultSchema)
+    },
+    401: unauthorizedResponse
+  }
+});
+
 const adminListSpreadsheetTabsRoute = createRoute({
   method: 'get',
   path: '/v1/admin/projects/{project}/spreadsheet/tabs',
@@ -1044,6 +1206,23 @@ const adminCreateTableRoute = createRoute({
     400: badRequestResponse,
     401: unauthorizedResponse,
     404: notFoundResponse
+  }
+});
+
+const adminDeleteTableRoute = createRoute({
+  method: 'delete',
+  path: '/v1/admin/projects/{project}/tables/{table}',
+  tags: ['Tables'],
+  security: adminSecurity,
+  request: {
+    params: adminProjectTableParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'Delete a configured table, or confirm it is already absent, and clear its local cache',
+      content: jsonContent(deleteTableResultSchema)
+    },
+    401: unauthorizedResponse
   }
 });
 
@@ -1372,7 +1551,12 @@ function createApp() {
     const startedAt = Date.now();
     c.set('requestId', crypto.randomUUID());
 
-    await next();
+    if (c.req.method === 'OPTIONS' && c.req.path.startsWith('/v1/')) {
+      c.res = createCorsPreflightResponse(c.req.raw, c.env);
+    } else {
+      await next();
+      applyCorsHeaders(c.res, c.req.raw, c.env);
+    }
 
     c.res.headers.set('x-request-id', c.get('requestId'));
     const rateLimit = c.get('rateLimit');
@@ -1444,6 +1628,7 @@ function createApp() {
         'x-request-id': c.get('requestId')
       }
     });
+    applyCorsHeaders(response, c.req.raw, c.env);
     if (rateLimit) {
       response.headers.set('x-ratelimit-limit', String(rateLimit.limit));
       response.headers.set('x-ratelimit-remaining', String(rateLimit.remaining));
@@ -1482,7 +1667,7 @@ function createApp() {
     } else if (!hasDefaultGoogleCredential && namedGoogleCredentials === 'configured') {
       notes.push('Default Google service-account credential is not configured, but named GOOGLE_CREDENTIALS_JSON entries are available for project-specific refs.');
     } else if (namedGoogleCredentials === 'invalid') {
-      notes.push('GOOGLE_CREDENTIALS_JSON is present but invalid. Each named credential must include non-empty client_email and private_key fields.');
+      notes.push('GOOGLE_CREDENTIALS_JSON is present but invalid. Each named credential must include non-empty client_email/private_key or clientEmail/privateKey fields.');
     }
 
     if (!hasBootstrapAdmin) {
@@ -1576,6 +1761,27 @@ function createApp() {
     return c.json(result.data, result.created ? 201 : 200);
   });
 
+  app.openapi(adminDeleteProjectRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    const { project } = parsePathParams(c, adminProjectParamsSchema);
+    assertProjectScope(auth, 'admin:projects', project);
+    const tables = await loadProjectTablesForDelete(c, project);
+    for (const table of tables) {
+      await clearTableCacheState(c, project, table.tableSlug, 'admin.projects.delete');
+    }
+
+    const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
+      type: 'project.delete',
+      projectSlug: project
+    });
+    const result = (response as {
+      type: 'project.delete.result';
+      result: DeleteProjectResult;
+    }).result;
+
+    return c.json(result);
+  });
+
   app.openapi(adminListSpreadsheetTabsRoute, async (c) => {
     const auth = await authenticateRequest(c);
     const { project } = parsePathParams(c, adminProjectParamsSchema);
@@ -1648,9 +1854,28 @@ function createApp() {
     );
   });
 
+  app.openapi(adminDeleteTableRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
+    assertProjectScope(auth, 'admin:projects', project);
+    await clearTableCacheState(c, project, table, 'admin.tables.delete');
+    const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
+      type: 'project.table.delete',
+      projectSlug: project,
+      tableSlug: table
+    });
+    const result = (response as {
+      type: 'project.table.delete.result';
+      result: DeleteTableResult;
+    }).result;
+
+    return c.json(result);
+  });
+
   app.openapi(listRowsRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
+    assertCredentialProjectBoundary(auth, params.project);
     if (auth.kind === 'anonymous') {
       await requirePublicReadProject(c, params.project);
     }
@@ -1674,6 +1899,7 @@ function createApp() {
   app.openapi(getSchemaRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
     const auth = await authenticateRequest(c);
+    assertCredentialProjectBoundary(auth, params.project);
     if (auth.kind === 'anonymous') {
       await requirePublicReadProject(c, params.project);
     }
@@ -1844,6 +2070,7 @@ function createApp() {
   app.openapi(getRowRoute, async (c) => {
     const params = parsePathParams(c, rowParamsSchema);
     const auth = await authenticateRequest(c);
+    assertCredentialProjectBoundary(auth, params.project);
     if (auth.kind === 'anonymous') {
       await requirePublicReadProject(c, params.project);
     }
@@ -1950,6 +2177,7 @@ function createApp() {
         throw new UnauthorizedError('This key can only create API keys for its own project.');
       }
     }
+    assertProjectScopedKeyCanDelegateScopes(auth, input.scopes);
     if (input.projectSlug) {
       await loadProject(c, input.projectSlug);
     }

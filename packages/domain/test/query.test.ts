@@ -15,7 +15,25 @@ describe('buildFilterSql', () => {
     expect(result.joins).toHaveLength(2);
     expect(result.conditions.join(' ')).toContain("value_kind = 'string'");
     expect(result.conditions.join(' ')).toContain("value_kind = 'number'");
-    expect(result.parameters).toEqual(['status', 'active', 'score', 10, 20]);
+    expect(result.joinParameters).toEqual(['status', 'score']);
+    expect(result.conditionParameters).toEqual(['active', 10, 20]);
+    expect(result.parameters).toEqual(['status', 'score', 'active', 10, 20]);
+  });
+
+  it('keeps user-controlled field names and values out of generated SQL text', () => {
+    const suspiciousField = "status') OR 1=1 --";
+    const suspiciousValue = "active' OR '1'='1";
+    const result = buildFilterSql(
+      {
+        [suspiciousField]: { eq: suspiciousValue }
+      },
+      [suspiciousField]
+    );
+
+    expect(result.joins.join(' ')).not.toContain(suspiciousField);
+    expect(result.conditions.join(' ')).not.toContain(suspiciousValue);
+    expect(result.joinParameters).toEqual([suspiciousField]);
+    expect(result.conditionParameters).toEqual([suspiciousValue]);
   });
 
   it('rejects non-indexed filters', () => {
@@ -38,6 +56,8 @@ describe('buildFilterSql', () => {
     );
 
     expect(result.conditions).toContain("cf0.value_kind = 'string' AND cf0.value_text LIKE ? ESCAPE '\\'");
+    expect(result.joinParameters).toEqual(['name']);
+    expect(result.conditionParameters).toEqual(['a\\_\\%\\\\%']);
     expect(result.parameters).toEqual(['name', 'a\\_\\%\\\\%']);
   });
 
@@ -50,6 +70,8 @@ describe('buildFilterSql', () => {
     );
 
     expect(result.conditions).toContain("(cf0.value_kind != 'number' OR cf0.value_number != ?)");
+    expect(result.joinParameters).toEqual(['score']);
+    expect(result.conditionParameters).toEqual([10]);
     expect(result.parameters).toEqual(['score', 10]);
   });
 
@@ -68,6 +90,8 @@ describe('buildFilterSql', () => {
       'cr.row_id IS NULL',
       "cf2.value_kind = 'null'"
     ]);
+    expect(result.joinParameters).toEqual(['score']);
+    expect(result.conditionParameters).toEqual([]);
     expect(result.parameters).toEqual(['score']);
   });
 });

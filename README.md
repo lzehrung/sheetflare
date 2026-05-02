@@ -97,6 +97,7 @@ When the API worker is running:
 
 The docs reflect the actual HTTP surface, including auth requirements, path params, query params, and request/response bodies for the supported endpoints.
 Admin project and table POST routes create by default. Replacing an existing config requires an explicit `?upsert=true` and returns `200` instead of `201`.
+Admin project and table DELETE routes remove only Sheetflare configuration and cached local table state; they do not delete the upstream spreadsheet or tab.
 
 ## Auth Model
 
@@ -110,8 +111,21 @@ Admin project and table POST routes create by default. Replacing an existing con
   - `table:create`
   - `table:update`
   - `table:delete`
+- Project-scoped API keys with `admin:keys` can create keys only for their own project and only with scopes the caller already has.
 
 Bootstrap and deployment steps are documented in [docs/quickstart.md](./docs/quickstart.md).
+
+## Browser Access
+
+The hosted admin UI calls the API through its same-origin Pages proxy, so routine admin use does not require CORS.
+
+If you intentionally call the Worker API directly from another browser origin, set `SHEETFLARE_ALLOWED_ORIGINS` to a comma-separated allowlist such as:
+
+```text
+https://admin.example.com,https://internal.example.com
+```
+
+When unset, the Worker does not emit browser CORS headers. Preflight requests from unlisted origins are rejected.
 
 ## Row Identity
 
@@ -207,6 +221,8 @@ Performance notes:
   - refresh project and key views explicitly
   - inspect cache status
   - force reindex
+  - delete tables and projects with confirmation
+- Deleting a table clears its local cache before removing table metadata. Deleting a project clears configured table caches, revokes that project's scoped API keys, and stops Drive watches that no remaining project uses. Delete requests are idempotent, so retrying an already-completed delete returns success.
 - Table creation now supports `readOnlyFields` for columns that should stay sheet-managed.
 - Table creation also supports optional `fieldRules` for required, unique, enum, normalize, and type validation.
 - Admin credentials are not stored in the browser. Paste a scoped admin API key or bootstrap token when you need control-plane access.

@@ -38,6 +38,22 @@ describe('resolveGoogleCredential', () => {
     });
   });
 
+  it('resolves named credentials using service-account JSON field names', () => {
+    const env = createEnv({
+      GOOGLE_CREDENTIALS_JSON: JSON.stringify({
+        analytics: {
+          client_email: 'analytics@example.com',
+          private_key: 'analytics-private-key'
+        }
+      })
+    });
+
+    expect(resolveGoogleCredential(env, 'analytics')).toEqual({
+      clientEmail: 'analytics@example.com',
+      privateKey: 'analytics-private-key'
+    });
+  });
+
   it('fails clearly when a named credential does not exist', () => {
     expect(() => resolveGoogleCredential(createEnv(), 'missing')).toThrowError(NotFoundError);
   });

@@ -13,4 +13,5 @@ export interface CloudflareEnv {
   RATE_LIMIT_MAX_REQUESTS?: string;
   RATE_LIMIT_WINDOW_SECONDS?: string;
   TABLE_MAX_FULL_SCAN_ROWS?: string;
+  SHEETFLARE_ALLOWED_ORIGINS?: string;
 }

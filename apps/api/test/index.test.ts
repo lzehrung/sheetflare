@@ -98,15 +98,18 @@ function createEnv(options?: {
   rateLimitAllowed?: boolean;
   defaultAuthMode?: 'private' | 'public-read';
   projectAccessStatus?: 200 | 404 | 500;
+  tableCacheClearStatus?: 200 | 503;
   googleClientEmail?: string;
   googlePrivateKey?: string;
   googleCredentialsJson?: string;
   adminBearerToken?: string;
+  allowedOrigins?: string;
 }): Env {
   const rateLimitRequests: Array<{ name: string; key: string }> = [];
   const projectRequests: string[] = [];
   const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }> = [];
   const controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> = [];
+  const durableObjectRequests: string[] = [];
   let verifyApiKeyCallCount = 0;
   let apiKeyTouchCallCount = 0;
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
@@ -309,6 +312,8 @@ function createEnv(options?: {
   const project = new FakeDurableObjectNamespace(() => async (request) => {
     const body = (await request.json()) as {
       type: string;
+      projectSlug?: string;
+      tableSlug?: string;
       tab?: string;
       headerRow?: number;
       allowExisting?: boolean;
@@ -318,6 +323,7 @@ function createEnv(options?: {
       };
     };
     projectRequests.push(body.type);
+    durableObjectRequests.push(body.type);
     const requestUrl = new URL(request.url);
     const table = {
       projectSlug: 'demo',
@@ -495,6 +501,48 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'project.table.delete') {
+      return Response.json({
+        type: 'project.table.delete.result',
+        result: {
+          ok: true,
+          deletedTable: body.tableSlug ?? 'users'
+        }
+      });
+    }
+
+    if (body.type === 'project.delete') {
+      return Response.json({
+        type: 'project.delete.result',
+        result: {
+          ok: true,
+          deletedProject: body.projectSlug ?? 'demo',
+          deletedTables: body.projectSlug === 'missing-project' ? [] : ['users']
+        }
+      });
+    }
+
+    if (body.type === 'project.table.list') {
+      if (body.projectSlug === 'missing-project') {
+        return Response.json({
+          error: {
+            code: 'NOT_FOUND',
+            message: 'Project missing-project was not found.',
+            details: {
+              projectSlug: 'missing-project'
+            }
+          }
+        }, { status: 404 });
+      }
+
+      return Response.json({
+        type: 'project.table.list.result',
+        result: {
+          data: [table]
+        }
+      });
+    }
+
     return Response.json({
       type: 'project.table.list.result',
       result: {
@@ -516,6 +564,7 @@ function createEnv(options?: {
       resolvedConfig: body.resolvedConfig,
       requestContext: body.requestContext
     });
+    durableObjectRequests.push(body.type);
 
     if (body.type === 'table.row.create') {
       return Response.json({
@@ -593,6 +642,25 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'table.cache.clear') {
+      if (options?.tableCacheClearStatus === 503) {
+        return Response.json({
+          error: {
+            code: 'SERVICE_UNAVAILABLE',
+            message: 'Cache clear unavailable.',
+            details: null
+          }
+        }, { status: 503 });
+      }
+
+      return Response.json({
+        type: 'table.cache.clear.result',
+        result: {
+          ok: true
+        }
+      });
+    }
+
     if (body.type === 'table.rows.list') {
       return Response.json({
         type: 'table.rows.list.result',
@@ -639,7 +707,8 @@ function createEnv(options?: {
     GOOGLE_DRIVE_WEBHOOK_SECRET: 'drive-secret',
     ADMIN_BEARER_TOKEN: options?.adminBearerToken ?? 'secret',
     RATE_LIMIT_MAX_REQUESTS: '300',
-    RATE_LIMIT_WINDOW_SECONDS: '60'
+    RATE_LIMIT_WINDOW_SECONDS: '60',
+    SHEETFLARE_ALLOWED_ORIGINS: options?.allowedOrigins
   };
 
   Object.defineProperty(env, '__rateLimitRequests', {
@@ -656,6 +725,10 @@ function createEnv(options?: {
   });
   Object.defineProperty(env, '__controlPlaneRequests', {
     value: controlPlaneRequests,
+    enumerable: false
+  });
+  Object.defineProperty(env, '__durableObjectRequests', {
+    value: durableObjectRequests,
     enumerable: false
   });
   Object.defineProperty(env, '__verifyApiKeyCallCount', {
@@ -1114,6 +1187,156 @@ describe('api routes', () => {
     expect(response.status).toBe(409);
   });
 
+  it('returns not found when listing tables for a missing project', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects/missing-project/tables',
+      {
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'NOT_FOUND',
+        message: 'Project missing-project was not found.',
+        details: {
+          projectSlug: 'missing-project'
+        }
+      }
+    });
+  });
+
+  it('deletes a configured table and clears its cached table state', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __projectRequests: string[];
+      __tableRequests: Array<{ type: string }>;
+      __durableObjectRequests: string[];
+    };
+    const response = await app.request(
+      '/v1/admin/projects/demo/tables/users',
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      deletedTable: 'users'
+    });
+    expect(env.__projectRequests).toContain('project.table.delete');
+    expect(env.__tableRequests.map((request) => request.type)).toContain('table.cache.clear');
+    expect(env.__durableObjectRequests.indexOf('table.cache.clear')).toBeLessThan(
+      env.__durableObjectRequests.indexOf('project.table.delete')
+    );
+  });
+
+  it('does not delete table metadata when its cached table state cannot be cleared first', async () => {
+    const app = createApp();
+    const env = createEnv({ tableCacheClearStatus: 503 }) as Env & {
+      __projectRequests: string[];
+      __tableRequests: Array<{ type: string }>;
+    };
+    const response = await app.request(
+      '/v1/admin/projects/demo/tables/users',
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(503);
+    expect(env.__tableRequests.map((request) => request.type)).toContain('table.cache.clear');
+    expect(env.__projectRequests).not.toContain('project.table.delete');
+  });
+
+  it('deletes a configured project and clears caches for its tables', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __projectRequests: string[];
+      __tableRequests: Array<{ type: string }>;
+      __durableObjectRequests: string[];
+    };
+    const response = await app.request(
+      '/v1/admin/projects/demo',
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      deletedProject: 'demo',
+      deletedTables: ['users']
+    });
+    expect(env.__projectRequests).toContain('project.delete');
+    expect(env.__tableRequests.map((request) => request.type)).toContain('table.cache.clear');
+    expect(env.__durableObjectRequests.indexOf('table.cache.clear')).toBeLessThan(
+      env.__durableObjectRequests.indexOf('project.delete')
+    );
+  });
+
+  it('does not delete project metadata when one of its table caches cannot be cleared first', async () => {
+    const app = createApp();
+    const env = createEnv({ tableCacheClearStatus: 503 }) as Env & {
+      __projectRequests: string[];
+      __tableRequests: Array<{ type: string }>;
+    };
+    const response = await app.request(
+      '/v1/admin/projects/demo',
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(503);
+    expect(env.__tableRequests.map((request) => request.type)).toContain('table.cache.clear');
+    expect(env.__projectRequests).not.toContain('project.delete');
+  });
+
+  it('returns an idempotent project delete response when project metadata is already absent', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects/missing-project',
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      deletedProject: 'missing-project',
+      deletedTables: []
+    });
+  });
+
   it('reports internal readiness separately from liveness', async () => {
     const app = createApp();
     const response = await app.request('/ready', {}, createEnv());
@@ -1133,6 +1356,72 @@ describe('api routes', () => {
       notes: [
         'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
       ]
+    });
+  });
+
+  it('does not emit browser CORS headers unless an origin is explicitly allowed', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          origin: 'https://client.example'
+        }
+      },
+      createEnv({ defaultAuthMode: 'public-read' })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('allows configured browser CORS preflights before route rate limiting', async () => {
+    const app = createApp();
+    const env = createEnv({ allowedOrigins: 'https://client.example' }) as Env & {
+      __rateLimitRequests: Array<{ name: string; key: string }>;
+    };
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'https://client.example',
+          'access-control-request-method': 'GET',
+          'access-control-request-headers': 'authorization'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get('access-control-allow-origin')).toBe('https://client.example');
+    expect(response.headers.get('access-control-allow-methods')).toBe('GET, POST, PATCH, DELETE, OPTIONS');
+    expect(response.headers.get('access-control-allow-headers')).toBe('Authorization, Content-Type');
+    expect(env.__rateLimitRequests).toEqual([]);
+  });
+
+  it('rejects browser CORS preflights from unconfigured origins', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'https://untrusted.example',
+          'access-control-request-method': 'GET'
+        }
+      },
+      createEnv({ allowedOrigins: 'https://client.example' })
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get('access-control-allow-origin')).toBeNull();
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'FORBIDDEN',
+        message: 'CORS origin is not allowed.',
+        details: null
+      }
     });
   });
 
@@ -1193,6 +1482,29 @@ describe('api routes', () => {
     });
   });
 
+  it('accepts documented named Google credential field names in /ready', async () => {
+    const app = createApp();
+    const response = await app.request('/ready', {}, createEnv({
+      googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
+      googlePrivateKey: '',
+      googleCredentialsJson: JSON.stringify({
+        prod: {
+          clientEmail: 'service@example.com',
+          privateKey: 'secret'
+        }
+      })
+    }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      checks: {
+        defaultGoogleCredential: 'missing',
+        namedGoogleCredentials: 'configured'
+      }
+    });
+  });
+
   it('reports invalid named Google credentials distinctly in /ready', async () => {
     const app = createApp();
     const response = await app.request('/ready', {}, createEnv({
@@ -1214,7 +1526,7 @@ describe('api routes', () => {
         bootstrapAdmin: 'configured'
       },
       notes: [
-        'GOOGLE_CREDENTIALS_JSON is present but invalid. Each named credential must include non-empty client_email and private_key fields.',
+        'GOOGLE_CREDENTIALS_JSON is present but invalid. Each named credential must include non-empty client_email/private_key or clientEmail/privateKey fields.',
         'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
       ]
     });
@@ -1309,6 +1621,46 @@ describe('api routes', () => {
     expect(env.__projectRequests).not.toContain('project.table.resolve');
   });
 
+  it('does not leak missing project existence on anonymous read routes', async () => {
+    const app = createApp();
+    const env = createEnv({ projectAccessStatus: 404 }) as Env & { __projectRequests: string[] };
+
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {},
+      env
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'Unauthorized',
+        details: null
+      }
+    });
+    expect(env.__projectRequests).toContain('project.access.get');
+    expect(env.__projectRequests).not.toContain('project.table.resolve');
+  });
+
+  it('rejects wrong-project scoped read keys before resolving private table existence', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & { __projectRequests: string[] };
+
+    const response = await app.request(
+      '/v1/projects/other/tables/users/rows',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(401);
+    expect(env.__projectRequests).toEqual([]);
+  });
+
   it('preserves internal project access failures instead of rewriting them as unauthorized', async () => {
     const app = createApp();
     const response = await app.request('/v1/projects/demo/tables/users/rows', {}, createEnv({
@@ -1319,7 +1671,7 @@ describe('api routes', () => {
     expect(await response.json()).toEqual({
       error: {
         code: 'INTERNAL_ERROR',
-        message: 'Durable Object RPC failed with 500.',
+        message: 'Internal server error.',
         details: null
       }
     });
@@ -1517,6 +1869,35 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  it('rejects project-scoped key creation that grants scopes the caller does not have', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/keys',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer sfk_project-admin-key.any-secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: 'Escalated key',
+          projectSlug: 'demo',
+          scopes: ['table:delete']
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'Project-scoped API keys can only delegate scopes they already have.',
+        details: null
+      }
+    });
   });
 
   it('rejects revoking another project or global key with a project-scoped admin key', async () => {
@@ -1921,8 +2302,11 @@ describe('api routes', () => {
     expect(document.openapi).toBe('3.0.0');
     expect(document.info.title).toBe('Sheetflare API');
     expect(document.paths['/v1/admin/projects']).toBeDefined();
+    expect(document.paths['/v1/admin/projects/{project}']).toBeDefined();
     expect(document.paths['/v1/admin/projects/{project}/spreadsheet/tabs']).toBeDefined();
     expect(document.paths['/v1/admin/projects/{project}/spreadsheet/tabs/{tab}']).toBeDefined();
+    expect(document.paths['/v1/admin/projects/{project}/tables']).toBeDefined();
+    expect(document.paths['/v1/admin/projects/{project}/tables/{table}']).toBeDefined();
     expect(document.paths['/v1/projects/{project}/tables/{table}/rows']).toBeDefined();
     expect(document.paths['/v1/admin/projects/{project}/tables/{table}/cache']).toBeDefined();
     expect(document.paths['/v1/admin/projects/{project}/tables/{table}/refresh']).toBeDefined();

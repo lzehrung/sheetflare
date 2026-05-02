@@ -154,40 +154,57 @@ export function buildFilterSql(
 ): {
   joins: string[];
   conditions: string[];
+  joinParameters: SqlParameter[];
+  conditionParameters: SqlParameter[];
   parameters: SqlParameter[];
   requiresFullScan: boolean;
 } {
   const joins: string[] = [];
   const conditions: string[] = [];
-  const parameters: SqlParameter[] = [];
+  const joinParameters: SqlParameter[] = [];
+  const conditionParameters: SqlParameter[] = [];
   let requiresFullScan = false;
 
   if (!filter) {
-    return { joins, conditions, parameters, requiresFullScan };
+    return {
+      joins,
+      conditions,
+      joinParameters,
+      conditionParameters,
+      parameters: [],
+      requiresFullScan
+    };
   }
 
   for (const [fieldIndex, [field, definition]] of Object.entries(filter).entries()) {
     if (field === 'rowNumber') {
-      applyRowNumberFilter(definition, conditions, parameters);
+      applyRowNumberFilter(definition, conditions, conditionParameters);
       continue;
     }
 
     if (field === 'id') {
-      applyRowIdFilter(definition, conditions, parameters);
+      applyRowIdFilter(definition, conditions, conditionParameters);
       continue;
     }
 
     assertQueryableField(field, indexedFields, { allowId: true, allowRowNumber: true });
     const alias = getFieldAlias(fieldIndex);
     joins.push(`INNER JOIN cached_cells ${alias} ON ${alias}.row_id = cr.row_id AND ${alias}.field_name = ?`);
-    parameters.push(field);
+    joinParameters.push(field);
     const fieldResult = applyIndexedFieldFilter(alias, definition);
     conditions.push(...fieldResult.conditions);
-    parameters.push(...fieldResult.parameters);
+    conditionParameters.push(...fieldResult.parameters);
     requiresFullScan ||= fieldResult.requiresFullScan;
   }
 
-  return { joins, conditions, parameters, requiresFullScan };
+  return {
+    joins,
+    conditions,
+    joinParameters,
+    conditionParameters,
+    parameters: [...joinParameters, ...conditionParameters],
+    requiresFullScan
+  };
 }
 
 function applyRowNumberFilter(definition: FieldFilter, conditions: string[], parameters: SqlParameter[]) {
