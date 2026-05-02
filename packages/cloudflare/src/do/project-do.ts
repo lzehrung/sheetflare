@@ -396,7 +396,15 @@ export class ProjectDO {
   }
 
   private async deleteTable(projectSlug: string, tableSlug: string): Promise<DeleteTableResult> {
-    this.requireProjectRow(projectSlug);
+    const project = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, projectSlug);
+    if (!project) {
+      await this.deleteRegistryProject(projectSlug);
+      return {
+        ok: true,
+        deletedTable: tableSlug
+      };
+    }
+
     const table = this.selectOptionalRow<TableRow>(
       `SELECT * FROM tables WHERE project_slug = ? AND table_slug = ?`,
       projectSlug,

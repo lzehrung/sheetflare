@@ -868,6 +868,18 @@ function assertCredentialProjectBoundary(auth: AuthContext, projectSlug: string)
   }
 }
 
+function assertProjectScopedKeyCanDelegateScopes(auth: AuthContext, requestedScopes: readonly ApiScope[]) {
+  if (auth.kind !== 'api-key' || !auth.record.projectSlug) {
+    return;
+  }
+
+  const callerScopes = new Set(auth.record.scopes);
+  const unauthorizedScopes = requestedScopes.filter((scope) => !callerScopes.has(scope));
+  if (unauthorizedScopes.length > 0) {
+    throw new UnauthorizedError('Project-scoped API keys can only delegate scopes they already have.');
+  }
+}
+
 async function loadProject(c: { env: Env }, projectSlug: string) {
   const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, projectSlug), {
     type: 'project.get',
@@ -1085,11 +1097,10 @@ const adminDeleteProjectRoute = createRoute({
   },
   responses: {
     200: {
-      description: 'Delete a configured project and clear caches for its tables',
+      description: 'Delete a configured project, or confirm it is already absent, and clear caches for its tables',
       content: jsonContent(deleteProjectResultSchema)
     },
-    401: unauthorizedResponse,
-    404: notFoundResponse
+    401: unauthorizedResponse
   }
 });
 
@@ -1191,11 +1202,10 @@ const adminDeleteTableRoute = createRoute({
   },
   responses: {
     200: {
-      description: 'Delete a configured table and clear its local cache',
+      description: 'Delete a configured table, or confirm it is already absent, and clear its local cache',
       content: jsonContent(deleteTableResultSchema)
     },
-    401: unauthorizedResponse,
-    404: notFoundResponse
+    401: unauthorizedResponse
   }
 });
 
@@ -2150,6 +2160,7 @@ function createApp() {
         throw new UnauthorizedError('This key can only create API keys for its own project.');
       }
     }
+    assertProjectScopedKeyCanDelegateScopes(auth, input.scopes);
     if (input.projectSlug) {
       await loadProject(c, input.projectSlug);
     }

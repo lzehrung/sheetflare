@@ -517,7 +517,7 @@ function createEnv(options?: {
         result: {
           ok: true,
           deletedProject: body.projectSlug ?? 'demo',
-          deletedTables: ['users']
+          deletedTables: body.projectSlug === 'missing-project' ? [] : ['users']
         }
       });
     }
@@ -525,7 +525,7 @@ function createEnv(options?: {
     return Response.json({
       type: 'project.table.list.result',
       result: {
-        data: [table]
+        data: body.projectSlug === 'missing-project' ? [] : [table]
       }
     });
   });
@@ -1271,6 +1271,27 @@ describe('api routes', () => {
     expect(env.__projectRequests).not.toContain('project.delete');
   });
 
+  it('returns an idempotent project delete response when project metadata is already absent', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects/missing-project',
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      deletedProject: 'missing-project',
+      deletedTables: []
+    });
+  });
+
   it('reports internal readiness separately from liveness', async () => {
     const app = createApp();
     const response = await app.request('/ready', {}, createEnv());
@@ -1781,6 +1802,35 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  it('rejects project-scoped key creation that grants scopes the caller does not have', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/keys',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer sfk_project-admin-key.any-secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: 'Escalated key',
+          projectSlug: 'demo',
+          scopes: ['table:delete']
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'Project-scoped API keys can only delegate scopes they already have.',
+        details: null
+      }
+    });
   });
 
   it('rejects revoking another project or global key with a project-scoped admin key', async () => {

@@ -401,6 +401,25 @@ describe('TableDO', () => {
     ]);
   });
 
+  it('treats table delete for an already-deleted project as an idempotent cleanup request', async () => {
+    const env = createTestEnv();
+    const projectStub = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo'));
+
+    const response = await doRpc<ProjectDoResponse>(projectStub, {
+      type: 'project.table.delete',
+      projectSlug: 'demo',
+      tableSlug: 'users'
+    });
+
+    expect((response as {
+      type: 'project.table.delete.result';
+      result: { ok: true; deletedTable: string };
+    }).result).toEqual({
+      ok: true,
+      deletedTable: 'users'
+    });
+  });
+
   it('allows project delete retries to repair the registry after local metadata is already gone', async () => {
     const env = createTestEnv();
     const projectStub = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo'));
