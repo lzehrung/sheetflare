@@ -4,14 +4,12 @@ import {
   decodeQueryCursor,
   encodeQueryCursor,
   getListQueryFingerprint,
+  normalizeScalarCursorValue,
   normalizeListQuery
 } from '../src';
 
 function encodeRawCursorPayload(payload: unknown) {
-  return btoa(JSON.stringify(payload))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '');
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
 }
 
 describe('normalizeListQuery', () => {
@@ -51,6 +49,55 @@ describe('query cursors', () => {
         value: 12
       }
     });
+  });
+
+  it('round-trips unicode cursor payloads', () => {
+    const query = normalizeListQuery({
+      sort: 'café:asc',
+      fields: ['naïve']
+    });
+    const fingerprint = getListQueryFingerprint(query);
+    const cursor = encodeQueryCursor({
+      fingerprint,
+      sortField: 'café',
+      sortDirection: 'asc',
+      rowId: 'row-é',
+      rowNumber: 3,
+      value: {
+        kind: 'string',
+        value: 'São Paulo'
+      }
+    });
+
+    expect(decodeQueryCursor(cursor, fingerprint, query.sort)).toEqual({
+      fingerprint,
+      sortField: 'café',
+      sortDirection: 'asc',
+      rowId: 'row-é',
+      rowNumber: 3,
+      value: {
+        kind: 'string',
+        value: 'São Paulo'
+      }
+    });
+  });
+
+  it('rejects non-finite numeric cursor values before encoding', () => {
+    expect(() => normalizeScalarCursorValue(Number.NaN)).toThrow(BadRequestError);
+    expect(() => normalizeScalarCursorValue(Number.POSITIVE_INFINITY)).toThrow(BadRequestError);
+    expect(() =>
+      encodeQueryCursor({
+        fingerprint: 'query',
+        sortField: 'score',
+        sortDirection: 'asc',
+        rowId: 'row-1',
+        rowNumber: 1,
+        value: {
+          kind: 'number',
+          value: Number.NaN
+        }
+      })
+    ).toThrow(BadRequestError);
   });
 
   it('rejects invalid cursors', () => {

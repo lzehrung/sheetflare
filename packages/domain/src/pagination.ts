@@ -3,7 +3,14 @@ import { BadRequestError } from '@sheetflare/contracts';
 import { compareStableStrings } from './strings';
 
 function base64UrlEncode(input: string): string {
-  return btoa(input).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  const bytes = new TextEncoder().encode(input);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.slice(index, index + chunkSize));
+  }
+
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
 function base64UrlDecode(input: string): string {
@@ -11,7 +18,13 @@ function base64UrlDecode(input: string): string {
   const padding = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
 
   try {
-    return atob(normalized + padding);
+    const binary = atob(normalized + padding);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+
+    return new TextDecoder().decode(bytes);
   } catch {
     throw new BadRequestError('Invalid pagination cursor.');
   }
@@ -59,7 +72,13 @@ export interface QueryCursorPayload {
 export function normalizeScalarCursorValue(value: QueryScalarValue): CursorValue {
   if (value === null) return { kind: 'null', value: null };
   if (typeof value === 'boolean') return { kind: 'boolean', value };
-  if (typeof value === 'number') return { kind: 'number', value };
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new BadRequestError('Pagination cursor cannot contain a non-finite number.');
+    }
+
+    return { kind: 'number', value };
+  }
   return { kind: 'string', value };
 }
 
@@ -98,10 +117,6 @@ export function getListQueryFingerprint(query: NormalizedListRowsQuery): string 
     fields: query.fields,
     filter: query.filter
   });
-}
-
-export function encodeQueryCursor(cursor: QueryCursorPayload): string {
-  return base64UrlEncode(JSON.stringify(cursor));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -164,6 +179,15 @@ function parseQueryCursorPayload(value: unknown): QueryCursorPayload | null {
     rowNumber,
     value: cursorValue
   };
+}
+
+export function encodeQueryCursor(cursor: QueryCursorPayload): string {
+  const payload = parseQueryCursorPayload(cursor);
+  if (!payload) {
+    throw new BadRequestError('Invalid pagination cursor.');
+  }
+
+  return base64UrlEncode(JSON.stringify(payload));
 }
 
 export function decodeQueryCursor(
