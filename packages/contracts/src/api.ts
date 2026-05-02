@@ -166,6 +166,17 @@ export const deleteRowResultSchema = z.object({
   deletedId: rowIdSchema
 });
 
+export const deleteTableResultSchema = z.object({
+  ok: z.literal(true),
+  deletedTable: tableSlugSchema
+});
+
+export const deleteProjectResultSchema = z.object({
+  ok: z.literal(true),
+  deletedProject: projectSlugSchema,
+  deletedTables: z.array(tableSlugSchema)
+});
+
 export const getSchemaResultSchema = z.object({
   data: tableSchemaSchema
 });
@@ -228,6 +239,8 @@ export type GetRowResult = z.infer<typeof getRowResultSchema>;
 export type CreateRowResult = z.infer<typeof createRowResultSchema>;
 export type UpdateRowResult = z.infer<typeof updateRowResultSchema>;
 export type DeleteRowResult = z.infer<typeof deleteRowResultSchema>;
+export type DeleteTableResult = z.infer<typeof deleteTableResultSchema>;
+export type DeleteProjectResult = z.infer<typeof deleteProjectResultSchema>;
 export type GetSchemaResult = z.infer<typeof getSchemaResultSchema>;
 export type ReindexTableResult = z.infer<typeof reindexTableResultSchema>;
 export type RefreshTableCacheResult = z.infer<typeof refreshTableCacheResultSchema>;

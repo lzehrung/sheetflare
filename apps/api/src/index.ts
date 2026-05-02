@@ -23,7 +23,9 @@ import {
   createRowInputSchema,
   createRowResultSchema,
   createTableInputSchema,
+  deleteProjectResultSchema,
   deleteRowResultSchema,
+  deleteTableResultSchema,
   getRowResultSchema,
   getSchemaResultSchema,
   getTableCacheStatusResultSchema,
@@ -57,6 +59,8 @@ import {
   type CreateRowInput,
   type CreateTableInput,
   type CreateRowResult,
+  type DeleteProjectResult,
+  type DeleteTableResult,
   type GetRowResult,
   type GetSchemaResult,
   type GetTableCacheStatusResult,
@@ -420,6 +424,10 @@ function getRateLimitOperationKey(
     return 'admin.projects.upsert';
   }
 
+  if (/\/v1\/admin\/projects\/[^/]+$/.test(path) && normalizedMethod === 'DELETE') {
+    return 'admin.projects.delete';
+  }
+
   if (path === '/v1/admin/keys' && normalizedMethod === 'GET') {
     return 'admin.keys.list';
   }
@@ -434,6 +442,10 @@ function getRateLimitOperationKey(
 
   if (path.startsWith('/v1/admin/projects/') && path.endsWith('/tables') && normalizedMethod === 'POST') {
     return 'admin.tables.upsert';
+  }
+
+  if (/\/v1\/admin\/projects\/[^/]+\/tables\/[^/]+$/.test(path) && normalizedMethod === 'DELETE') {
+    return 'admin.tables.delete';
   }
 
   if (path.startsWith('/v1/admin/projects/') && path.endsWith('/spreadsheet/tabs') && normalizedMethod === 'GET') {
@@ -845,6 +857,15 @@ async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug:
   }).result.data;
 }
 
+async function clearTableCacheState(c: AppContext, projectSlug: string, tableSlug: string, route: string) {
+  await doRpc<TableDoResponse>(getTableStub(c.env, projectSlug, tableSlug), {
+    type: 'table.cache.clear',
+    projectSlug,
+    tableSlug,
+    requestContext: buildTableRequestContext(c, route)
+  });
+}
+
 async function getApiKeyRecord(c: { env: Env }, apiKeyId: string) {
   const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
     type: 'control.api-key.get',
@@ -982,6 +1003,24 @@ const adminCreateProjectRoute = createRoute({
   }
 });
 
+const adminDeleteProjectRoute = createRoute({
+  method: 'delete',
+  path: '/v1/admin/projects/{project}',
+  tags: ['Projects'],
+  security: adminSecurity,
+  request: {
+    params: adminProjectParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'Delete a configured project and clear caches for its tables',
+      content: jsonContent(deleteProjectResultSchema)
+    },
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
 const adminListSpreadsheetTabsRoute = createRoute({
   method: 'get',
   path: '/v1/admin/projects/{project}/spreadsheet/tabs',
@@ -1065,6 +1104,24 @@ const adminCreateTableRoute = createRoute({
       content: jsonContent(errorResponseSchema)
     },
     400: badRequestResponse,
+    401: unauthorizedResponse,
+    404: notFoundResponse
+  }
+});
+
+const adminDeleteTableRoute = createRoute({
+  method: 'delete',
+  path: '/v1/admin/projects/{project}/tables/{table}',
+  tags: ['Tables'],
+  security: adminSecurity,
+  request: {
+    params: adminProjectTableParamsSchema
+  },
+  responses: {
+    200: {
+      description: 'Delete a configured table and clear its local cache',
+      content: jsonContent(deleteTableResultSchema)
+    },
     401: unauthorizedResponse,
     404: notFoundResponse
   }
@@ -1599,6 +1656,26 @@ function createApp() {
     return c.json(result.data, result.created ? 201 : 200);
   });
 
+  app.openapi(adminDeleteProjectRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    const { project } = parsePathParams(c, adminProjectParamsSchema);
+    assertProjectScope(auth, 'admin:projects', project);
+    const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
+      type: 'project.delete',
+      projectSlug: project
+    });
+    const result = (response as {
+      type: 'project.delete.result';
+      result: DeleteProjectResult;
+    }).result;
+
+    for (const tableSlug of result.deletedTables) {
+      await clearTableCacheState(c, project, tableSlug, 'admin.projects.delete');
+    }
+
+    return c.json(result);
+  });
+
   app.openapi(adminListSpreadsheetTabsRoute, async (c) => {
     const auth = await authenticateRequest(c);
     const { project } = parsePathParams(c, adminProjectParamsSchema);
@@ -1669,6 +1746,24 @@ function createApp() {
       { data: result.data },
       result.created ? 201 : 200
     );
+  });
+
+  app.openapi(adminDeleteTableRoute, async (c) => {
+    const auth = await authenticateRequest(c);
+    const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
+    assertProjectScope(auth, 'admin:projects', project);
+    const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
+      type: 'project.table.delete',
+      projectSlug: project,
+      tableSlug: table
+    });
+    const result = (response as {
+      type: 'project.table.delete.result';
+      result: DeleteTableResult;
+    }).result;
+
+    await clearTableCacheState(c, project, table, 'admin.tables.delete');
+    return c.json(result);
   });
 
   app.openapi(listRowsRoute, async (c) => {

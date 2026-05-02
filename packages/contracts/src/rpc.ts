@@ -9,7 +9,9 @@ import type {
   AdminListApiKeysResult,
   AdminListProjectsResult,
   AdminListSpreadsheetTabsResult,
+  DeleteProjectResult,
   DeleteRowResult,
+  DeleteTableResult,
   GetTableCacheStatusResult,
   GetRowResult,
   GetSchemaResult,
@@ -73,6 +75,10 @@ export const controlPlaneDoRequestSchema = z.discriminatedUnion('type', [
       tableCount: z.number().int().nonnegative(),
       updatedAt: z.string().datetime()
     })
+  }),
+  z.object({
+    type: z.literal('control.project.delete'),
+    projectSlug: projectSlugSchema
   }),
   z.object({ type: z.literal('control.spreadsheet-watches.list') }),
   z.object({ type: z.literal('control.spreadsheet-watches.retry-advice.list') }),
@@ -144,6 +150,15 @@ export const projectDoRequestSchema = z.discriminatedUnion('type', [
     projectSlug: projectSlugSchema,
     input: createTableRpcInputSchema,
     allowExisting: z.boolean().optional()
+  }),
+  z.object({
+    type: z.literal('project.table.delete'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema
+  }),
+  z.object({
+    type: z.literal('project.delete'),
+    projectSlug: projectSlugSchema
   }),
   z.object({
     type: z.literal('project.table.list'),
@@ -232,6 +247,12 @@ export const tableDoRequestSchema = z.discriminatedUnion('type', [
     requestContext: tableRequestContextSchema.optional()
   }),
   z.object({
+    type: z.literal('table.cache.clear'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    requestContext: tableRequestContextSchema.optional()
+  }),
+  z.object({
     type: z.literal('table.external-change.record'),
     projectSlug: projectSlugSchema,
     tableSlug: tableSlugSchema,
@@ -263,6 +284,7 @@ export type ControlPlaneDoRequest = z.infer<typeof controlPlaneDoRequestSchema>;
 export type ControlPlaneDoResponse =
   | { type: 'control.projects.list.result'; result: AdminListProjectsResult }
   | { type: 'control.project.upsert.result'; result: { ok: true } }
+  | { type: 'control.project.delete.result'; result: { ok: true } }
   | { type: 'control.spreadsheet-watches.list.result'; result: AdminListSpreadsheetWatchesResult }
   | { type: 'control.spreadsheet-watches.retry-advice.list.result'; result: AdminListSpreadsheetWatchRetryAdviceResult }
   | { type: 'control.spreadsheet-watches.register.result'; result: AdminRegisterSpreadsheetWatchesResult }
@@ -282,6 +304,8 @@ export type ProjectDoResponse =
   | { type: 'project.access.get.result'; result: { data: ProjectAccessResult } }
   | { type: 'project.create.result'; result: { data: AdminGetProjectResult; created: boolean } }
   | { type: 'project.table.create.result'; result: { data: UpsertTableResult['data']; created: boolean } }
+  | { type: 'project.table.delete.result'; result: DeleteTableResult }
+  | { type: 'project.delete.result'; result: DeleteProjectResult }
   | { type: 'project.table.list.result'; result: { data: UpsertTableResult['data'][] } }
   | { type: 'project.table.get.result'; result: UpsertTableResult }
   | { type: 'project.table.resolve.result'; result: { data: ResolvedProjectTableResult } }
@@ -309,6 +333,7 @@ export type TableDoResponse =
   | { type: 'table.schema.get.result'; result: GetSchemaResult }
   | { type: 'table.cache.get.result'; result: GetTableCacheStatusResult }
   | { type: 'table.cache.refresh.result'; result: RefreshTableCacheResult }
+  | { type: 'table.cache.clear.result'; result: { ok: true } }
   | { type: 'table.external-change.record.result'; result: { ok: true } }
   | { type: 'table.reindex.result'; result: ReindexTableResult };
 

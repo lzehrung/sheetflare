@@ -422,6 +422,12 @@ export class TableDO {
           type: 'table.cache.refresh.result',
           result: await this.refreshCacheIfStale(body.projectSlug, body.tableSlug, body.resolvedConfig, requestContext)
         };
+      case 'table.cache.clear':
+        this.clearCacheState();
+        return {
+          type: 'table.cache.clear.result',
+          result: { ok: true }
+        };
       case 'table.external-change.record':
         return {
           type: 'table.external-change.record.result',
@@ -1256,6 +1262,13 @@ export class TableDO {
       key,
       value
     );
+  }
+
+  private clearCacheState() {
+    this.clearCacheTables('live');
+    this.clearCacheTables('staging');
+    this.ctx.storage.sql.exec(`DELETE FROM meta`);
+    this.activeSync = null;
   }
 
   private getSyncMeta(): SyncMeta {

@@ -224,6 +224,12 @@ export class ControlPlaneDO {
           type: 'control.project.upsert.result',
           result: { ok: true }
         };
+      case 'control.project.delete':
+        this.deleteProjectSummary(body.projectSlug);
+        return {
+          type: 'control.project.delete.result',
+          result: { ok: true }
+        };
       case 'control.spreadsheet-watches.list':
         return {
           type: 'control.spreadsheet-watches.list.result',
@@ -320,6 +326,16 @@ export class ControlPlaneDO {
       summary.googleCredentialRef,
       summary.tableCount,
       summary.updatedAt
+    );
+  }
+
+  private deleteProjectSummary(projectSlug: string) {
+    this.ctx.storage.sql.exec(
+      `
+      DELETE FROM project_registry
+      WHERE slug = ?
+      `,
+      projectSlug
     );
   }
 

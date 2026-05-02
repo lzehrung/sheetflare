@@ -309,6 +309,8 @@ function createEnv(options?: {
   const project = new FakeDurableObjectNamespace(() => async (request) => {
     const body = (await request.json()) as {
       type: string;
+      projectSlug?: string;
+      tableSlug?: string;
       tab?: string;
       headerRow?: number;
       allowExisting?: boolean;
@@ -495,6 +497,27 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'project.table.delete') {
+      return Response.json({
+        type: 'project.table.delete.result',
+        result: {
+          ok: true,
+          deletedTable: body.tableSlug ?? 'users'
+        }
+      });
+    }
+
+    if (body.type === 'project.delete') {
+      return Response.json({
+        type: 'project.delete.result',
+        result: {
+          ok: true,
+          deletedProject: body.projectSlug ?? 'demo',
+          deletedTables: ['users']
+        }
+      });
+    }
+
     return Response.json({
       type: 'project.table.list.result',
       result: {
@@ -589,6 +612,15 @@ function createEnv(options?: {
               lastAutoReindexAt: null
             }
           }
+        }
+      });
+    }
+
+    if (body.type === 'table.cache.clear') {
+      return Response.json({
+        type: 'table.cache.clear.result',
+        result: {
+          ok: true
         }
       });
     }
@@ -1112,6 +1144,59 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(409);
+  });
+
+  it('deletes a configured table and clears its cached table state', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __projectRequests: string[];
+      __tableRequests: Array<{ type: string }>;
+    };
+    const response = await app.request(
+      '/v1/admin/projects/demo/tables/users',
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      deletedTable: 'users'
+    });
+    expect(env.__projectRequests).toContain('project.table.delete');
+    expect(env.__tableRequests.map((request) => request.type)).toContain('table.cache.clear');
+  });
+
+  it('deletes a configured project and clears caches for its tables', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __projectRequests: string[];
+      __tableRequests: Array<{ type: string }>;
+    };
+    const response = await app.request(
+      '/v1/admin/projects/demo',
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      deletedProject: 'demo',
+      deletedTables: ['users']
+    });
+    expect(env.__projectRequests).toContain('project.delete');
+    expect(env.__tableRequests.map((request) => request.type)).toContain('table.cache.clear');
   });
 
   it('reports internal readiness separately from liveness', async () => {
@@ -1962,8 +2047,11 @@ describe('api routes', () => {
     expect(document.openapi).toBe('3.0.0');
     expect(document.info.title).toBe('Sheetflare API');
     expect(document.paths['/v1/admin/projects']).toBeDefined();
+    expect(document.paths['/v1/admin/projects/{project}']).toBeDefined();
     expect(document.paths['/v1/admin/projects/{project}/spreadsheet/tabs']).toBeDefined();
     expect(document.paths['/v1/admin/projects/{project}/spreadsheet/tabs/{tab}']).toBeDefined();
+    expect(document.paths['/v1/admin/projects/{project}/tables']).toBeDefined();
+    expect(document.paths['/v1/admin/projects/{project}/tables/{table}']).toBeDefined();
     expect(document.paths['/v1/projects/{project}/tables/{table}/rows']).toBeDefined();
     expect(document.paths['/v1/admin/projects/{project}/tables/{table}/cache']).toBeDefined();
     expect(document.paths['/v1/admin/projects/{project}/tables/{table}/refresh']).toBeDefined();

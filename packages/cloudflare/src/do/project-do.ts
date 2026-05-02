@@ -7,6 +7,8 @@ import {
   type ControlPlaneDoResponse,
   type CreateProjectInput,
   type CreateTableInput,
+  type DeleteProjectResult,
+  type DeleteTableResult,
   maxIndexedFieldCount,
   NotFoundError,
   type ProjectAccessResult,
@@ -177,6 +179,16 @@ export class ProjectDO {
         return {
           type: 'project.table.create.result',
           result: await this.createTable(body.projectSlug, body.input, body.allowExisting ?? false)
+        };
+      case 'project.table.delete':
+        return {
+          type: 'project.table.delete.result',
+          result: await this.deleteTable(body.projectSlug, body.tableSlug)
+        };
+      case 'project.delete':
+        return {
+          type: 'project.delete.result',
+          result: await this.deleteProject(body.projectSlug)
         };
       case 'project.table.list':
         return {
@@ -383,6 +395,41 @@ export class ProjectDO {
     return this.mapTable(table);
   }
 
+  private async deleteTable(projectSlug: string, tableSlug: string): Promise<DeleteTableResult> {
+    this.requireProjectRow(projectSlug);
+    await this.getTable(projectSlug, tableSlug);
+    const now = new Date().toISOString();
+
+    this.ctx.storage.sql.exec(
+      `DELETE FROM tables WHERE project_slug = ? AND table_slug = ?`,
+      projectSlug,
+      tableSlug
+    );
+    this.ctx.storage.sql.exec(`UPDATE project SET updated_at = ? WHERE slug = ?`, now, projectSlug);
+    await this.syncRegistry(projectSlug);
+
+    return {
+      ok: true,
+      deletedTable: tableSlug
+    };
+  }
+
+  private async deleteProject(projectSlug: string): Promise<DeleteProjectResult> {
+    this.requireProjectRow(projectSlug);
+    const tables = await this.listTables(projectSlug);
+    const deletedTables = tables.map((table) => table.tableSlug);
+
+    this.ctx.storage.sql.exec(`DELETE FROM tables WHERE project_slug = ?`, projectSlug);
+    this.ctx.storage.sql.exec(`DELETE FROM project WHERE slug = ?`, projectSlug);
+    await this.deleteRegistryProject(projectSlug);
+
+    return {
+      ok: true,
+      deletedProject: projectSlug,
+      deletedTables
+    };
+  }
+
   private async resolveProjectTable(projectSlug: string, tableSlug: string): Promise<ResolvedProjectTableResult> {
     const project = this.mapProject(this.requireProjectRow(projectSlug));
     const table = await this.getTable(projectSlug, tableSlug);
@@ -469,6 +516,13 @@ export class ProjectDO {
     await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), {
       type: 'control.project.upsert',
       summary
+    });
+  }
+
+  private async deleteRegistryProject(projectSlug: string) {
+    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), {
+      type: 'control.project.delete',
+      projectSlug
     });
   }
 
