@@ -60,12 +60,21 @@ export function getSetupDoctorFailureMessage(results: SetupPrereqResult[]) {
 }
 
 async function fetchReadyStatus(apiUrl: string) {
-  const { data } = await requestJson<ReadyResponse>({
+  const { response, data } = await requestJson<ReadyResponse>({
     baseUrl: apiUrl,
     path: '/ready',
-    method: 'GET',
-    expectedStatus: 200
+    method: 'GET'
   });
+
+  if (![200, 503].includes(response.status)) {
+    const requestId = response.headers.get('x-request-id');
+    throw new ScriptError(
+      [
+        `Expected GET /ready to return 200 or 503, received ${response.status}.`,
+        requestId ? `requestId=${requestId}` : null
+      ].filter(Boolean).join(' ')
+    );
+  }
 
   if (!data) {
     throw new ScriptError('API /ready returned an empty response.');

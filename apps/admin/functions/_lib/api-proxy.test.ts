@@ -59,6 +59,26 @@ describe('proxyToApi', () => {
     await expect(response.text()).resolves.toBe('SHEETFLARE_API_BASE_URL is not configured for the admin Pages project.');
   });
 
+  it('rejects a non-https upstream API base URL before forwarding admin credentials', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await proxyToApi({
+      env: {
+        SHEETFLARE_API_BASE_URL: 'http://sheetflare-api.example.workers.dev'
+      },
+      request: new Request('https://sheetflare-admin.example.pages.dev/v1/admin/projects', {
+        headers: {
+          [adminCredentialHeaderName]: 'secret-token'
+        }
+      })
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(response.status).toBe(500);
+    await expect(response.text()).resolves.toBe('SHEETFLARE_API_BASE_URL must use https.');
+  });
+
   it('fails clearly when the upstream fetch throws', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => {
       throw new Error('network unreachable');

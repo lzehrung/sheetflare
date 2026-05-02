@@ -1,4 +1,4 @@
-import type { FieldRule, FieldRules, RowRecord } from '@sheetflare/contracts';
+import type { FieldFilter, FieldRule, FieldRules, QueryScalarValue, RowFilter, RowRecord } from '@sheetflare/contracts';
 
 export type ConstraintViolationCode = 'REQUIRED' | 'TYPE' | 'ENUM';
 
@@ -32,6 +32,105 @@ function isIsoDateString(value: string) {
 
 function isIsoDateTimeString(value: string) {
   return /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
+}
+
+function isCanonicalNumberString(value: string) {
+  return /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value);
+}
+
+function isCanonicalBooleanString(value: string) {
+  return /^(?:true|false)$/i.test(value);
+}
+
+export function coerceFieldRuleValue(
+  value: RowRecord[string] | undefined,
+  rule: FieldRule | undefined
+): RowRecord[string] | undefined {
+  if (value === undefined || value === null || Array.isArray(value) || !rule?.type) {
+    return value;
+  }
+
+  switch (rule.type) {
+    case 'string':
+      return value;
+    case 'number':
+      if (typeof value === 'number') {
+        return value;
+      }
+
+      return typeof value === 'string' && isCanonicalNumberString(value)
+        ? Number(value)
+        : value;
+    case 'boolean':
+      if (typeof value === 'boolean') {
+        return value;
+      }
+
+      return typeof value === 'string' && isCanonicalBooleanString(value)
+        ? value.toLowerCase() === 'true'
+        : value;
+    case 'date':
+      return value;
+    case 'datetime':
+      return value;
+  }
+}
+
+function coerceFieldRuleScalarValue(
+  value: QueryScalarValue | undefined,
+  rule: FieldRule | undefined
+): QueryScalarValue | undefined {
+  const coerced = coerceFieldRuleValue(value, rule);
+  if (coerced === undefined || coerced === null) {
+    return coerced;
+  }
+
+  if (Array.isArray(coerced)) {
+    return value;
+  }
+
+  return coerced;
+}
+
+function coerceComparableFieldRuleScalarValue(
+  value: string | number | undefined,
+  rule: FieldRule | undefined
+): string | number | undefined {
+  const coerced = coerceFieldRuleScalarValue(value, rule);
+  return typeof coerced === 'string' || typeof coerced === 'number' ? coerced : value;
+}
+
+export function coerceFieldFilterDefinition(definition: FieldFilter, rule: FieldRule | undefined): FieldFilter {
+  return {
+    ...(definition.eq !== undefined ? { eq: coerceFieldRuleScalarValue(definition.eq, rule) } : {}),
+    ...(definition.neq !== undefined ? { neq: coerceFieldRuleScalarValue(definition.neq, rule) } : {}),
+    ...(definition.gt !== undefined ? { gt: coerceComparableFieldRuleScalarValue(definition.gt, rule) } : {}),
+    ...(definition.gte !== undefined ? { gte: coerceComparableFieldRuleScalarValue(definition.gte, rule) } : {}),
+    ...(definition.lt !== undefined ? { lt: coerceComparableFieldRuleScalarValue(definition.lt, rule) } : {}),
+    ...(definition.lte !== undefined ? { lte: coerceComparableFieldRuleScalarValue(definition.lte, rule) } : {}),
+    ...(definition.in !== undefined
+      ? { in: definition.in.map((value) => coerceFieldRuleScalarValue(value, rule) ?? null) }
+      : {}),
+    ...(definition.contains !== undefined ? { contains: definition.contains } : {}),
+    ...(definition.startsWith !== undefined ? { startsWith: definition.startsWith } : {}),
+    ...(definition.isNull !== undefined ? { isNull: definition.isNull } : {})
+  };
+}
+
+export function coerceRowFilter(filter: RowFilter | null, fieldRules: FieldRules): RowFilter | null {
+  if (!filter) {
+    return filter;
+  }
+
+  const normalizedEntries = Object.entries(filter).map(([field, definition]) => {
+    if (field === 'id' || field === 'rowNumber') {
+      return [field, definition] as const;
+    }
+
+    return [field, coerceFieldFilterDefinition(definition, fieldRules[field])] as const;
+  });
+
+  return Object.fromEntries(normalizedEntries);
 }
 
 function matchesConstrainedType(value: RowRecord[string] | undefined, expectedType: NonNullable<FieldRule['type']>) {
@@ -110,6 +209,7 @@ export function validateFieldRules(values: RowRecord, fieldRules: FieldRules | u
 
   for (const [fieldName, rule] of Object.entries(normalizedRules)) {
     const value = normalizedValues[fieldName];
+    const typedValue = coerceFieldRuleValue(value, rule);
 
     if (rule.required && isBlankValue(value)) {
       violations.push({
@@ -120,7 +220,7 @@ export function validateFieldRules(values: RowRecord, fieldRules: FieldRules | u
       continue;
     }
 
-    if (rule.type && !isBlankValue(value) && !matchesConstrainedType(value, rule.type)) {
+    if (rule.type && !isBlankValue(value) && !matchesConstrainedType(typedValue, rule.type)) {
       violations.push({
         field: fieldName,
         code: 'TYPE',

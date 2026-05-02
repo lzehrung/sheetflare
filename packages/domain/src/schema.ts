@@ -5,21 +5,8 @@ function inferScalarType(value: unknown): TableSchemaField['inferredType'] {
   if (typeof value === 'number') return 'number';
   if (typeof value === 'boolean') return 'boolean';
   if (Array.isArray(value)) return 'json';
-  if (typeof value !== 'string') return 'unknown';
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return 'date';
-  if (!Number.isNaN(Date.parse(value)) && /T/.test(value)) return 'datetime';
-  if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return 'number';
-  if (/^(?:true|false)$/i.test(value)) return 'boolean';
-
-  try {
-    const parsed = JSON.parse(value);
-    if (Array.isArray(parsed)) return 'json';
-  } catch {
-    return 'string';
-  }
-
-  return 'string';
+  if (typeof value === 'string') return 'string';
+  return 'unknown';
 }
 
 export function inferTableSchema(headers: readonly string[], rows: readonly RowEnvelope[]) {

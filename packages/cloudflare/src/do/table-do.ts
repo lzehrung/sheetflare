@@ -27,13 +27,14 @@ import {
   compareStableStrings,
   compareQueryValues,
   compareRangeQueryValues,
+  coerceRowFilter,
+  coerceFieldRuleValue,
   decodeQueryCursor,
   encodeQueryCursor,
   generateRowId,
   getListQueryFingerprint,
   normalizeListQuery,
   normalizeScalarCursorValue,
-  sortRows,
   validateFilterCapabilities,
   inferTableSchema,
   normalizeRowValues,
@@ -229,7 +230,8 @@ function buildCacheConfigSignature(config: {
 const emptyValidationSummary: TableValidationSummary = {
   status: 'ok',
   issueCount: 0,
-  issues: []
+  issues: [],
+  validatedAt: null
 };
 
 function getProjectStub(env: CloudflareEnv, projectSlug: string) {
@@ -857,7 +859,6 @@ export class TableDO {
       const rows = snapshot.rows;
       assertUniqueManagedRowIds(rows, config.idColumn);
       const schema = inferTableSchema(headers, rows);
-      const validation = this.buildValidationSummary(rows, config);
       this.clearCacheTables('staging');
 
       for (const row of rows) {
@@ -869,6 +870,7 @@ export class TableDO {
       this.promoteStagingCache();
 
       const completedAt = new Date().toISOString();
+      const validation = this.buildValidationSummary(rows, config, completedAt);
       this.setMeta('headers', JSON.stringify(headers));
       this.setMeta('schema', JSON.stringify(schema));
       this.setMeta('config.signature', buildCacheConfigSignature(config));
@@ -1188,7 +1190,13 @@ export class TableDO {
     }
 
     try {
-      return JSON.parse(raw) as TableValidationSummary;
+      const parsed = JSON.parse(raw) as Partial<TableValidationSummary>;
+      return {
+        status: parsed.status === 'warning' ? 'warning' : 'ok',
+        issueCount: typeof parsed.issueCount === 'number' ? parsed.issueCount : 0,
+        issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+        validatedAt: parsed.validatedAt ?? null
+      };
     } catch {
       return emptyValidationSummary;
     }
@@ -1288,25 +1296,28 @@ export class TableDO {
 
   private markCacheFreshAfterMutation(config: ResolvedTableConfig, headers: string[]) {
     const syncMeta = this.getSyncMeta();
+    const completedAt = new Date().toISOString();
     this.setMeta('headers', JSON.stringify(headers));
     this.setMeta('config.signature', buildCacheConfigSignature(config));
-    if (Object.keys(config.fieldRules).length === 0) {
-      this.setMeta('validation.summary', JSON.stringify(emptyValidationSummary));
-    } else {
-      this.setMeta('validation.summary', JSON.stringify(this.buildValidationSummary(this.listCachedRows(), config)));
-    }
     this.setSyncMeta({
       status: 'ready',
       rowCount: this.countCachedRows(),
       lastSyncStartedAt: syncMeta.lastSyncStartedAt,
-      lastSyncCompletedAt: syncMeta.lastSyncCompletedAt,
+      lastSyncCompletedAt: completedAt,
       lastSyncError: null
     });
   }
 
-  private buildValidationSummary(rows: readonly RowEnvelope[], config: ResolvedTableConfig): TableValidationSummary {
+  private buildValidationSummary(
+    rows: readonly RowEnvelope[],
+    config: ResolvedTableConfig,
+    validatedAt: string
+  ): TableValidationSummary {
     if (Object.keys(config.fieldRules).length === 0) {
-      return emptyValidationSummary;
+      return {
+        ...emptyValidationSummary,
+        validatedAt
+      };
     }
 
     const maxIssues = 10;
@@ -1336,7 +1347,7 @@ export class TableDO {
           continue;
         }
 
-        const value = normalizedValues[fieldName];
+        const value = coerceFieldRuleValue(normalizedValues[fieldName], rule);
         if (value === undefined || value === null || (typeof value === 'string' && value.length === 0) || Array.isArray(value)) {
           continue;
         }
@@ -1365,11 +1376,15 @@ export class TableDO {
     }
 
     return issueCount === 0
-      ? emptyValidationSummary
+      ? {
+          ...emptyValidationSummary,
+          validatedAt
+        }
       : {
           status: 'warning',
           issueCount,
-          issues
+          issues,
+          validatedAt
         };
   }
 
@@ -1393,7 +1408,7 @@ export class TableDO {
     this.ctx.storage.sql.exec(`DELETE FROM ${tables.cachedCells} WHERE row_id = ?`, row.id);
 
     for (const fieldName of config.indexedFields) {
-      const value = row.values[fieldName] ?? null;
+      const value = coerceFieldRuleValue(row.values[fieldName] ?? null, config.fieldRules[fieldName]) ?? null;
       const normalized = this.normalizeIndexedCellValue(value);
       this.ctx.storage.sql.exec(
         `
@@ -1499,7 +1514,7 @@ export class TableDO {
   }
 
   private queryCachedRows(config: GoogleSheetTableConfig, rawQuery: ListRowsQuery) {
-    const query = normalizeListQuery(rawQuery);
+    const query = this.normalizeQueryForConfig(config, rawQuery);
     const fingerprint = getListQueryFingerprint(query);
     const cursor = decodeQueryCursor(query.cursor, fingerprint, query.sort);
     const filterPlan = buildFilterSql(query.filter, config.indexedFields);
@@ -1584,13 +1599,30 @@ export class TableDO {
 
     let rows = this.listCachedRows();
     if (query.filter) {
-      rows = rows.filter((row: RowEnvelope) => this.matchesFilter(row, query.filter!));
+      rows = rows.filter((row: RowEnvelope) => this.matchesFilter(row, query.filter!, config));
     }
 
-    const sorted = sortRows(rows, query.sort);
+    const direction = query.sort.direction === 'desc' ? -1 : 1;
+    const sorted = [...rows].sort((left, right) => {
+      if (query.sort.field === 'rowNumber') {
+        return (left.rowNumber - right.rowNumber) * direction || compareStableStrings(left.id, right.id) * direction;
+      }
+
+      if (query.sort.field === 'id') {
+        return compareStableStrings(left.id, right.id) * direction;
+      }
+
+      return (
+        compareQueryValues(
+          this.getSortFieldValue(left, query.sort.field, config),
+          this.getSortFieldValue(right, query.sort.field, config)
+        ) * direction
+        || compareStableStrings(left.id, right.id) * direction
+      );
+    });
 
     const startIndex = cursor
-      ? sorted.findIndex((row) => this.isRowAfterScanCursor(row, query.sort.field, query.sort.direction, cursor))
+      ? sorted.findIndex((row) => this.isRowAfterScanCursor(row, config, query.sort.field, query.sort.direction, cursor))
       : 0;
     const normalizedStartIndex = startIndex === -1 ? sorted.length : startIndex;
     const page = sorted.slice(normalizedStartIndex, normalizedStartIndex + query.limit);
@@ -1607,7 +1639,7 @@ export class TableDO {
               sortDirection: query.sort.direction,
               rowId: lastRow.id,
               rowNumber: lastRow.rowNumber,
-              value: normalizeScalarCursorValue(this.getSortFieldValue(lastRow, query.sort.field))
+              value: normalizeScalarCursorValue(this.getSortFieldValue(lastRow, query.sort.field, config))
             })
           : null
     };
@@ -1758,7 +1790,7 @@ export class TableDO {
         continue;
       }
 
-      const value = values[fieldName];
+      const value = coerceFieldRuleValue(values[fieldName], rule);
       if (value === undefined || value === null || (typeof value === 'string' && value.length === 0)) {
         continue;
       }
@@ -1850,13 +1882,29 @@ export class TableDO {
     return value;
   }
 
-  private matchesFilter(row: RowEnvelope, filter: NonNullable<ListRowsQuery['filter']>) {
+  private normalizeQueryForConfig(config: GoogleSheetTableConfig, rawQuery: ListRowsQuery) {
+    const query = normalizeListQuery(rawQuery);
+    if (!query.filter) {
+      return query;
+    }
+
+    return {
+      ...query,
+      filter: coerceRowFilter(query.filter, config.fieldRules)
+    };
+  }
+
+  private matchesFilter(
+    row: RowEnvelope,
+    filter: NonNullable<ListRowsQuery['filter']>,
+    config: GoogleSheetTableConfig
+  ) {
     return Object.entries(filter).every(([field, definition]) =>
-      this.matchesFieldFilter(this.getFilterFieldValue(row, field), definition)
+      this.matchesFieldFilter(this.getFilterFieldValue(row, field, config), definition)
     );
   }
 
-  private getFilterFieldValue(row: RowEnvelope, field: string) {
+  private getFilterFieldValue(row: RowEnvelope, field: string, config: GoogleSheetTableConfig) {
     if (field === 'rowNumber') {
       return row.rowNumber;
     }
@@ -1865,10 +1913,10 @@ export class TableDO {
       return row.id;
     }
 
-    return row.values[field] ?? null;
+    return coerceFieldRuleValue(row.values[field] ?? null, config.fieldRules[field]) ?? null;
   }
 
-  private getSortFieldValue(row: RowEnvelope, sortField: string) {
+  private getSortFieldValue(row: RowEnvelope, sortField: string, config: GoogleSheetTableConfig) {
     if (sortField === 'rowNumber') {
       return row.rowNumber;
     }
@@ -1877,7 +1925,9 @@ export class TableDO {
       return row.id;
     }
 
-    return this.normalizeCursorSourceValue(row.values[sortField]);
+    return this.normalizeCursorSourceValue(
+      coerceFieldRuleValue(row.values[sortField], config.fieldRules[sortField])
+    );
   }
 
   private matchesFieldFilter(value: RowRecord[string] | string | number, definition: NonNullable<NonNullable<ListRowsQuery['filter']>[string]>) {
@@ -1909,11 +1959,12 @@ export class TableDO {
 
   private isRowAfterScanCursor(
     row: RowEnvelope,
+    config: GoogleSheetTableConfig,
     sortField: string,
     direction: 'asc' | 'desc',
     cursor: NonNullable<ReturnType<typeof decodeQueryCursor>>
   ) {
-    const valueComparison = this.compareScanCursorValue(this.getSortFieldValue(row, sortField), cursor);
+    const valueComparison = this.compareScanCursorValue(this.getSortFieldValue(row, sortField, config), cursor);
 
     if (valueComparison !== 0) {
       return direction === 'desc' ? valueComparison < 0 : valueComparison > 0;

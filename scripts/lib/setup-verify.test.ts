@@ -15,11 +15,18 @@ describe('getAdminPagesVerificationUrls', () => {
 describe('verifyAdminPagesDeployment', () => {
   it('succeeds when the admin root and proxied routes are all healthy', async () => {
     const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('Admin UI authentication required.', {
+        status: 401,
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+          'www-authenticate': 'Basic realm="Sheetflare Admin", charset="UTF-8"'
+        }
+      }))
       .mockResolvedValueOnce(new Response('<title>Sheetflare Admin</title>', {
         status: 200,
         headers: { 'content-type': 'text/html; charset=utf-8' }
       }))
-      .mockResolvedValueOnce(new Response('{"ok":true}', {
+      .mockResolvedValueOnce(new Response('{"ok":true,"service":"sheetflare-api"}', {
         status: 200,
         headers: { 'content-type': 'application/json' }
       }))
@@ -43,18 +50,29 @@ describe('verifyAdminPagesDeployment', () => {
     })).resolves.toBeUndefined();
 
     expect(fetchImpl).toHaveBeenNthCalledWith(1, 'https://sheetflare-admin.pages.dev', expect.objectContaining({
+      headers: {},
+      redirect: 'manual'
+    }));
+    expect(fetchImpl).toHaveBeenNthCalledWith(2, 'https://sheetflare-admin.pages.dev', expect.objectContaining({
       headers: expect.objectContaining({
         authorization: expect.stringMatching(/^Basic /)
       }),
       redirect: 'manual'
     }));
-    expect(fetchImpl).toHaveBeenNthCalledWith(2, 'https://sheetflare-admin.pages.dev/ready', expect.any(Object));
-    expect(fetchImpl).toHaveBeenNthCalledWith(3, 'https://sheetflare-admin.pages.dev/docs', expect.any(Object));
-    expect(fetchImpl).toHaveBeenNthCalledWith(4, 'https://sheetflare-admin.pages.dev/v1/admin/projects', expect.any(Object));
+    expect(fetchImpl).toHaveBeenNthCalledWith(3, 'https://sheetflare-admin.pages.dev/ready', expect.any(Object));
+    expect(fetchImpl).toHaveBeenNthCalledWith(4, 'https://sheetflare-admin.pages.dev/docs', expect.any(Object));
+    expect(fetchImpl).toHaveBeenNthCalledWith(5, 'https://sheetflare-admin.pages.dev/v1/admin/projects', expect.any(Object));
   });
 
   it('retries when a proxied route is not healthy yet and eventually succeeds', async () => {
     const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('Admin UI authentication required.', {
+        status: 401,
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+          'www-authenticate': 'Basic realm="Sheetflare Admin", charset="UTF-8"'
+        }
+      }))
       .mockResolvedValueOnce(new Response('<title>Sheetflare Admin</title>', {
         status: 200,
         headers: { 'content-type': 'text/html; charset=utf-8' }
@@ -63,12 +81,19 @@ describe('verifyAdminPagesDeployment', () => {
         status: 530,
         headers: { 'content-type': 'text/plain' }
       }))
+      .mockResolvedValueOnce(new Response('Admin UI authentication required.', {
+        status: 401,
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+          'www-authenticate': 'Basic realm="Sheetflare Admin", charset="UTF-8"'
+        }
+      }))
       .mockResolvedValueOnce(new Response('<title>Sheetflare Admin</title>', {
         status: 200,
         headers: { 'content-type': 'text/html; charset=utf-8' }
       }))
-      .mockResolvedValueOnce(new Response('{"ok":true}', {
-        status: 200,
+      .mockResolvedValueOnce(new Response('{"ok":true,"service":"sheetflare-api"}', {
+        status: 503,
         headers: { 'content-type': 'application/json' }
       }))
       .mockResolvedValueOnce(new Response('<title>Sheetflare API Docs</title>', {
@@ -97,6 +122,13 @@ describe('verifyAdminPagesDeployment', () => {
 
   it('fails clearly when a proxied route never becomes healthy', async () => {
     const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('Admin UI authentication required.', {
+        status: 401,
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+          'www-authenticate': 'Basic realm="Sheetflare Admin", charset="UTF-8"'
+        }
+      }))
       .mockResolvedValueOnce(new Response('<title>Sheetflare Admin</title>', {
         status: 200,
         headers: { 'content-type': 'text/html; charset=utf-8' }
@@ -119,6 +151,43 @@ describe('verifyAdminPagesDeployment', () => {
     );
   });
 
+  it('accepts a proxied /ready response that reports structured degraded readiness', async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('Admin UI authentication required.', {
+        status: 401,
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+          'www-authenticate': 'Basic realm="Sheetflare Admin", charset="UTF-8"'
+        }
+      }))
+      .mockResolvedValueOnce(new Response('<title>Sheetflare Admin</title>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' }
+      }))
+      .mockResolvedValueOnce(new Response('{"ok":false,"service":"sheetflare-api"}', {
+        status: 503,
+        headers: { 'content-type': 'application/json' }
+      }))
+      .mockResolvedValueOnce(new Response('<title>Sheetflare API Docs</title>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' }
+      }))
+      .mockResolvedValueOnce(new Response('{"error":{"code":"UNAUTHORIZED"}}', {
+        status: 401,
+        headers: { 'content-type': 'application/json' }
+      }));
+
+    await expect(verifyAdminPagesDeployment({
+      password: 'secret',
+      siteUrl: 'https://sheetflare-admin.pages.dev',
+      username: 'admin',
+      maxAttempts: 1
+    }, {
+      fetchImpl,
+      sleep: async () => {}
+    })).resolves.toBeUndefined();
+  });
+
   it('fails clearly when the site cannot be reached at all', async () => {
     const fetchImpl = vi.fn<typeof fetch>()
       .mockRejectedValue(new Error('connect failed'));
@@ -136,13 +205,60 @@ describe('verifyAdminPagesDeployment', () => {
     );
   });
 
-  it('fails clearly when a proxied admin route returns HTML instead of JSON', async () => {
+  it('fails clearly when the admin site does not challenge unauthenticated access', async () => {
     const fetchImpl = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(new Response('<title>Sheetflare Admin</title>', {
         status: 200,
         headers: { 'content-type': 'text/html; charset=utf-8' }
+      }));
+
+    await expect(verifyAdminPagesDeployment({
+      password: 'secret',
+      siteUrl: 'https://sheetflare-admin.pages.dev',
+      username: 'admin',
+      maxAttempts: 1
+    }, {
+      fetchImpl,
+      sleep: async () => {}
+    })).rejects.toThrow(
+      'Admin Pages verification failed for https://sheetflare-admin.pages.dev with status 200.'
+    );
+  });
+
+  it('fails clearly when the unauthenticated challenge is missing the Basic auth header', async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('Admin UI authentication required.', {
+        status: 401,
+        headers: { 'content-type': 'text/plain; charset=utf-8' }
+      }));
+
+    await expect(verifyAdminPagesDeployment({
+      password: 'secret',
+      siteUrl: 'https://sheetflare-admin.pages.dev',
+      username: 'admin',
+      maxAttempts: 1
+    }, {
+      fetchImpl,
+      sleep: async () => {}
+    })).rejects.toThrow(
+      'Admin Pages verification failed for https://sheetflare-admin.pages.dev. The unauthenticated response did not include a Basic auth challenge.'
+    );
+  });
+
+  it('fails clearly when a proxied admin route returns HTML instead of JSON', async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('Admin UI authentication required.', {
+        status: 401,
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+          'www-authenticate': 'Basic realm="Sheetflare Admin", charset="UTF-8"'
+        }
       }))
-      .mockResolvedValueOnce(new Response('{"ok":true}', {
+      .mockResolvedValueOnce(new Response('<title>Sheetflare Admin</title>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' }
+      }))
+      .mockResolvedValueOnce(new Response('{"ok":true,"service":"sheetflare-api"}', {
         status: 200,
         headers: { 'content-type': 'application/json' }
       }))

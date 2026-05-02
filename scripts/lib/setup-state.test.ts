@@ -25,12 +25,12 @@ describe('setup local state', () => {
 
     await writeSetupLocalState(configPath, {
       apiUrl: 'https://example.workers.dev',
-      adminApiKey: 'sfk_admin.secret'
+      adminUiUsername: 'operator@example.com'
     });
 
     expect(await readSetupLocalState(configPath)).toEqual({
       apiUrl: 'https://example.workers.dev',
-      adminApiKey: 'sfk_admin.secret'
+      adminUiUsername: 'operator@example.com'
     });
     expect(getSetupLocalStatePath(configPath)).toBe(join(dir, '.sheetflare.setup.local.json'));
   });
@@ -38,18 +38,13 @@ describe('setup local state', () => {
   it('redacts secret values for terminal summaries', () => {
     expect(redactSetupLocalState({
       googleClientEmail: 'service-account@example.iam.gserviceaccount.com',
-      adminBearerToken: 'abcdefghijklmno',
-      adminApiKey: 'sfk_admin.secret'
+      adminUiPassword: 'supersecret'
     })).toEqual({
       googleClientEmail: 'service-account@example.iam.gserviceaccount.com',
       apiUrl: null,
       adminUrl: null,
-      adminBearerToken: 'abcd...lmno',
       adminUiUsername: null,
-      adminUiPassword: null,
-      adminApiKey: 'sfk_...cret',
-      privateReadKey: null,
-      mutationKey: null
+      adminUiPassword: 'supe...cret'
     });
   });
 
@@ -57,7 +52,6 @@ describe('setup local state', () => {
     expect(createSetupLocalState({
       apiUrl: 'https://example.workers.dev',
       adminUrl: '',
-      adminBearerToken: undefined,
       adminUiUsername: 'operator@example.com'
     })).toEqual({
       apiUrl: 'https://example.workers.dev',
@@ -84,5 +78,11 @@ describe('setup local state', () => {
     expect(() => createSetupLocalStateFromUnknown({
       unexpected: 'value'
     }, 'state.json')).toThrow('state.json contains unknown key unexpected.');
+  });
+
+  it('rejects legacy persisted live credentials from disk', () => {
+    expect(() => createSetupLocalStateFromUnknown({
+      adminBearerToken: 'bootstrap.secret'
+    }, 'state.json')).toThrow('state.json contains unknown key adminBearerToken.');
   });
 });

@@ -23,8 +23,8 @@ function resolveApiBaseUrl(env: AdminPagesEnv) {
   }
 
   const targetUrl = new URL(configuredValue);
-  if (targetUrl.protocol !== 'https:' && targetUrl.protocol !== 'http:') {
-    throw new Error('SHEETFLARE_API_BASE_URL must use http or https.');
+  if (targetUrl.protocol !== 'https:') {
+    throw new Error('SHEETFLARE_API_BASE_URL must use https.');
   }
 
   return targetUrl;

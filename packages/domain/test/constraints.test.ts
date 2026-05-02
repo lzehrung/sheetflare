@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyFieldRuleNormalization, normalizeFieldRules, validateFieldRules } from '../src';
+import { applyFieldRuleNormalization, coerceRowFilter, normalizeFieldRules, validateFieldRules } from '../src';
 
 describe('normalizeFieldRules', () => {
   it('trims field names and removes duplicate enum and normalize entries', () => {
@@ -75,7 +75,7 @@ describe('validateFieldRules', () => {
     ]);
   });
 
-  it('enforces configured scalar and date-like field types', () => {
+  it('coerces canonical string scalars for explicit typed rules and still rejects invalid values', () => {
     expect(validateFieldRules({
       score: '10',
       active: 'true',
@@ -96,16 +96,6 @@ describe('validateFieldRules', () => {
       }
     })).toEqual([
       {
-        field: 'score',
-        code: 'TYPE',
-        message: 'score must be a number.'
-      },
-      {
-        field: 'active',
-        code: 'TYPE',
-        message: 'active must be a boolean.'
-      },
-      {
         field: 'dueDate',
         code: 'TYPE',
         message: 'dueDate must be a date.'
@@ -116,5 +106,46 @@ describe('validateFieldRules', () => {
         message: 'updatedAt must be a datetime.'
       }
     ]);
+  });
+});
+
+describe('coerceRowFilter', () => {
+  it('coerces typed scalar filter values while leaving id and rowNumber untouched', () => {
+    expect(coerceRowFilter({
+      score: {
+        eq: '10',
+        in: ['10', '11', null]
+      },
+      active: {
+        eq: 'true'
+      },
+      rowNumber: {
+        gt: '10'
+      },
+      id: {
+        eq: 'row-10'
+      }
+    }, {
+      score: {
+        type: 'number'
+      },
+      active: {
+        type: 'boolean'
+      }
+    })).toEqual({
+      score: {
+        eq: 10,
+        in: [10, 11, null]
+      },
+      active: {
+        eq: true
+      },
+      rowNumber: {
+        gt: '10'
+      },
+      id: {
+        eq: 'row-10'
+      }
+    });
   });
 });

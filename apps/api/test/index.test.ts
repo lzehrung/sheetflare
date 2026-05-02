@@ -1,7 +1,12 @@
 import { z } from 'zod';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../src/env';
-import { createApp } from '../src/index';
+import {
+  __getRecentApiKeyTouchCacheSizeForTests,
+  __resetRecentApiKeyTouchesForTests,
+  __touchApiKeyIfNeededForTests,
+  createApp
+} from '../src/index';
 
 type StubHandler = (request: Request) => Response | Promise<Response>;
 
@@ -43,6 +48,18 @@ function buildApiKeyRecord(apiKeyId: string) {
       id: 'touch-key',
       projectSlug: 'demo',
       name: 'Touch key',
+      scopes: ['table:read'],
+      createdAt: '2026-04-26T00:00:00.000Z',
+      revokedAt: null,
+      lastUsedAt: null
+    };
+  }
+
+  if (/^touch-key-\d+$/.test(apiKeyId)) {
+    return {
+      id: apiKeyId,
+      projectSlug: 'demo',
+      name: `Touch key ${apiKeyId}`,
       scopes: ['table:read'],
       createdAt: '2026-04-26T00:00:00.000Z',
       revokedAt: null,
@@ -530,7 +547,8 @@ function createEnv(options?: {
             validation: {
               status: 'ok',
               issueCount: 0,
-              issues: []
+              issues: [],
+              validatedAt: '2026-04-26T00:00:02.000Z'
             },
             externalChange: {
               pending: false,
@@ -561,7 +579,8 @@ function createEnv(options?: {
             validation: {
               status: 'ok',
               issueCount: 0,
-              issues: []
+              issues: [],
+              validatedAt: '2026-04-26T00:00:03.000Z'
             },
             externalChange: {
               pending: false,
@@ -652,6 +671,10 @@ function createEnv(options?: {
 }
 
 describe('api routes', () => {
+  beforeEach(() => {
+    __resetRecentApiKeyTouchesForTests();
+  });
+
   it('enforces admin bearer auth when configured', async () => {
     const app = createApp();
     const response = await app.request('/v1/admin/projects', {}, createEnv());
@@ -661,6 +684,31 @@ describe('api routes', () => {
       error: {
         code: 'UNAUTHORIZED',
         message: 'Unauthorized',
+        details: null
+      }
+    });
+  });
+
+  it('returns a bad-request error for malformed JSON bodies', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/projects',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: '{'
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'BAD_REQUEST',
+        message: 'Malformed JSON in request body.',
         details: null
       }
     });
@@ -1094,9 +1142,9 @@ describe('api routes', () => {
       googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com'
     }));
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(503);
     expect(await response.json()).toEqual({
-      ok: true,
+      ok: false,
       service: 'sheetflare-api',
       checks: {
         controlPlane: 'ok',
@@ -1153,9 +1201,9 @@ describe('api routes', () => {
       googleCredentialsJson: '{"prod":{"client_email":"service@example.com"}}'
     }));
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(503);
     expect(await response.json()).toEqual({
-      ok: true,
+      ok: false,
       service: 'sheetflare-api',
       checks: {
         controlPlane: 'ok',
@@ -1513,7 +1561,8 @@ describe('api routes', () => {
         validation: {
           status: 'ok',
           issueCount: 0,
-          issues: []
+          issues: [],
+          validatedAt: '2026-04-26T00:00:02.000Z'
         },
         externalChange: {
           pending: false,
@@ -1557,7 +1606,8 @@ describe('api routes', () => {
         validation: {
           status: 'ok',
           issueCount: 0,
-          issues: []
+          issues: [],
+          validatedAt: '2026-04-26T00:00:03.000Z'
         },
         externalChange: {
           pending: false,
@@ -1656,13 +1706,23 @@ describe('api routes', () => {
 
     expect(env.__rateLimitRequests).toEqual([
       { name: 'rate-limit:admin:bootstrap-admin', key: 'admin.projects.list' },
-      { name: 'rate-limit:data:api-key:project-key', key: 'rows.list' }
+      {
+        name: 'rate-limit:data:client:anonymous',
+        key: 'rows.list'
+      },
+      {
+        name: 'rate-limit:data:api-key:project-key',
+        key: 'rows.list'
+      }
     ]);
   });
 
-  it('falls back to the anonymous client bucket for unverified api-key shaped credentials', async () => {
+  it('uses the client bucket before authentication and never targets a real api-key bucket for forged credentials', async () => {
     const app = createApp();
-    const env = createEnv() as Env & { __rateLimitRequests: Array<{ name: string; key: string }> };
+    const env = createEnv() as Env & {
+      __rateLimitRequests: Array<{ name: string; key: string }>;
+      __verifyApiKeyCallCount: number;
+    };
 
     const response = await app.request(
       '/v1/admin/projects',
@@ -1677,6 +1737,54 @@ describe('api routes', () => {
     expect(response.status).toBe(401);
     expect(env.__rateLimitRequests).toEqual([
       { name: 'rate-limit:admin:client:anonymous', key: 'admin.projects.list' }
+    ]);
+    expect(env.__verifyApiKeyCallCount).toBe(1);
+  });
+
+  it('uses a verified per-key bucket after authentication succeeds', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __rateLimitRequests: Array<{ name: string; key: string }>;
+    };
+
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(env.__rateLimitRequests).toEqual([
+      { name: 'rate-limit:data:client:anonymous', key: 'rows.list' },
+      { name: 'rate-limit:data:api-key:project-key', key: 'rows.list' }
+    ]);
+  });
+
+  it('does not verify api-key credentials before source-based rate limiting rejects the request', async () => {
+    const app = createApp();
+    const env = createEnv({ rateLimitAllowed: false }) as Env & {
+      __rateLimitRequests: Array<{ name: string; key: string }>;
+      __verifyApiKeyCallCount: number;
+    };
+
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(429);
+    expect(env.__verifyApiKeyCallCount).toBe(0);
+    expect(env.__rateLimitRequests).toEqual([
+      { name: 'rate-limit:data:client:anonymous', key: 'rows.list' }
     ]);
   });
 
@@ -1744,6 +1852,17 @@ describe('api routes', () => {
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
     expect(env.__apiKeyTouchCallCount).toBe(1);
+  });
+
+  it('caps the in-memory api-key touch cache under high key churn', async () => {
+    const env = createEnv() as Env & { __apiKeyTouchCallCount: number };
+
+    for (let index = 0; index <= 10_000; index += 1) {
+      await __touchApiKeyIfNeededForTests(env, `touch-key-${index}`);
+    }
+
+    expect(env.__apiKeyTouchCallCount).toBe(10_001);
+    expect(__getRecentApiKeyTouchCacheSizeForTests()).toBe(10_000);
   });
 
   it('passes resolved table config to public-read route durable-object calls', async () => {

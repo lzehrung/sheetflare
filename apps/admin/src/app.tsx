@@ -36,10 +36,8 @@ import {
   reindexTable
 } from './api';
 import {
-  canPersistAdminCredential,
-  normalizeAdminCredential,
-  readStoredAdminCredential,
-  writeStoredAdminCredential
+  adminCredentialStorageKey,
+  normalizeAdminCredential
 } from './auth';
 import { ApiKeyPanel } from './components/api-key-panel';
 import { CredentialPanel } from './components/credential-panel';
@@ -99,14 +97,6 @@ type SpreadsheetWatchState =
   | { status: 'loading' }
   | { status: 'ready'; watch: SpreadsheetWatch | null }
   | { status: 'error'; message: string };
-
-function getInitialCredential() {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  return readStoredAdminCredential(window.localStorage);
-}
 
 function getSelectedProjectSlug(projects: ProjectSummary[], currentProjectSlug: string | null) {
   if (currentProjectSlug && projects.some((project) => project.slug === currentProjectSlug)) {
@@ -178,19 +168,33 @@ function countTableHealth(
   );
 }
 
+function getCredentialStatus(credential: string | null, state: LoadState) {
+  if (!credential) {
+    return 'required' as const;
+  }
+
+  if (state.status === 'loading') {
+    return 'checking' as const;
+  }
+
+  if (state.status === 'ready') {
+    return 'configured' as const;
+  }
+
+  if (state.status === 'error') {
+    return state.unauthorized ? 'rejected' as const : 'error' as const;
+  }
+
+  return 'checking' as const;
+}
+
 export function App() {
-  const storedCredential = getInitialCredential();
-  const [credential, setCredential] = useState<string | null>(() => storedCredential);
-  const [draftCredential, setDraftCredential] = useState<string>(() => storedCredential ?? '');
-  const [rememberCredential, setRememberCredential] = useState<boolean>(() => Boolean(storedCredential));
-  const [state, setState] = useState<LoadState>(() =>
-    storedCredential
-      ? { status: 'loading' }
-      : {
-          status: 'idle',
-          message: 'Enter a bootstrap admin token or scoped admin API key to load the control plane.'
-        }
-  );
+  const [credential, setCredential] = useState<string | null>(null);
+  const [draftCredential, setDraftCredential] = useState<string>('');
+  const [state, setState] = useState<LoadState>({
+    status: 'idle',
+    message: 'Enter a bootstrap admin token or scoped admin API key to load the control plane.'
+  });
   const [selectedProjectSlug, setSelectedProjectSlug] = useState<string | null>(null);
   const [projectDetailState, setProjectDetailState] = useState<ProjectDetailState>({
     status: 'idle',
@@ -236,6 +240,15 @@ export function App() {
   const createProjectValidation = validateCreateProjectDraft(createProjectDraft);
   const createTableValidation = validateCreateTableDraft(createTableDraft);
   const createKeyValidation = validateCreateKeyDraft(createKeyDraft, selectedProjectSlug);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.removeItem(adminCredentialStorageKey);
+    window.sessionStorage.removeItem(adminCredentialStorageKey);
+  }, []);
 
   useEffect(() => {
     if (!credential) {
@@ -702,29 +715,14 @@ export function App() {
 
   function saveCredential() {
     const normalized = normalizeAdminCredential(draftCredential);
-    const persistCredential = rememberCredential && canPersistAdminCredential(normalized);
-    if (typeof window !== 'undefined') {
-      writeStoredAdminCredential(window.localStorage, persistCredential ? normalized : null);
-    }
-
     setCredential(normalized);
     setCacheStateByTable({});
     setCreatedKey(null);
     setDraftCredential(normalized ?? '');
-    setNotice(
-      persistCredential || !normalized || !rememberCredential
-        ? {
-            tone: 'idle',
-            message: null
-          }
-        : {
-            tone: 'success',
-            message: 'Only scoped admin API keys are stored in this browser. Bootstrap tokens stay session-only.'
-          }
-    );
-    if (rememberCredential && !persistCredential) {
-      setRememberCredential(false);
-    }
+    setNotice({
+      tone: 'idle',
+      message: null
+    });
   }
 
   function setCacheStatusLoading(projectSlug: string, tableSlug: string, loading: boolean) {
@@ -769,10 +767,6 @@ export function App() {
   }
 
   function clearCredential() {
-    if (typeof window !== 'undefined') {
-      writeStoredAdminCredential(window.localStorage, null);
-    }
-
     setCredential(null);
     setCacheStateByTable({});
     setCacheStatusErrorByTable({});
@@ -791,7 +785,6 @@ export function App() {
     });
     setCreatedKey(null);
     setDraftCredential('');
-    setRememberCredential(false);
     setSelectedProjectSlug(null);
     setProjectDetailState({
       status: 'idle',
@@ -967,6 +960,7 @@ export function App() {
           cacheStatusLoadingByTable
         )
       : null;
+  const credentialStatus = getCredentialStatus(credential, state);
 
   return (
     <main className="shell">
@@ -979,11 +973,9 @@ export function App() {
       </section>
 
       <CredentialPanel
-        credentialConfigured={Boolean(credential)}
+        credentialStatus={credentialStatus}
         draftCredential={draftCredential}
-        rememberCredential={rememberCredential}
         onDraftCredentialChange={setDraftCredential}
-        onRememberCredentialChange={setRememberCredential}
         onSave={saveCredential}
         onClear={clearCredential}
         saveDisabled={draftCredential.trim().length === 0}

@@ -32,7 +32,8 @@ import {
 import {
   resolvePreferredAdminCredential,
   resolveSetupRuntimeState,
-  summarizeSetupSecrets
+  summarizeSetupSecrets,
+  type SetupSecretsSummary
 } from './lib/setup-runtime';
 import { getSetupDoctorFailureMessage, runSetupDoctor } from './lib/setup-doctor';
 import { isPlaceholderGoogleClientEmail } from './lib/setup-google';
@@ -44,14 +45,7 @@ type SetupExecutionSummary = {
   configPath: string;
   apiUrl: string | null;
   adminUrl: string | null;
-  adminBearerToken: string | null;
-  adminUiUsername: string | null;
-  adminUiPassword: string | null;
-  adminApiKey: string | null;
-  privateReadKey: string | null;
-  mutationKey: string | null;
-  localStatePath: string | null;
-};
+} & SetupSecretsSummary;
 
 async function readConfigFile(path: string) {
   const text = await readFile(path, 'utf8');
@@ -355,7 +349,6 @@ async function main() {
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
           googleClientEmail: setupSecrets.googleClientEmail,
-          adminBearerToken: setupSecrets.adminBearerToken,
           adminUiUsername: setupSecrets.adminUiUsername,
           adminUiPassword: setupSecrets.adminUiPassword
         })
@@ -429,7 +422,6 @@ async function main() {
           googleClientEmail,
           apiUrl,
           adminUrl,
-          adminBearerToken,
           adminUiUsername,
           adminUiPassword
         })
@@ -454,7 +446,7 @@ async function main() {
 
       if (!adminBearerToken) {
         if (!prompter) {
-          throw new ScriptError('Bootstrap requires an admin credential from local setup state or environment.');
+          throw new ScriptError('Bootstrap requires an admin credential from the environment or an interactive prompt.');
         }
         adminBearerToken = (await promptForText(prompter, {
           message: 'Admin bootstrap credential',
@@ -473,11 +465,7 @@ async function main() {
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
-          apiUrl,
-          adminBearerToken,
-          adminApiKey,
-          privateReadKey,
-          mutationKey
+          apiUrl
         })
       });
       localStateWritten = true;
@@ -507,7 +495,7 @@ async function main() {
       });
       if (!smokeAdminCredential) {
         if (!prompter) {
-          throw new ScriptError('Smoke requires an admin API key or admin credential from local setup state or environment.');
+          throw new ScriptError('Smoke requires an admin API key or bootstrap credential from the environment or an interactive prompt.');
         }
         adminApiKey = (await promptForText(prompter, {
           message: 'Admin API key for smoke',
@@ -517,7 +505,7 @@ async function main() {
       }
       if (!privateReadKey) {
         if (!prompter) {
-          throw new ScriptError('Smoke requires a private read key from local setup state or environment.');
+          throw new ScriptError('Smoke requires a private read key from the environment or an interactive prompt.');
         }
         privateReadKey = (await promptForText(prompter, {
           message: 'Private read API key for smoke'
@@ -525,7 +513,7 @@ async function main() {
       }
       if (!mutationKey) {
         if (!prompter) {
-          throw new ScriptError('Smoke requires a mutation API key from local setup state or environment.');
+          throw new ScriptError('Smoke requires a mutation API key from the environment or an interactive prompt.');
         }
         mutationKey = (await promptForText(prompter, {
           message: 'Mutation API key for smoke'

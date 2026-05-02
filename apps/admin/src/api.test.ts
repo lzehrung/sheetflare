@@ -106,7 +106,8 @@ describe('admin api helpers', () => {
           validation: {
             status: 'ok',
             issueCount: 0,
-            issues: []
+            issues: [],
+            validatedAt: '2026-04-26T00:00:02.000Z'
           },
           externalChange: {
             pending: false,

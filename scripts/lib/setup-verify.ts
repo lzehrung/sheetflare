@@ -10,9 +10,11 @@ type ProbeResult = {
   contentType: string | null;
   ok: boolean;
   status: number | null;
+  headers: Headers | null;
 };
 
 type VerificationProbe = {
+  acceptedStatuses?: number[];
   expectedContentTypePrefix?: string;
   expectedStatus: number;
   name: string;
@@ -44,6 +46,7 @@ async function probeUrl(
     return {
       body,
       contentType: response.headers.get('content-type'),
+      headers: response.headers,
       ok: response.ok,
       status: response.status
     };
@@ -51,6 +54,7 @@ async function probeUrl(
     return {
       body: null,
       contentType: null,
+      headers: null,
       ok: false,
       status: null
     };
@@ -76,6 +80,10 @@ function describeMissingBodySnippet(url: string, snippet: string) {
   return `Admin Pages verification failed for ${url}. The response body did not include the expected marker ${JSON.stringify(snippet)}.`;
 }
 
+function describeMissingAuthChallenge(url: string) {
+  return `Admin Pages verification failed for ${url}. The unauthenticated response did not include a Basic auth challenge.`;
+}
+
 function createVerificationProbes(): VerificationProbe[] {
   return [
     {
@@ -88,9 +96,10 @@ function createVerificationProbes(): VerificationProbe[] {
     {
       expectedContentTypePrefix: 'application/json',
       expectedStatus: 200,
+      acceptedStatuses: [200, 503],
       name: 'proxied /ready',
       path: '/ready',
-      requiredBodySnippet: '"ok":true'
+      requiredBodySnippet: '"service":"sheetflare-api"'
     },
     {
       expectedContentTypePrefix: 'text/html',
@@ -136,11 +145,31 @@ export async function verifyAdminPagesDeployment(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     let allHealthy = true;
+    const unauthenticatedRootUrl = normalizedSiteUrl;
+    const unauthenticatedRootResult = await probeUrl(unauthenticatedRootUrl, {}, fetchImpl);
+    if (unauthenticatedRootResult.status !== 401) {
+      allHealthy = false;
+      lastFailureMessage = describeProbeFailure(unauthenticatedRootUrl, unauthenticatedRootResult.status);
+    } else {
+      const authChallenge = unauthenticatedRootResult.headers?.get('www-authenticate')?.toLowerCase() ?? '';
+      if (!authChallenge.startsWith('basic ')) {
+        allHealthy = false;
+        lastFailureMessage = describeMissingAuthChallenge(unauthenticatedRootUrl);
+      }
+    }
+
+    if (!allHealthy) {
+      if (attempt < maxAttempts) {
+        await sleep(retryDelayMs);
+      }
+      continue;
+    }
 
     for (const probe of verificationProbes) {
       const url = `${normalizedSiteUrl}${probe.path}`;
       const result = await probeUrl(url, headers, fetchImpl);
-      if (result.status !== probe.expectedStatus) {
+      const acceptedStatuses = probe.acceptedStatuses ?? [probe.expectedStatus];
+      if (!acceptedStatuses.includes(result.status ?? Number.NaN)) {
         allHealthy = false;
         lastFailureMessage = describeProbeFailure(url, result.status);
         break;

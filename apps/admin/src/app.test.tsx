@@ -4,7 +4,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import type { ApiKeyPrincipal } from '@sheetflare/contracts';
 import { App } from './app';
 
-const storage = new Map<string, string>();
+const localStorageState = new Map<string, string>();
+const sessionStorageState = new Map<string, string>();
 
 function createJsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -77,29 +78,38 @@ function createSpreadsheetWatchStatusResponse(url: string) {
   });
 }
 
-function installLocalStorage() {
-  const localStorageMock = {
+function createStorageMock(state: Map<string, string>) {
+  return {
     getItem(key: string) {
-      return storage.get(key) ?? null;
+      return state.get(key) ?? null;
     },
     setItem(key: string, value: string) {
-      storage.set(key, value);
+      state.set(key, value);
     },
     removeItem(key: string) {
-      storage.delete(key);
+      state.delete(key);
     }
   };
+}
 
+function installBrowserStorage() {
+  const localStorageMock = createStorageMock(localStorageState);
+  const sessionStorageMock = createStorageMock(sessionStorageState);
   Object.defineProperty(window, 'localStorage', {
     value: localStorageMock,
+    configurable: true
+  });
+  Object.defineProperty(window, 'sessionStorage', {
+    value: sessionStorageMock,
     configurable: true
   });
 }
 
 describe('App', () => {
   beforeEach(() => {
-    storage.clear();
-    installLocalStorage();
+    localStorageState.clear();
+    sessionStorageState.clear();
+    installBrowserStorage();
   });
 
   afterEach(() => {
@@ -391,7 +401,8 @@ describe('App', () => {
             validation: {
               status: 'ok',
               issueCount: 0,
-              issues: []
+              issues: [],
+              validatedAt: '2026-04-26T00:00:01.000Z'
             },
             externalChange: {
               pending: false,
@@ -417,7 +428,8 @@ describe('App', () => {
             validation: {
               status: 'ok',
               issueCount: 0,
-              issues: []
+              issues: [],
+              validatedAt: '2026-04-27T00:00:01.000Z'
             },
             externalChange: {
               pending: false,
@@ -637,7 +649,8 @@ describe('App', () => {
             validation: {
               status: 'ok',
               issueCount: 0,
-              issues: []
+              issues: [],
+              validatedAt: '2026-04-26T00:00:01.000Z'
             },
             externalChange: {
               pending: false,
@@ -743,7 +756,8 @@ describe('App', () => {
                   code: 'UNIQUE',
                   message: 'email must be unique.'
                 }
-              ]
+              ],
+              validatedAt: '2026-04-26T00:00:01.000Z'
             },
             externalChange: {
               pending: false,
@@ -771,7 +785,8 @@ describe('App', () => {
             validation: {
               status: 'ok',
               issueCount: 0,
-              issues: []
+              issues: [],
+              validatedAt: '2026-04-26T00:00:03.000Z'
             },
             externalChange: {
               pending: false,
@@ -1345,7 +1360,8 @@ describe('App', () => {
             validation: {
               status: 'ok',
               issueCount: 0,
-              issues: []
+              issues: [],
+              validatedAt: '2026-04-26T00:00:01.000Z'
             },
             externalChange: {
               pending: false,
@@ -1460,7 +1476,10 @@ describe('App', () => {
     expect(spreadsheetTabsCalls).toBe(1);
   });
 
-  it('stores scoped admin api keys but keeps bootstrap tokens session-only', async () => {
+  it('does not preload admin credentials from browser storage', async () => {
+    localStorageState.set('sheetflare.adminCredential', 'sfk_local.secret');
+    sessionStorageState.set('sheetflare.adminCredential', 'sfk_session.secret');
+
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
@@ -1476,21 +1495,39 @@ describe('App', () => {
 
     render(<App />);
 
+    expect(screen.getByText('Enter a bootstrap admin token or scoped admin API key to load the control plane.')).toBeTruthy();
+    expect(screen.queryByText('Configured')).toBeNull();
+    expect(localStorageState.get('sheetflare.adminCredential')).toBeUndefined();
+    expect(sessionStorageState.get('sheetflare.adminCredential')).toBeUndefined();
+
     fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
       target: { value: 'secret-token' }
     });
-    fireEvent.click(screen.getByLabelText('Remember this API key in this browser'));
     fireEvent.click(screen.getByText('Save and load'));
 
-    await screen.findByText('Only scoped admin API keys are stored in this browser. Bootstrap tokens stay session-only.');
-    expect(storage.get('sheetflare.adminCredential')).toBeUndefined();
+    await screen.findByText('Configured');
+    expect(localStorageState.get('sheetflare.adminCredential')).toBeUndefined();
+    expect(sessionStorageState.get('sheetflare.adminCredential')).toBeUndefined();
+  });
+
+  it('marks rejected admin credentials as rejected instead of configured', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response('unauthorized', {
+        status: 401,
+        headers: {
+          'x-request-id': 'req-ui'
+        }
+      })
+    ));
+
+    render(<App />);
 
     fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
-      target: { value: 'sfk_demo.secret' }
+      target: { value: 'secret-token' }
     });
-    fireEvent.click(screen.getByLabelText('Remember this API key in this browser'));
     fireEvent.click(screen.getByText('Save and load'));
 
-    expect(storage.get('sheetflare.adminCredential')).toBe('sfk_demo.secret');
+    await screen.findByText(/The configured admin credential was rejected\./);
+    expect(screen.getByText('Rejected')).toBeTruthy();
   });
 });

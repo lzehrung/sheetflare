@@ -107,7 +107,8 @@ export const tableValidationIssueSchema = z.object({
 export const tableValidationSummarySchema = z.object({
   status: z.enum(['ok', 'warning']),
   issueCount: z.number().int().nonnegative(),
-  issues: z.array(tableValidationIssueSchema)
+  issues: z.array(tableValidationIssueSchema),
+  validatedAt: z.string().datetime().nullable()
 });
 
 export const tableExternalChangeSchema = z.object({

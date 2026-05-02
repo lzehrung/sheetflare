@@ -1,6 +1,6 @@
 import type { SpreadsheetWatchRetryAdvice } from '@sheetflare/contracts';
 import type { SetupConfig } from './setup-config';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getSetupDoctorFailureMessage, runSetupDoctor } from './setup-doctor';
 
 const baseConfig: SetupConfig = {
@@ -58,6 +58,10 @@ function activeRetryAdvice(): SpreadsheetWatchRetryAdvice[] {
 }
 
 describe('runSetupDoctor', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('treats warnings as verification failures for setup --verify', () => {
     expect(getSetupDoctorFailureMessage([
       {
@@ -275,6 +279,57 @@ describe('runSetupDoctor', () => {
     });
 
     expect(results.every((result) => result.status === 'ready')).toBe(true);
+  });
+
+  it('accepts structured 503 /ready responses and still reports the detailed blocking state', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: false,
+      checks: {
+        defaultGoogleCredential: 'missing',
+        namedGoogleCredentials: 'missing',
+        googleDriveWebhookSecret: 'configured',
+        bootstrapAdmin: 'configured'
+      },
+      notes: ['Neither the default Google service-account credential nor named GOOGLE_CREDENTIALS_JSON entries are configured.']
+    }), {
+      status: 503,
+      headers: {
+        'content-type': 'application/json',
+        'x-request-id': 'req-ready'
+      }
+    })));
+
+    const results = await runSetupDoctor({
+      config: baseConfig,
+      runtimeState: {
+        googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+        namedGoogleCredentials: 'missing',
+        apiUrl: 'https://sheetflare-api.example.workers.dev',
+        adminUrl: null,
+        adminBearerToken: null,
+        adminUiUsername: null,
+        adminUiPassword: null,
+        adminApiKey: null,
+        privateReadKey: null,
+        mutationKey: null
+      },
+      prereqResults: []
+    }, {
+      listPagesProjects: vi.fn(async () => []),
+      verifyAdminPagesDeployment: vi.fn(async () => {}),
+      listDriveWatches: vi.fn(async () => []),
+      listDriveWatchRetryAdvice: vi.fn(async () => [])
+    });
+
+    expect(results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'API readiness',
+          status: 'blocked',
+          summary: 'API /ready reports that neither the default Google credential nor named Google credentials are configured.'
+        })
+      ])
+    );
   });
 
   it('warns with cooldown guidance instead of immediate retry when retry advice recommends waiting', async () => {

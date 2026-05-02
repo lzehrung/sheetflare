@@ -17,7 +17,8 @@ function createCacheStatus(overrides?: Partial<TableCacheStatus>): TableCacheSta
     validation: {
       status: 'ok',
       issueCount: 0,
-      issues: []
+      issues: [],
+      validatedAt: '2026-04-29T18:00:01.000Z'
     },
     externalChange: {
       pending: false,
@@ -39,6 +40,7 @@ describe('CacheStatusSummary', () => {
 
     expect(screen.getByText('Validation')).toBeTruthy();
     expect(screen.getByText('ok / 0 issues')).toBeTruthy();
+    expect(screen.getByText('Validation Snapshot')).toBeTruthy();
   });
 
   it('renders validation issue details when drift is present', () => {
@@ -64,7 +66,8 @@ describe('CacheStatusSummary', () => {
                   code: 'REQUIRED',
                   message: 'status is required.'
                 }
-              ]
+              ],
+              validatedAt: '2026-04-29T18:00:01.000Z'
             }
           })}
         />

@@ -1,21 +1,32 @@
 type CredentialPanelProps = {
-  credentialConfigured: boolean;
+  credentialStatus: 'required' | 'checking' | 'configured' | 'rejected' | 'error';
   draftCredential: string;
-  rememberCredential: boolean;
   onDraftCredentialChange: (value: string) => void;
-  onRememberCredentialChange: (value: boolean) => void;
   onSave: () => void;
   onClear: () => void;
   saveDisabled: boolean;
   busy: boolean;
 };
 
+function getCredentialBadgeLabel(status: CredentialPanelProps['credentialStatus']) {
+  switch (status) {
+    case 'required':
+      return 'Required';
+    case 'checking':
+      return 'Checking';
+    case 'configured':
+      return 'Configured';
+    case 'rejected':
+      return 'Rejected';
+    case 'error':
+      return 'Error';
+  }
+}
+
 export function CredentialPanel({
-  credentialConfigured,
+  credentialStatus,
   draftCredential,
-  rememberCredential,
   onDraftCredentialChange,
-  onRememberCredentialChange,
   onSave,
   onClear,
   saveDisabled,
@@ -27,10 +38,10 @@ export function CredentialPanel({
         <div>
           <h2>Operator Access</h2>
           <p className="muted compact">
-            Use a scoped admin API key for routine work. Bootstrap admin tokens are session-only and are not stored in the browser.
+            Use a scoped admin API key for routine work. Admin credentials are not stored in the browser.
           </p>
         </div>
-        <span className="badge">{credentialConfigured ? 'Configured' : 'Required'}</span>
+        <span className="badge">{getCredentialBadgeLabel(credentialStatus)}</span>
       </div>
 
       <label className="field">
@@ -43,15 +54,6 @@ export function CredentialPanel({
           autoComplete="off"
           spellCheck={false}
         />
-      </label>
-
-      <label className="toggle">
-        <input
-          type="checkbox"
-          checked={rememberCredential}
-          onChange={(event) => onRememberCredentialChange(event.target.checked)}
-        />
-        <span>Remember this API key in this browser</span>
       </label>
 
       <div className="actions">

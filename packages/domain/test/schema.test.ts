@@ -38,7 +38,7 @@ describe('inferTableSchema', () => {
     ).toEqual({
       fields: [
         { name: 'active', inferredType: 'boolean', nullable: false },
-        { name: 'createdAt', inferredType: 'datetime', nullable: false },
+        { name: 'createdAt', inferredType: 'string', nullable: false },
         { name: 'notes', inferredType: 'unknown', nullable: true },
         { name: 'score', inferredType: 'number', nullable: false },
         { name: 'tags', inferredType: 'json', nullable: true }
@@ -85,6 +85,38 @@ describe('inferTableSchema', () => {
         { name: 'status', inferredType: 'string', nullable: true }
       ],
       inferredAt: '2026-04-26T13:00:00.000Z'
+    });
+
+    vi.useRealTimers();
+  });
+
+  it('does not infer numbers or booleans from string-looking sheet text', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-26T14:00:00.000Z'));
+
+    expect(
+      inferTableSchema([
+        'active',
+        'score',
+        'zip'
+      ], [
+        {
+          id: '1',
+          rowNumber: 2,
+          values: {
+            active: 'true',
+            score: '42',
+            zip: '00123'
+          }
+        }
+      ])
+    ).toEqual({
+      fields: [
+        { name: 'active', inferredType: 'string', nullable: false },
+        { name: 'score', inferredType: 'string', nullable: false },
+        { name: 'zip', inferredType: 'string', nullable: false }
+      ],
+      inferredAt: '2026-04-26T14:00:00.000Z'
     });
 
     vi.useRealTimers();
