@@ -1621,6 +1621,28 @@ describe('api routes', () => {
     expect(env.__projectRequests).not.toContain('project.table.resolve');
   });
 
+  it('does not leak missing project existence on anonymous read routes', async () => {
+    const app = createApp();
+    const env = createEnv({ projectAccessStatus: 404 }) as Env & { __projectRequests: string[] };
+
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {},
+      env
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'Unauthorized',
+        details: null
+      }
+    });
+    expect(env.__projectRequests).toContain('project.access.get');
+    expect(env.__projectRequests).not.toContain('project.table.resolve');
+  });
+
   it('rejects wrong-project scoped read keys before resolving private table existence', async () => {
     const app = createApp();
     const env = createEnv() as Env & { __projectRequests: string[] };

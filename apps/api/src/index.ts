@@ -909,6 +909,10 @@ async function requirePublicReadProject(c: { env: Env }, projectSlug: string) {
       throw new UnauthorizedError();
     }
   } catch (error) {
+    if (error instanceof NotFoundError) {
+      throw new UnauthorizedError();
+    }
+
     if (error instanceof DurableRpcError && error.status === 404) {
       throw new UnauthorizedError();
     }
