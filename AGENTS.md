@@ -132,6 +132,19 @@ Avoid implementations that require:
 
 If a query shape is expensive, reject it clearly instead of silently degrading.
 
+### SQL construction must stay injection-resistant
+
+Any SQL assembled from query plans must keep the boundary between SQL text and data explicit.
+
+Requirements:
+
+- dynamic identifiers must come from static code paths or allowlisted names
+- request-controlled values must be bound parameters
+- parameter arrays must match placeholder order in the final SQL string
+- sort directions and operators must come from validated enums, not raw input
+
+Query fixes need regression tests for SQL-shaped field names or values, multi-clause parameter ordering, and any indexed-filter or indexed-sort path involved in the change.
+
 ## API and UX Rules
 
 ### Make constraints explicit
@@ -166,6 +179,18 @@ When adding a feature, think through:
 - test coverage
 
 Do not ship implementation-only changes that leave the UX half-specified.
+
+### Keep error boundaries explicit
+
+Only intentional contract errors should be exposed to API clients.
+
+Expose messages and details from:
+
+- `AppError` subclasses
+- request validation errors
+- documented RPC error payloads
+
+Unknown exceptions must be logged internally and returned as a generic `INTERNAL_ERROR` response. Do not serialize raw exception messages, stack traces, SQL text, credential material, upstream payloads, or Durable Object internals into public error bodies.
 
 ## Testing Rules
 
@@ -218,6 +243,19 @@ That requirement is mandatory for:
 - deployment or configuration fixes when the behavior can be exercised in automation
 
 When a live failure reveals an environment-specific edge case, tighten the local test harness so the same class of regression is catchable before deploy.
+
+### Verify cross-layer behavior
+
+When a fix changes shared contracts, error handling, authorization, query planning, or Durable Object behavior, test the shared unit and at least one real caller path.
+
+Examples:
+
+- contract serializer plus API route
+- query planner plus `TableDO` list behavior
+- auth helper plus route-layer authorization
+- cache helper plus real state transition
+
+Before committing cross-layer fixes, run the narrow affected tests first, then `npm run check`.
 
 ## Code Review Expectations
 
