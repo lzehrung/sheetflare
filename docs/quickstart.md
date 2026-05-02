@@ -329,7 +329,7 @@ Healthy output should show:
 - `validation.validatedAt` shows when that validation snapshot was last recomputed
 - `externalChange.pending: false` unless a Drive notification has queued a debounced auto-reindex
 
-`lastSyncStartedAt`, `lastSyncCompletedAt`, and `validation` refer to the last full rebuild from Google Sheets, not the most recent successful point mutation.
+`lastSyncStartedAt` and `validation` refer to the last full rebuild from Google Sheets. `validation.validatedAt` is the timestamp for that full-rebuild validation snapshot. `lastSyncCompletedAt` may reflect either the last full rebuild completion or the most recent successful create/update/delete that refreshed cache freshness.
 
 ## 10. Useful operator commands
 

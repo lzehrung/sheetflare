@@ -70,9 +70,9 @@ export function coerceFieldRuleValue(
         ? value.toLowerCase() === 'true'
         : value;
     case 'date':
-      return typeof value === 'string' && isIsoDateString(value) ? value : value;
+      return value;
     case 'datetime':
-      return typeof value === 'string' && isIsoDateTimeString(value) ? value : value;
+      return value;
   }
 }
 
