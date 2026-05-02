@@ -12,6 +12,21 @@ function encodeRawCursorPayload(payload: unknown) {
   return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
 }
 
+function createCursorPayload(overrides?: Partial<Parameters<typeof encodeQueryCursor>[0]>) {
+  return {
+    fingerprint: 'query',
+    sortField: 'score',
+    sortDirection: 'asc' as const,
+    rowId: 'row-1',
+    rowNumber: 3,
+    value: {
+      kind: 'number' as const,
+      value: 12
+    },
+    ...overrides
+  };
+}
+
 describe('normalizeListQuery', () => {
   it('clamps the page size', () => {
     expect(normalizeListQuery({ limit: 999 })).toMatchObject({ limit: 500 });
@@ -86,17 +101,12 @@ describe('query cursors', () => {
     expect(() => normalizeScalarCursorValue(Number.NaN)).toThrow(BadRequestError);
     expect(() => normalizeScalarCursorValue(Number.POSITIVE_INFINITY)).toThrow(BadRequestError);
     expect(() =>
-      encodeQueryCursor({
-        fingerprint: 'query',
-        sortField: 'score',
-        sortDirection: 'asc',
-        rowId: 'row-1',
-        rowNumber: 1,
+      encodeQueryCursor(createCursorPayload({
         value: {
           kind: 'number',
           value: Number.NaN
         }
-      })
+      }))
     ).toThrow(BadRequestError);
   });
 
@@ -108,29 +118,55 @@ describe('query cursors', () => {
   it('rejects structurally invalid cursor payloads', () => {
     const query = normalizeListQuery({ sort: 'score:desc' });
     const fingerprint = getListQueryFingerprint(query);
-    const basePayload = {
+    const basePayload = createCursorPayload({
       fingerprint,
       sortField: query.sort.field,
-      sortDirection: query.sort.direction,
-      rowId: 'row-1',
-      rowNumber: 3,
-      value: {
-        kind: 'number',
-        value: 12
-      }
-    };
+      sortDirection: query.sort.direction
+    });
 
     const invalidPayloads = [
+      null,
+      [],
+      'cursor',
+      { ...basePayload, fingerprint: 123 },
+      { ...basePayload, sortField: '' },
+      { ...basePayload, sortField: null },
+      { ...basePayload, sortDirection: 'sideways' },
+      { ...basePayload, rowId: '' },
+      { ...basePayload, rowId: 12 },
+      { ...basePayload, rowNumber: 0 },
+      { ...basePayload, rowNumber: -1 },
+      { ...basePayload, rowNumber: 1.5 },
+      { ...basePayload, rowNumber: Number.MAX_SAFE_INTEGER + 1 },
       { ...basePayload, value: undefined },
       { ...basePayload, value: { kind: 'json', value: '{}' } },
+      { ...basePayload, value: { kind: 'null', value: 0 } },
+      { ...basePayload, value: { kind: 'boolean', value: 'true' } },
       { ...basePayload, value: { kind: 'number', value: '12' } },
-      { ...basePayload, rowId: '' },
-      { ...basePayload, rowNumber: 0 },
-      { ...basePayload, sortDirection: 'sideways' }
+      { ...basePayload, value: { kind: 'number', value: Number.POSITIVE_INFINITY } },
+      { ...basePayload, value: { kind: 'string', value: 12 } }
     ];
 
     for (const payload of invalidPayloads) {
       expect(() => decodeQueryCursor(encodeRawCursorPayload(payload), fingerprint, query.sort)).toThrow(BadRequestError);
+    }
+  });
+
+  it('rejects structurally invalid cursor payloads before encoding', () => {
+    const invalidPayloads = [
+      { sortField: '' },
+      { sortDirection: 'sideways' },
+      { rowId: '' },
+      { rowNumber: 0 },
+      { rowNumber: -1 },
+      { rowNumber: 1.5 },
+      { rowNumber: Number.MAX_SAFE_INTEGER + 1 },
+      { value: { kind: 'number', value: Number.NEGATIVE_INFINITY } },
+      { value: { kind: 'boolean', value: 'false' } }
+    ];
+
+    for (const overrides of invalidPayloads) {
+      expect(() => encodeQueryCursor(createCursorPayload(overrides))).toThrow(BadRequestError);
     }
   });
 

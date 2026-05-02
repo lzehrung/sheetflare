@@ -9,6 +9,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@sheetflare/contracts": "*"
+    "@sheetflare/contracts": "*",
+    "zod": "^4.3.6"
   }
 }

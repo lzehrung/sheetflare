@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { FieldFilter, ListRowsQuery, QueryScalarValue, RowFilter } from '@sheetflare/contracts';
 import { BadRequestError } from '@sheetflare/contracts';
 import { compareStableStrings } from './strings';
@@ -69,6 +70,34 @@ export interface QueryCursorPayload {
   value: CursorValue;
 }
 
+const cursorValueSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('null'),
+    value: z.null()
+  }),
+  z.object({
+    kind: z.literal('boolean'),
+    value: z.boolean()
+  }),
+  z.object({
+    kind: z.literal('number'),
+    value: z.number().finite()
+  }),
+  z.object({
+    kind: z.literal('string'),
+    value: z.string()
+  })
+]) satisfies z.ZodType<CursorValue>;
+
+const queryCursorPayloadSchema = z.object({
+  fingerprint: z.string(),
+  sortField: z.string().min(1),
+  sortDirection: z.enum(['asc', 'desc']),
+  rowId: z.string().min(1),
+  rowNumber: z.number().int().safe().positive(),
+  value: cursorValueSchema
+}) satisfies z.ZodType<QueryCursorPayload>;
+
 export function normalizeScalarCursorValue(value: QueryScalarValue): CursorValue {
   if (value === null) return { kind: 'null', value: null };
   if (typeof value === 'boolean') return { kind: 'boolean', value };
@@ -119,66 +148,9 @@ export function getListQueryFingerprint(query: NormalizedListRowsQuery): string 
   });
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function parseCursorValue(value: unknown): CursorValue | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  if (value.kind === 'null' && value.value === null) {
-    return { kind: 'null', value: null };
-  }
-
-  if (value.kind === 'boolean' && typeof value.value === 'boolean') {
-    return { kind: 'boolean', value: value.value };
-  }
-
-  if (value.kind === 'number' && typeof value.value === 'number' && Number.isFinite(value.value)) {
-    return { kind: 'number', value: value.value };
-  }
-
-  if (value.kind === 'string' && typeof value.value === 'string') {
-    return { kind: 'string', value: value.value };
-  }
-
-  return null;
-}
-
 function parseQueryCursorPayload(value: unknown): QueryCursorPayload | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const cursorValue = parseCursorValue(value.value);
-  if (!cursorValue) {
-    return null;
-  }
-
-  const rowNumber = value.rowNumber;
-  if (
-    typeof value.fingerprint !== 'string' ||
-    typeof value.sortField !== 'string' ||
-    (value.sortDirection !== 'asc' && value.sortDirection !== 'desc') ||
-    typeof value.rowId !== 'string' ||
-    value.rowId.length === 0 ||
-    typeof rowNumber !== 'number' ||
-    !Number.isInteger(rowNumber) ||
-    rowNumber <= 0
-  ) {
-    return null;
-  }
-
-  return {
-    fingerprint: value.fingerprint,
-    sortField: value.sortField,
-    sortDirection: value.sortDirection,
-    rowId: value.rowId,
-    rowNumber,
-    value: cursorValue
-  };
+  const parsed = queryCursorPayloadSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 export function encodeQueryCursor(cursor: QueryCursorPayload): string {
