@@ -290,6 +290,9 @@ const optionalBearerSecurity = [{ bearerAuth: [] }, {}];
 const apiKeyTouchIntervalMs = 5 * 60 * 1000;
 const maxRecentApiKeyTouches = 10_000;
 const recentApiKeyTouches = new Map<string, number>();
+const corsAllowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
+const corsAllowedHeaders = 'Authorization, Content-Type';
+const corsExposedHeaders = 'X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset';
 
 function pruneRecentApiKeyTouches(nowMs: number) {
   if (recentApiKeyTouches.size < maxRecentApiKeyTouches) {
@@ -327,6 +330,63 @@ function getTableStub(env: Env, projectSlug: string, tableSlug: string) {
 
 function getRateLimitStub(env: Env, shardKey: string) {
   return env.RATE_LIMIT_DO.get(env.RATE_LIMIT_DO.idFromName(`rate-limit:${shardKey}`));
+}
+
+function getAllowedCorsOrigin(request: Request, env: Env) {
+  const origin = request.headers.get('origin')?.trim();
+  const configuredOrigins = env.SHEETFLARE_ALLOWED_ORIGINS?.split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0) ?? [];
+
+  if (!origin || configuredOrigins.length === 0) {
+    return null;
+  }
+
+  if (configuredOrigins.includes('*')) {
+    return '*';
+  }
+
+  return configuredOrigins.includes(origin) ? origin : null;
+}
+
+function applyCorsHeaders(response: Response, request: Request, env: Env) {
+  const allowedOrigin = getAllowedCorsOrigin(request, env);
+  if (!allowedOrigin) {
+    return;
+  }
+
+  response.headers.set('access-control-allow-origin', allowedOrigin);
+  response.headers.set('access-control-expose-headers', corsExposedHeaders);
+  response.headers.append('vary', 'Origin');
+}
+
+function createCorsPreflightResponse(request: Request, env: Env) {
+  const allowedOrigin = getAllowedCorsOrigin(request, env);
+  if (!allowedOrigin) {
+    return new Response(JSON.stringify({
+      error: {
+        code: 'FORBIDDEN',
+        message: 'CORS origin is not allowed.',
+        details: null
+      }
+    }), {
+      status: 403,
+      headers: {
+        'content-type': 'application/json'
+      }
+    });
+  }
+
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'access-control-allow-origin': allowedOrigin,
+      'access-control-allow-methods': corsAllowedMethods,
+      'access-control-allow-headers': corsAllowedHeaders,
+      'access-control-max-age': '600',
+      'vary': 'Origin'
+    }
+  });
 }
 
 function parseApiKey(value: string) {
@@ -1452,7 +1512,12 @@ function createApp() {
     const startedAt = Date.now();
     c.set('requestId', crypto.randomUUID());
 
-    await next();
+    if (c.req.method === 'OPTIONS' && c.req.path.startsWith('/v1/')) {
+      c.res = createCorsPreflightResponse(c.req.raw, c.env);
+    } else {
+      await next();
+      applyCorsHeaders(c.res, c.req.raw, c.env);
+    }
 
     c.res.headers.set('x-request-id', c.get('requestId'));
     const rateLimit = c.get('rateLimit');
@@ -1524,6 +1589,7 @@ function createApp() {
         'x-request-id': c.get('requestId')
       }
     });
+    applyCorsHeaders(response, c.req.raw, c.env);
     if (rateLimit) {
       response.headers.set('x-ratelimit-limit', String(rateLimit.limit));
       response.headers.set('x-ratelimit-remaining', String(rateLimit.remaining));

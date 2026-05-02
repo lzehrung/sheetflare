@@ -183,6 +183,12 @@ body {
   border: 1px solid var(--border);
 }
 
+.actions button.dangerButton {
+  color: #fff7f2;
+  background: #a33a2b;
+  border: 1px solid rgba(96, 23, 16, 0.2);
+}
+
 .compactHeaderActions {
   align-items: center;
 }

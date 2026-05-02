@@ -9,6 +9,8 @@ import type {
   ApiKeyPrincipal,
   CreateProjectInput,
   CreateTableInput,
+  DeleteProjectResult,
+  DeleteTableResult,
   GetTableCacheStatusResult,
   RefreshTableCacheResult,
   ReindexTableResult
@@ -128,6 +130,16 @@ export function createProject(credential: string, input: CreateProjectInput) {
   });
 }
 
+export function deleteProject(credential: string, projectSlug: string) {
+  return requestAdminJson<DeleteProjectResult>(
+    credential,
+    `/v1/admin/projects/${encodeURIComponent(projectSlug)}`,
+    {
+      method: 'DELETE'
+    }
+  );
+}
+
 export function listSpreadsheetTabs(credential: string, projectSlug: string) {
   return requestAdminJson<AdminListSpreadsheetTabsResult>(
     credential,
@@ -162,6 +174,16 @@ export function createTable(credential: string, projectSlug: string, input: Crea
     {
       method: 'POST',
       body: JSON.stringify(input)
+    }
+  );
+}
+
+export function deleteTable(credential: string, projectSlug: string, tableSlug: string) {
+  return requestAdminJson<DeleteTableResult>(
+    credential,
+    `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}`,
+    {
+      method: 'DELETE'
     }
   );
 }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { adminCredentialHeaderName } from './auth';
-import { inspectSpreadsheetTab, listApiKeys, listProjects, listSpreadsheetTabs, listSpreadsheetWatches, refreshTableCache, revokeApiKey } from './api';
+import { deleteProject, deleteTable, inspectSpreadsheetTab, listApiKeys, listProjects, listSpreadsheetTabs, listSpreadsheetWatches, refreshTableCache, revokeApiKey } from './api';
 
 describe('admin api helpers', () => {
   afterEach(() => {
@@ -80,6 +80,52 @@ describe('admin api helpers', () => {
     await expect(revokeApiKey('secret', 'key-1')).resolves.toEqual({ ok: true });
     expect(fetchMock).toHaveBeenCalledWith(
       '/v1/admin/keys/key-1',
+      expect.objectContaining({
+        method: 'DELETE',
+        headers: {
+          [adminCredentialHeaderName]: 'secret'
+        }
+      })
+    );
+  });
+
+  it('deletes projects through the admin api', async () => {
+    const fetchMock = vi.fn(async () => Response.json({
+      ok: true,
+      deletedProject: 'demo',
+      deletedTables: ['users']
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(deleteProject('secret', 'demo')).resolves.toEqual({
+      ok: true,
+      deletedProject: 'demo',
+      deletedTables: ['users']
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/v1/admin/projects/demo',
+      expect.objectContaining({
+        method: 'DELETE',
+        headers: {
+          [adminCredentialHeaderName]: 'secret'
+        }
+      })
+    );
+  });
+
+  it('deletes tables through the admin api', async () => {
+    const fetchMock = vi.fn(async () => Response.json({
+      ok: true,
+      deletedTable: 'users'
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(deleteTable('secret', 'demo', 'users')).resolves.toEqual({
+      ok: true,
+      deletedTable: 'users'
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/v1/admin/projects/demo/tables/users',
       expect.objectContaining({
         method: 'DELETE',
         headers: {

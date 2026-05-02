@@ -102,6 +102,7 @@ function createEnv(options?: {
   googlePrivateKey?: string;
   googleCredentialsJson?: string;
   adminBearerToken?: string;
+  allowedOrigins?: string;
 }): Env {
   const rateLimitRequests: Array<{ name: string; key: string }> = [];
   const projectRequests: string[] = [];
@@ -671,7 +672,8 @@ function createEnv(options?: {
     GOOGLE_DRIVE_WEBHOOK_SECRET: 'drive-secret',
     ADMIN_BEARER_TOKEN: options?.adminBearerToken ?? 'secret',
     RATE_LIMIT_MAX_REQUESTS: '300',
-    RATE_LIMIT_WINDOW_SECONDS: '60'
+    RATE_LIMIT_WINDOW_SECONDS: '60',
+    SHEETFLARE_ALLOWED_ORIGINS: options?.allowedOrigins
   };
 
   Object.defineProperty(env, '__rateLimitRequests', {
@@ -1218,6 +1220,72 @@ describe('api routes', () => {
       notes: [
         'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
       ]
+    });
+  });
+
+  it('does not emit browser CORS headers unless an origin is explicitly allowed', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          origin: 'https://client.example'
+        }
+      },
+      createEnv({ defaultAuthMode: 'public-read' })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('allows configured browser CORS preflights before route rate limiting', async () => {
+    const app = createApp();
+    const env = createEnv({ allowedOrigins: 'https://client.example' }) as Env & {
+      __rateLimitRequests: Array<{ name: string; key: string }>;
+    };
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'https://client.example',
+          'access-control-request-method': 'GET',
+          'access-control-request-headers': 'authorization'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get('access-control-allow-origin')).toBe('https://client.example');
+    expect(response.headers.get('access-control-allow-methods')).toBe('GET, POST, PATCH, DELETE, OPTIONS');
+    expect(response.headers.get('access-control-allow-headers')).toBe('Authorization, Content-Type');
+    expect(env.__rateLimitRequests).toEqual([]);
+  });
+
+  it('rejects browser CORS preflights from unconfigured origins', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'https://untrusted.example',
+          'access-control-request-method': 'GET'
+        }
+      },
+      createEnv({ allowedOrigins: 'https://client.example' })
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get('access-control-allow-origin')).toBeNull();
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'FORBIDDEN',
+        message: 'CORS origin is not allowed.',
+        details: null
+      }
     });
   });
 

@@ -203,6 +203,20 @@ npm run ops:cache:health
 
 This exits non-zero when a critical table is not healthy.
 
+## Retire Projects Or Tables
+
+Use the admin UI for routine cleanup. The `Delete table` and `Delete project` actions remove Sheetflare configuration and clear local Durable Object cache state, but they do not delete the upstream Google Sheets tab or spreadsheet.
+
+Direct API equivalents:
+
+```powershell
+$headers = @{ Authorization = "Bearer $env:SHEETFLARE_ADMIN_CREDENTIAL" }
+Invoke-RestMethod -Method Delete -Headers $headers -Uri "$env:SHEETFLARE_BASE_URL/v1/admin/projects/$env:SHEETFLARE_PROJECT/tables/$env:SHEETFLARE_TABLE"
+Invoke-RestMethod -Method Delete -Headers $headers -Uri "$env:SHEETFLARE_BASE_URL/v1/admin/projects/$env:SHEETFLARE_PROJECT"
+```
+
+After deleting a table or project, rerun `npm run ops:cache:health` for the remaining critical tables so monitoring configuration does not still point at retired resources.
+
 ## Register Drive Watches
 
 Automatic debounced reindexing requires one Drive watch per spreadsheet.

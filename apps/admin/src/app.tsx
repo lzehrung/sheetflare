@@ -24,6 +24,8 @@ import {
   createApiKey,
   createProject,
   createTable,
+  deleteProject,
+  deleteTable,
   getCacheStatus,
   getProject,
   inspectSpreadsheetTab,
@@ -899,6 +901,61 @@ export function App() {
     });
   }
 
+  async function handleDeleteTable(tableSlug: string) {
+    if (!credential || !selectedProjectSlug) return;
+    const confirmed = window.confirm(`Delete table ${selectedProjectSlug}/${tableSlug}? This removes Sheetflare configuration and clears the local cache, but does not delete the Google Sheets tab.`);
+    if (!confirmed) return;
+
+    await runAction(`Deleting table ${selectedProjectSlug}/${tableSlug}`, async () => {
+      await deleteTable(credential, selectedProjectSlug, tableSlug);
+      const cacheKey = getTableCacheKey(selectedProjectSlug, tableSlug);
+      setCacheStateByTable((current) => {
+        const { [cacheKey]: removed, ...rest } = current;
+        void removed;
+        return rest;
+      });
+      setCacheStatusErrorByTable((current) => {
+        const { [cacheKey]: removed, ...rest } = current;
+        void removed;
+        return rest;
+      });
+      setCacheStatusLoadingByTable((current) => {
+        const { [cacheKey]: removed, ...rest } = current;
+        void removed;
+        return rest;
+      });
+      await refreshProjects(credential);
+      await refreshProjectDetail(credential, selectedProjectSlug);
+    });
+  }
+
+  async function handleDeleteProject() {
+    if (!credential || !selectedProjectSlug || projectDetailState.status !== 'ready') return;
+    const tableCount = projectDetailState.tables.length;
+    const confirmed = window.confirm(`Delete project ${selectedProjectSlug} and its ${tableCount} configured table${tableCount === 1 ? '' : 's'}? This does not delete the upstream Google spreadsheet.`);
+    if (!confirmed) return;
+
+    await runAction(`Deleting project ${selectedProjectSlug}`, async () => {
+      await deleteProject(credential, selectedProjectSlug);
+      setCacheStateByTable({});
+      setCacheStatusErrorByTable({});
+      setCacheStatusLoadingByTable({});
+      setProjectDetailState({
+        status: 'idle',
+        message: 'Select a project to inspect tables, cache state, and keys.'
+      });
+      setProjectKeysState({
+        status: 'idle',
+        message: 'Select a project to inspect and manage scoped API keys.'
+      });
+      setSpreadsheetWatchState({
+        status: 'idle',
+        message: 'Select a project to inspect spreadsheet watch status.'
+      });
+      await refreshProjects(credential);
+    });
+  }
+
   async function handleRevokeKey(apiKeyId: string) {
     if (!credential) return;
     await runAction(`Revoking key ${apiKeyId}`, async () => {
@@ -1071,7 +1128,9 @@ export function App() {
           onLoadCache={(tableSlug) => void handleLoadCache(tableSlug)}
           onRefreshIfStale={(tableSlug) => void handleRefreshIfStale(tableSlug)}
           onReindex={(tableSlug) => void handleReindex(tableSlug)}
+          onDeleteTable={(tableSlug) => void handleDeleteTable(tableSlug)}
           onRefresh={() => void handleRefreshSelectedProject()}
+          onDeleteProject={() => void handleDeleteProject()}
           busy={busyAction !== null}
           createTableDisabled={!credential || !selectedProjectSlug || busyAction !== null || !createTableValidation.isValid}
           getTableCacheKey={getTableCacheKey}

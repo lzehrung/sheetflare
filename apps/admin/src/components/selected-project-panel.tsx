@@ -54,7 +54,9 @@ type SelectedProjectPanelProps = {
   onLoadCache: (tableSlug: string) => void;
   onRefreshIfStale: (tableSlug: string) => void;
   onReindex: (tableSlug: string) => void;
+  onDeleteTable: (tableSlug: string) => void;
   onRefresh: () => void;
+  onDeleteProject: () => void;
   busy: boolean;
   createTableDisabled: boolean;
   getTableCacheKey: (projectSlug: string, tableSlug: string) => string;
@@ -244,7 +246,9 @@ export function SelectedProjectPanel({
   onLoadCache,
   onRefreshIfStale,
   onReindex,
+  onDeleteTable,
   onRefresh,
+  onDeleteProject,
   busy,
   createTableDisabled,
   getTableCacheKey
@@ -270,6 +274,14 @@ export function SelectedProjectPanel({
             disabled={!selectedProjectSlug || busy}
           >
             Refresh project
+          </button>
+          <button
+            type="button"
+            className="dangerButton"
+            onClick={onDeleteProject}
+            disabled={detailState.status !== 'ready' || busy}
+          >
+            Delete project
           </button>
         </div>
       </div>
@@ -625,6 +637,9 @@ export function SelectedProjectPanel({
                       </button>
                       <button type="button" className="secondaryButton" onClick={() => onReindex(table.tableSlug)} disabled={busy}>
                         Reindex
+                      </button>
+                      <button type="button" className="dangerButton" onClick={() => onDeleteTable(table.tableSlug)} disabled={busy}>
+                        Delete table
                       </button>
                     </div>
                   </article>
