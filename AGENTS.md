@@ -81,6 +81,8 @@ Do not hide important contracts in loose objects or inferred ad hoc shapes when 
 
 If data crosses a trust boundary, validate it.
 
+Use Zod 4 schemas as the default runtime validation mechanism for structured inputs and persisted or RPC payloads. Prefer shared Zod schemas over hand-rolled object-shape checks when the structure is more than a trivial primitive guard.
+
 Trust boundaries include:
 
 - HTTP requests

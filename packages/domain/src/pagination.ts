@@ -1,9 +1,17 @@
+import { z } from 'zod';
 import type { FieldFilter, ListRowsQuery, QueryScalarValue, RowFilter } from '@sheetflare/contracts';
 import { BadRequestError } from '@sheetflare/contracts';
 import { compareStableStrings } from './strings';
 
 function base64UrlEncode(input: string): string {
-  return btoa(input).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  const bytes = new TextEncoder().encode(input);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.slice(index, index + chunkSize));
+  }
+
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
 function base64UrlDecode(input: string): string {
@@ -11,7 +19,13 @@ function base64UrlDecode(input: string): string {
   const padding = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
 
   try {
-    return atob(normalized + padding);
+    const binary = atob(normalized + padding);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+
+    return new TextDecoder().decode(bytes);
   } catch {
     throw new BadRequestError('Invalid pagination cursor.');
   }
@@ -56,10 +70,44 @@ export interface QueryCursorPayload {
   value: CursorValue;
 }
 
+const cursorValueSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('null'),
+    value: z.null()
+  }),
+  z.object({
+    kind: z.literal('boolean'),
+    value: z.boolean()
+  }),
+  z.object({
+    kind: z.literal('number'),
+    value: z.number().finite()
+  }),
+  z.object({
+    kind: z.literal('string'),
+    value: z.string()
+  })
+]) satisfies z.ZodType<CursorValue>;
+
+const queryCursorPayloadSchema = z.object({
+  fingerprint: z.string(),
+  sortField: z.string().min(1),
+  sortDirection: z.enum(['asc', 'desc']),
+  rowId: z.string().min(1),
+  rowNumber: z.number().int().safe().positive(),
+  value: cursorValueSchema
+}) satisfies z.ZodType<QueryCursorPayload>;
+
 export function normalizeScalarCursorValue(value: QueryScalarValue): CursorValue {
   if (value === null) return { kind: 'null', value: null };
   if (typeof value === 'boolean') return { kind: 'boolean', value };
-  if (typeof value === 'number') return { kind: 'number', value };
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new BadRequestError('Pagination cursor cannot contain a non-finite number.');
+    }
+
+    return { kind: 'number', value };
+  }
   return { kind: 'string', value };
 }
 
@@ -100,8 +148,18 @@ export function getListQueryFingerprint(query: NormalizedListRowsQuery): string 
   });
 }
 
+function parseQueryCursorPayload(value: unknown): QueryCursorPayload | null {
+  const parsed = queryCursorPayloadSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 export function encodeQueryCursor(cursor: QueryCursorPayload): string {
-  return base64UrlEncode(JSON.stringify(cursor));
+  const payload = parseQueryCursorPayload(cursor);
+  if (!payload) {
+    throw new BadRequestError('Invalid pagination cursor.');
+  }
+
+  return base64UrlEncode(JSON.stringify(payload));
 }
 
 export function decodeQueryCursor(
@@ -113,7 +171,13 @@ export function decodeQueryCursor(
 
   let parsed: QueryCursorPayload;
   try {
-    parsed = JSON.parse(base64UrlDecode(cursor)) as QueryCursorPayload;
+    const decoded: unknown = JSON.parse(base64UrlDecode(cursor));
+    const payload = parseQueryCursorPayload(decoded);
+    if (!payload) {
+      throw new BadRequestError('Invalid pagination cursor.');
+    }
+
+    parsed = payload;
   } catch {
     throw new BadRequestError('Invalid pagination cursor.');
   }

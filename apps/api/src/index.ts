@@ -869,15 +869,15 @@ function assertCredentialProjectBoundary(auth: AuthContext, projectSlug: string)
   }
 }
 
-function assertProjectScopedKeyCanDelegateScopes(auth: AuthContext, requestedScopes: readonly ApiScope[]) {
-  if (auth.kind !== 'api-key' || !auth.record.projectSlug) {
+function assertApiKeyCanDelegateScopes(auth: AuthContext, requestedScopes: readonly ApiScope[]) {
+  if (auth.kind !== 'api-key') {
     return;
   }
 
   const callerScopes = new Set(auth.record.scopes);
   const unauthorizedScopes = requestedScopes.filter((scope) => !callerScopes.has(scope));
   if (unauthorizedScopes.length > 0) {
-    throw new UnauthorizedError('Project-scoped API keys can only delegate scopes they already have.');
+    throw new UnauthorizedError('API keys can only delegate scopes they already have.');
   }
 }
 
@@ -2177,7 +2177,7 @@ function createApp() {
         throw new UnauthorizedError('This key can only create API keys for its own project.');
       }
     }
-    assertProjectScopedKeyCanDelegateScopes(auth, input.scopes);
+    assertApiKeyCanDelegateScopes(auth, input.scopes);
     if (input.projectSlug) {
       await loadProject(c, input.projectSlug);
     }
