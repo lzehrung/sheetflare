@@ -1894,7 +1894,35 @@ describe('api routes', () => {
     expect(await response.json()).toEqual({
       error: {
         code: 'UNAUTHORIZED',
-        message: 'Project-scoped API keys can only delegate scopes they already have.',
+        message: 'API keys can only delegate scopes they already have.',
+        details: null
+      }
+    });
+  });
+
+  it('rejects global API key creation that grants scopes the caller does not have', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/admin/keys',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer sfk_global-key.any-secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: 'Escalated global key',
+          scopes: ['admin:projects', 'table:delete']
+        })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'API keys can only delegate scopes they already have.',
         details: null
       }
     });

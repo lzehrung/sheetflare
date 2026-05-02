@@ -104,6 +104,68 @@ export function encodeQueryCursor(cursor: QueryCursorPayload): string {
   return base64UrlEncode(JSON.stringify(cursor));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseCursorValue(value: unknown): CursorValue | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  if (value.kind === 'null' && value.value === null) {
+    return { kind: 'null', value: null };
+  }
+
+  if (value.kind === 'boolean' && typeof value.value === 'boolean') {
+    return { kind: 'boolean', value: value.value };
+  }
+
+  if (value.kind === 'number' && typeof value.value === 'number' && Number.isFinite(value.value)) {
+    return { kind: 'number', value: value.value };
+  }
+
+  if (value.kind === 'string' && typeof value.value === 'string') {
+    return { kind: 'string', value: value.value };
+  }
+
+  return null;
+}
+
+function parseQueryCursorPayload(value: unknown): QueryCursorPayload | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const cursorValue = parseCursorValue(value.value);
+  if (!cursorValue) {
+    return null;
+  }
+
+  const rowNumber = value.rowNumber;
+  if (
+    typeof value.fingerprint !== 'string' ||
+    typeof value.sortField !== 'string' ||
+    (value.sortDirection !== 'asc' && value.sortDirection !== 'desc') ||
+    typeof value.rowId !== 'string' ||
+    value.rowId.length === 0 ||
+    typeof rowNumber !== 'number' ||
+    !Number.isInteger(rowNumber) ||
+    rowNumber <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    fingerprint: value.fingerprint,
+    sortField: value.sortField,
+    sortDirection: value.sortDirection,
+    rowId: value.rowId,
+    rowNumber,
+    value: cursorValue
+  };
+}
+
 export function decodeQueryCursor(
   cursor: string | null | undefined,
   expectedFingerprint: string,
@@ -113,7 +175,13 @@ export function decodeQueryCursor(
 
   let parsed: QueryCursorPayload;
   try {
-    parsed = JSON.parse(base64UrlDecode(cursor)) as QueryCursorPayload;
+    const decoded: unknown = JSON.parse(base64UrlDecode(cursor));
+    const payload = parseQueryCursorPayload(decoded);
+    if (!payload) {
+      throw new BadRequestError('Invalid pagination cursor.');
+    }
+
+    parsed = payload;
   } catch {
     throw new BadRequestError('Invalid pagination cursor.');
   }
