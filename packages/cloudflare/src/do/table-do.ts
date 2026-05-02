@@ -1554,8 +1554,9 @@ export class TableDO {
 
     const rows = this.ctx.storage.sql.exec(
       sql,
-      ...filterPlan.parameters,
+      ...filterPlan.joinParameters,
       ...sortPlan.parameters,
+      ...filterPlan.conditionParameters,
       ...cursorPlan.parameters,
       query.limit + 1
     ).toArray() as Array<

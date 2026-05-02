@@ -4203,6 +4203,191 @@ describe('TableDO', () => {
     expect((containsResponse as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-3']);
   });
 
+  it('binds multiple indexed filter parameters in SQL placeholder order', async () => {
+    const env = createTestEnv();
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'email', 'status', 'name'],
+        ['row-1', 'ada@example.com', 'active', 'Ada'],
+        ['row-2', 'ada@example.com', 'inactive', 'Ada Old'],
+        ['row-3', 'grace@example.com', 'active', 'Grace']
+      ],
+      requestedRanges: []
+    };
+
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['email', 'status', 'name'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          sort: 'rowNumber:asc',
+          filter: {
+            email: {
+              eq: 'ada@example.com'
+            },
+            status: {
+              eq: 'active'
+            }
+          }
+        }
+      }
+    );
+
+    expect((response as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-1']);
+  });
+
+  it('binds indexed sort parameters before indexed filter condition parameters', async () => {
+    const env = createTestEnv();
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status', 'name'],
+        ['row-1', 'active', 'Zoe'],
+        ['row-2', 'inactive', 'Ada'],
+        ['row-3', 'active', 'Bea']
+      ],
+      requestedRanges: []
+    };
+
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: ['status', 'name'],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          sort: 'name:asc',
+          filter: {
+            status: {
+              eq: 'active'
+            }
+          }
+        }
+      }
+    );
+
+    expect((response as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-3', 'row-1']);
+  });
+
+  it('treats SQL-shaped indexed field names and filter values as bound values', async () => {
+    const env = createTestEnv();
+    const suspiciousFieldName = "status') OR 1=1 --";
+    const suspiciousValue = "active' OR '1'='1";
+    const sheet: SheetState = {
+      rows: [
+        ['_id', suspiciousFieldName],
+        ['row-1', 'active'],
+        ['row-2', suspiciousValue],
+        ['row-3', 'inactive']
+      ],
+      requestedRanges: []
+    };
+
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.create',
+        input: {
+          slug: 'demo',
+          name: 'Demo',
+          spreadsheetId: 'sheet-1'
+        }
+      }
+    );
+
+    await doRpc<ProjectDoResponse>(
+      env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')),
+      {
+        type: 'project.table.create',
+        projectSlug: 'demo',
+        input: {
+          tableSlug: 'users',
+          sheetTabName: 'Users',
+          indexedFields: [suspiciousFieldName],
+          cacheTtlSeconds: 3600
+        }
+      }
+    );
+
+    const response = await doRpc<TableDoResponse>(
+      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
+      {
+        type: 'table.rows.list',
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        query: {
+          sort: 'rowNumber:asc',
+          filter: {
+            [suspiciousFieldName]: {
+              eq: suspiciousValue
+            }
+          }
+        }
+      }
+    );
+
+    expect((response as { type: 'table.rows.list.result'; result: { data: Array<{ id: string }> } }).result.data.map((row) => row.id)).toEqual(['row-2']);
+  });
+
   it('applies indexed neq filters consistently across null and mismatched kinds', async () => {
     const env = createTestEnv();
     const sheet: SheetState = {
