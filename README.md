@@ -5,7 +5,6 @@
 Sheetflare is a Cloudflare-first starter for exposing Google Sheets tabs through a small Hono API backed by Durable Objects.
 It is aimed at controlled self-hosted deployments and is not yet production-proven for broad external workloads.
 
-Production hardening guidance lives in [production-readiness-checklist.md](./production-readiness-checklist.md).
 Start with [docs/quickstart.md](./docs/quickstart.md).
 Operational docs live in [docs/operator-runbook.md](./docs/operator-runbook.md) and [docs/deploy.md](./docs/deploy.md).
 Google credential setup guidance lives in [docs/google-service-accounts.md](./docs/google-service-accounts.md).
