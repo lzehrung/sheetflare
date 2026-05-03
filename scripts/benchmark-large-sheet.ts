@@ -5,7 +5,7 @@ import { GoogleSheetsService, type GoogleSheetTableConfig } from '@sheetflare/go
 import { assertPresent, joinUrl, logStep, logSuccess, requestJson, ScriptError } from './lib/runtime';
 import { readBenchmarkConfig } from './lib/benchmark-config';
 import { buildBenchmarkRow, chooseBenchmarkFields } from './lib/benchmark-data';
-import { buildSkippedScenarioReport } from './lib/benchmark-scenarios';
+import { buildFailedScenarioReport, buildSkippedScenarioReport } from './lib/benchmark-scenarios';
 import { summarizeJson, writeReportArtifacts } from './lib/reporting';
 
 type RowEnvelope = {
@@ -222,8 +222,9 @@ async function timedRequest<T>(options: {
 
     const response = await fetch(joinUrl(options.baseUrl, options.path), init);
     const payload = await readResponseBody<T>(response);
+    const statusOk = options.expectedStatus !== undefined ? response.status === options.expectedStatus : response.ok;
     return {
-      ok: options.expectedStatus !== undefined ? response.status === options.expectedStatus : response.ok,
+      ok: statusOk && payload.parseError === null,
       status: response.status,
       durationMs: Number((performance.now() - startedAt).toFixed(2)),
       body: payload.parsedBody,
@@ -417,15 +418,28 @@ async function main() {
     work: () => Promise<Omit<ScenarioReport, 'name'>>
   ) {
     logStep(name);
-    const result = await work();
-    scenarios.push({
-      name,
-      ...result
-    });
-    if (result.status === 'passed') {
-      logSuccess(`${name} complete.`);
+    const startedAtMs = performance.now();
+    try {
+      const result = await work();
+      scenarios.push({
+        name,
+        ...result
+      });
+      if (result.status === 'passed') {
+        logSuccess(`${name} complete.`);
+      }
+      return result;
+    } catch (error) {
+      const result = buildFailedScenarioReport(
+        error,
+        Number((performance.now() - startedAtMs).toFixed(2))
+      );
+      scenarios.push({
+        name,
+        ...result
+      });
+      throw error;
     }
-    return result;
   }
 
   async function getCacheStatus() {
