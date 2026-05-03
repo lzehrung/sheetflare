@@ -207,15 +207,19 @@ async function timedRequest<T>(options: {
 }) {
   const startedAt = performance.now();
   try {
-    const response = await fetch(joinUrl(options.baseUrl, options.path), {
+    const init: RequestInit = {
       method: options.method ?? 'GET',
       headers: {
         ...(options.headers ?? {}),
         ...(options.bearer ? { authorization: `Bearer ${options.bearer}` } : {}),
         ...(options.body !== undefined ? { 'content-type': 'application/json' } : {})
-      },
-        ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {})
-    });
+      }
+    };
+    if (options.body !== undefined) {
+      init.body = JSON.stringify(options.body);
+    }
+
+    const response = await fetch(joinUrl(options.baseUrl, options.path), init);
     const payload = await readResponseBody<T>(response);
     return {
       ok: options.expectedStatus !== undefined ? response.status === options.expectedStatus : response.ok,

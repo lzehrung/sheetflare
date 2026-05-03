@@ -43,11 +43,14 @@ $env:SHEETFLARE_PRIVATE_TABLE = "<table-slug>"
 $env:SHEETFLARE_PRIVATE_READ_KEY = "<private-read-key>"
 $env:SHEETFLARE_BENCHMARK_REPORT_PATH = "reports/benchmark-$(Get-Date -Format yyyyMMdd-HHmmss).md"
 $env:SHEETFLARE_BENCHMARK_TARGET_ROWS = "500000"
+$env:SHEETFLARE_BENCHMARK_BATCH_ROWS = "1000"
 $env:SHEETFLARE_BENCHMARK_STALE_WAIT_MS = "16000"
 $env:GOOGLE_CLIENT_EMAIL = "<service-account-email>"
 $env:GOOGLE_PRIVATE_KEY = "<service-account-private-key>"
 npm run benchmark
 ```
+
+Use a smaller `SHEETFLARE_BENCHMARK_BATCH_ROWS` if you want shorter individual Google Sheets writes during seed, or keep the default `1000` for fewer requests.
 
 Artifacts written:
 
