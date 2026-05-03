@@ -57,7 +57,7 @@ Artifacts written:
 - `<report>.md`: benchmark summary
 - `<report>.json`: structured latency, seed, and failure artifact
 
-Set `SHEETFLARE_BENCHMARK_STALE_WAIT_MS` to `0` if you want to skip the stale-wait phase for a quick operator smoke check.
+Set `SHEETFLARE_BENCHMARK_STALE_WAIT_MS` to `0` if you want to skip the stale point-read scenario entirely for a quick operator smoke check.
 
 The benchmark suite:
 

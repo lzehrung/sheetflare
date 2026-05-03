@@ -5,6 +5,7 @@ import { GoogleSheetsService, type GoogleSheetTableConfig } from '@sheetflare/go
 import { assertPresent, joinUrl, logStep, logSuccess, requestJson, ScriptError } from './lib/runtime';
 import { readBenchmarkConfig } from './lib/benchmark-config';
 import { buildBenchmarkRow, chooseBenchmarkFields } from './lib/benchmark-data';
+import { buildSkippedScenarioReport } from './lib/benchmark-scenarios';
 import { summarizeJson, writeReportArtifacts } from './lib/reporting';
 
 type RowEnvelope = {
@@ -578,6 +579,10 @@ async function main() {
     });
 
     await runScenario('Point reads after the TTL becomes stale', async () => {
+      if (benchmark.staleWaitMs === 0) {
+        return buildSkippedScenarioReport('staleWaitMs=0');
+      }
+
       const rowId = assertPresent(observedPointReadRowId, 'Indexed warmup did not return a row id for point-read validation.');
       const path = `/v1/projects/${encodeURIComponent(benchmark.privateProject)}/tables/${encodeURIComponent(benchmark.privateTable)}/rows/${encodeURIComponent(rowId)}`;
 
