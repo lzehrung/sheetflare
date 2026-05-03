@@ -42,6 +42,10 @@ type GoogleBatchValuesUpdateResponse = {
   totalUpdatedRows?: number;
 };
 
+type GoogleClearValuesResponse = {
+  clearedRange?: string;
+};
+
 type GoogleSpreadsheetMetadataResponse = {
   sheets?: Array<{
     properties?: {
@@ -183,6 +187,11 @@ function buildBoundedTableRange(headerRow: number, lastColumnNumber: number) {
 function buildBoundedRowRange(rowNumber: number, lastColumnNumber: number) {
   const lastColumn = columnNumberToA1(lastColumnNumber);
   return `A${rowNumber}:${lastColumn}${rowNumber}`;
+}
+
+function buildBoundedRowSpanRange(startRowNumber: number, endRowNumber: number, lastColumnNumber: number) {
+  const lastColumn = columnNumberToA1(lastColumnNumber);
+  return `A${startRowNumber}:${lastColumn}${endRowNumber}`;
 }
 
 type ColumnValueSegment = {
@@ -635,6 +644,75 @@ export class GoogleSheetsService {
     );
 
     await this.parseJson<GoogleBatchValuesUpdateResponse>(response);
+  }
+
+  async writeRowsBatch(
+    config: GoogleSheetTableConfig,
+    headers: readonly string[],
+    rows: readonly RowRecord[],
+    startRowNumber: number
+  ): Promise<number> {
+    if (rows.length === 0) {
+      return 0;
+    }
+
+    const accessToken = await this.getAccessToken();
+    const endColumn = columnNumberToA1(headers.length);
+    const response = await this.authorizedRequest(
+      `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values:batchUpdate`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          valueInputOption: 'RAW',
+          data: rows.map((row, index) => ({
+            range: `${escapeSheetName(config.sheetTabName)}!A${startRowNumber + index}:${endColumn}${startRowNumber + index}`,
+            values: [headers.map((header) => serializeSheetCell(row[header] ?? null))]
+          }))
+        })
+      },
+      {
+        operation: `batch write rows for ${config.projectSlug}/${config.tableSlug}`,
+        maxRetries: 0
+      }
+    );
+
+    const body = await this.parseJson<GoogleBatchValuesUpdateResponse>(response);
+    return body.totalUpdatedRows ?? rows.length;
+  }
+
+  async clearRowsRange(
+    config: GoogleSheetTableConfig,
+    startRowNumber: number,
+    endRowNumber: number,
+    lastColumnNumber?: number
+  ): Promise<void> {
+    if (endRowNumber < startRowNumber) {
+      return;
+    }
+
+    const accessToken = await this.getAccessToken();
+    const range = `${escapeSheetName(config.sheetTabName)}!${buildBoundedRowSpanRange(startRowNumber, endRowNumber, lastColumnNumber ?? 1)}`;
+    const response = await this.authorizedRequest(
+      `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}:clear`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({})
+      },
+      {
+        operation: `clear rows for ${config.projectSlug}/${config.tableSlug}`,
+        maxRetries: 0
+      }
+    );
+
+    await this.parseJson<GoogleClearValuesResponse>(response);
   }
 
   async deleteRow(config: GoogleSheetTableConfig, rowNumber: number): Promise<void> {
