@@ -4,7 +4,7 @@ import { type AdminGetProjectResult } from '@sheetflare/contracts';
 import { GoogleSheetsService, type GoogleSheetTableConfig } from '@sheetflare/google-sheets';
 import { assertPresent, joinUrl, logStep, logSuccess, requestJson, ScriptError } from './lib/runtime';
 import { readBenchmarkConfig } from './lib/benchmark-config';
-import { buildBenchmarkRow, buildBenchmarkRowId, chooseBenchmarkFields } from './lib/benchmark-data';
+import { buildBenchmarkRow, chooseBenchmarkFields } from './lib/benchmark-data';
 import { summarizeJson, writeReportArtifacts } from './lib/reporting';
 
 type RowEnvelope = {
@@ -44,6 +44,7 @@ type AttemptResult = {
   status: number;
   durationMs: number;
   body: unknown;
+  rawText: string;
   errorMessage?: string;
 };
 
@@ -166,13 +167,33 @@ async function runConcurrent<T>(
   return results;
 }
 
-async function readJsonBody<T>(response: Response): Promise<T | null> {
+async function readResponseBody<T>(response: Response): Promise<{
+  rawText: string;
+  parsedBody: T | null;
+  parseError: string | null;
+}> {
   const text = await response.text();
   if (text.trim().length === 0) {
-    return null;
+    return {
+      rawText: text,
+      parsedBody: null,
+      parseError: null
+    };
   }
 
-  return JSON.parse(text) as T;
+  try {
+    return {
+      rawText: text,
+      parsedBody: JSON.parse(text) as T,
+      parseError: null
+    };
+  } catch (error) {
+    return {
+      rawText: text,
+      parsedBody: null,
+      parseError: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 async function timedRequest<T>(options: {
@@ -193,14 +214,16 @@ async function timedRequest<T>(options: {
         ...(options.bearer ? { authorization: `Bearer ${options.bearer}` } : {}),
         ...(options.body !== undefined ? { 'content-type': 'application/json' } : {})
       },
-      ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {})
+        ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {})
     });
-    const body = await readJsonBody<T>(response);
+    const payload = await readResponseBody<T>(response);
     return {
       ok: options.expectedStatus !== undefined ? response.status === options.expectedStatus : response.ok,
       status: response.status,
       durationMs: Number((performance.now() - startedAt).toFixed(2)),
-      body
+      body: payload.parsedBody,
+      rawText: payload.rawText,
+      ...(payload.parseError ? { errorMessage: payload.parseError } : {})
     } satisfies AttemptResult;
   } catch (error) {
     return {
@@ -208,6 +231,7 @@ async function timedRequest<T>(options: {
       status: -1,
       durationMs: Number((performance.now() - startedAt).toFixed(2)),
       body: null,
+      rawText: '',
       errorMessage: error instanceof Error ? error.message : String(error)
     } satisfies AttemptResult;
   }
@@ -381,6 +405,7 @@ async function main() {
   let seededRows = 0;
   let batchCount = 0;
   let seedNotes: string[] = [];
+  let observedPointReadRowId: string | null = null;
 
   async function runScenario(
     name: string,
@@ -484,6 +509,9 @@ async function main() {
       expectedStatus: 200
     });
     const cacheAfterReindex = await getCacheStatus();
+    const reindexResponse = reindexAttempt.ok
+      ? assertPresent(reindexAttempt.body, 'Reindex response returned no JSON body.')
+      : null;
     report.reindex = {
       status: reindexAttempt.ok ? 'passed' : 'failed',
       durationMs: Number((performance.now() - reindexStartedAt).toFixed(2)),
@@ -491,7 +519,7 @@ async function main() {
       cacheStatus: cacheAfterReindex.data.status,
       staleReason: cacheAfterReindex.data.staleReason,
       notes: [
-        `reindexResponseRowCount=${reindexAttempt.ok ? (reindexAttempt.body as ReindexResponse).rowCount : 'unknown'}`
+        `reindexResponseRowCount=${reindexResponse ? reindexResponse.rowCount : 'unknown'}`
       ]
     };
     report.rowCountAfter = cacheAfterReindex.data.rowCount;
@@ -511,6 +539,10 @@ async function main() {
         expectedStatus: 200
       });
       const warmupBody = assertPresent(warmup.data, 'Indexed list warmup returned an empty response body.');
+      observedPointReadRowId = assertPresent(
+        warmupBody.data[0]?.id,
+        'Indexed warmup did not return a row id for point-read validation.'
+      );
       const startedAtMs = performance.now();
       const attempts = await runConcurrent(60, 6, async () =>
         timedRequest<ListRowsResponse>({
@@ -542,7 +574,7 @@ async function main() {
     });
 
     await runScenario('Point reads after the TTL becomes stale', async () => {
-      const rowId = buildBenchmarkRowId(Math.ceil(benchmark.targetRows / 2));
+      const rowId = assertPresent(observedPointReadRowId, 'Indexed warmup did not return a row id for point-read validation.');
       const path = `/v1/projects/${encodeURIComponent(benchmark.privateProject)}/tables/${encodeURIComponent(benchmark.privateTable)}/rows/${encodeURIComponent(rowId)}`;
 
       logStep(`Waiting ${benchmark.staleWaitMs}ms so point reads execute after TTL expiry assumptions.`);
@@ -572,7 +604,7 @@ async function main() {
             },
             response: {
               status: attempts[0]?.status ?? 0,
-              excerpt: summarizeJson(attempts[0]?.body ?? null)
+              excerpt: summarizeJson(attempts[0]?.body ?? attempts[0]?.rawText ?? null)
             }
           }
         ]
@@ -655,7 +687,7 @@ async function main() {
             },
             response: {
               status: reindexAttempt.status,
-              excerpt: summarizeJson(reindexAttempt.body)
+              excerpt: summarizeJson(reindexAttempt.body ?? reindexAttempt.rawText ?? null)
             }
           }
         ]
