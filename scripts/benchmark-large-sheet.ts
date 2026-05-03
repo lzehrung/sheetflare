@@ -2,7 +2,7 @@ import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type AdminGetProjectResult } from '@sheetflare/contracts';
 import { GoogleSheetsService, type GoogleSheetTableConfig } from '@sheetflare/google-sheets';
-import { assertPresent, logStep, logSuccess, requestJson, ScriptError } from './lib/runtime';
+import { assertPresent, joinUrl, logStep, logSuccess, requestJson, ScriptError } from './lib/runtime';
 import { readBenchmarkConfig } from './lib/benchmark-config';
 import { buildBenchmarkRow, buildBenchmarkRowId, chooseBenchmarkFields } from './lib/benchmark-data';
 import { summarizeJson, writeReportArtifacts } from './lib/reporting';
@@ -166,15 +166,41 @@ async function runConcurrent<T>(
   return results;
 }
 
-async function timedRequest<T>(options: Parameters<typeof requestJson<T>>[0]) {
+async function readJsonBody<T>(response: Response): Promise<T | null> {
+  const text = await response.text();
+  if (text.trim().length === 0) {
+    return null;
+  }
+
+  return JSON.parse(text) as T;
+}
+
+async function timedRequest<T>(options: {
+  baseUrl: string;
+  path: string;
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  bearer?: string | null;
+  headers?: Record<string, string>;
+  body?: unknown;
+  expectedStatus?: number;
+}) {
   const startedAt = performance.now();
   try {
-    const result = await requestJson<T>(options);
+    const response = await fetch(joinUrl(options.baseUrl, options.path), {
+      method: options.method ?? 'GET',
+      headers: {
+        ...(options.headers ?? {}),
+        ...(options.bearer ? { authorization: `Bearer ${options.bearer}` } : {}),
+        ...(options.body !== undefined ? { 'content-type': 'application/json' } : {})
+      },
+      ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {})
+    });
+    const body = await readJsonBody<T>(response);
     return {
-      ok: options.expectedStatus === undefined || result.response.status === options.expectedStatus,
-      status: result.response.status,
+      ok: options.expectedStatus !== undefined ? response.status === options.expectedStatus : response.ok,
+      status: response.status,
       durationMs: Number((performance.now() - startedAt).toFixed(2)),
-      body: result.data
+      body
     } satisfies AttemptResult;
   } catch (error) {
     return {
@@ -593,6 +619,7 @@ async function main() {
     });
 
     await runScenario('Reindex while reads continue', async () => {
+      const startedAtMs = performance.now();
       const path = `/v1/projects/${encodeURIComponent(benchmark.privateProject)}/tables/${encodeURIComponent(benchmark.privateTable)}/rows?limit=25&sort=${encodeURIComponent(`${benchmarkFields.sortField}:asc`)}`;
       const readPromise = runConcurrent(40, 4, async () =>
         timedRequest<ListRowsResponse>({
@@ -616,7 +643,7 @@ async function main() {
 
       return {
         status: combined.every((attempt) => attempt.ok) ? 'passed' : 'failed',
-        durationMs: Number(combined.reduce((sum, attempt) => sum + attempt.durationMs, 0).toFixed(2)),
+        durationMs: Number((performance.now() - startedAtMs).toFixed(2)),
         ...summarizeAttempts(combined),
         notes: [`reindexDurationMs=${reindexAttempt.durationMs}`],
         samples: [

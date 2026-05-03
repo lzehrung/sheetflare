@@ -1103,12 +1103,11 @@ describe('GoogleSheetsService write helpers', () => {
       valueInputOption: 'RAW',
       data: [
         {
-          range: "'Users'!A2:B2",
-          values: [['row-1', 'Ada']]
-        },
-        {
-          range: "'Users'!A3:B3",
-          values: [['row-2', 'Grace']]
+          range: "'Users'!A2:B3",
+          values: [
+            ['row-1', 'Ada'],
+            ['row-2', 'Grace']
+          ]
         }
       ]
     });

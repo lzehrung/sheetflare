@@ -658,6 +658,7 @@ export class GoogleSheetsService {
 
     const accessToken = await this.getAccessToken();
     const endColumn = columnNumberToA1(headers.length);
+    const values = rows.map((row) => headers.map((header) => serializeSheetCell(row[header] ?? null)));
     const response = await this.authorizedRequest(
       `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values:batchUpdate`,
       {
@@ -668,10 +669,10 @@ export class GoogleSheetsService {
         },
         body: JSON.stringify({
           valueInputOption: 'RAW',
-          data: rows.map((row, index) => ({
-            range: `${escapeSheetName(config.sheetTabName)}!A${startRowNumber + index}:${endColumn}${startRowNumber + index}`,
-            values: [headers.map((header) => serializeSheetCell(row[header] ?? null))]
-          }))
+          data: [{
+            range: `${escapeSheetName(config.sheetTabName)}!A${startRowNumber}:${endColumn}${startRowNumber + rows.length - 1}`,
+            values
+          }]
         })
       },
       {
