@@ -33,6 +33,7 @@
     "e2e:local": "tsx scripts/local-e2e.ts",
     "setup": "tsx scripts/setup.ts",
     "setup:verify": "tsx scripts/setup.ts --verify",
+    "doctor": "npm run setup:verify",
     "deploy": "tsx scripts/setup.ts --deploy",
     "deploy:api:raw": "npm --workspace @sheetflare/api run deploy",
     "deploy:admin:raw": "npm --workspace @sheetflare/admin run deploy:raw",

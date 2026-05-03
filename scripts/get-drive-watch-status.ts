@@ -16,7 +16,10 @@ function parseOptionalNonNegativeInteger(name: string) {
 }
 
 async function main() {
-  const baseUrl = requireEnv('SHEETFLARE_BASE_URL');
+  const baseUrl = requireEnv(
+    'SHEETFLARE_BASE_URL',
+    'Set SHEETFLARE_BASE_URL to the deployed API Worker URL, not the admin Pages URL.'
+  );
   const bearer = requireAdminCredential();
   const retries = parseOptionalNonNegativeInteger('SHEETFLARE_DRIVE_WATCH_STATUS_RETRIES') ?? 2;
   const retryDelayMs = parseOptionalNonNegativeInteger('SHEETFLARE_DRIVE_WATCH_STATUS_RETRY_DELAY_MS') ?? 1000;

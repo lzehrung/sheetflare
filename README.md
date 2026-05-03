@@ -37,6 +37,7 @@ npm run smoke
 
 - `npm run setup`
 - `npm run setup:verify`
+- `npm run doctor`
 - `npm run ops:create-admin-key`
 - `npm run ops:bootstrap`
 - `npm run ops:cache`
@@ -63,6 +64,8 @@ For the normal setup flow:
 4. Use [docs/deploy.md](./docs/deploy.md) for CI deployment details, manual fallback commands, and Cloudflare token scopes.
 5. Use [docs/operator-runbook.md](./docs/operator-runbook.md) for day-2 operations and failure handling.
 
+Run `npm run setup -- --help` for the setup flags and common operator flows.
+
 `npm run setup` writes `sheetflare.setup.json`, keeps reusable local setup metadata in `.sheetflare.setup.local.json`, can apply secrets, can deploy, can bootstrap the first project and keys, automatically registers Google Drive watches when deploy or bootstrap provide enough context, and can run smoke validation. The local state file stays untracked, may still contain admin-site basic-auth material, and should not be shared. For reruns from an existing config:
 
 - `npm run setup -- --apply-secrets`
@@ -70,8 +73,9 @@ For the normal setup flow:
 - `npm run setup -- --bootstrap`
 - `npm run setup -- --smoke`
 - `npm run setup -- --verify`
+- `npm run doctor`
 
-`npm run setup -- --verify` is the fastest post-deploy confidence check. It verifies the resolved Google credential source, Worker `/ready`, Cloudflare Pages project presence, protected admin root plus proxied `/docs`, and Drive watch coverage for the spreadsheets declared in `sheetflare.setup.json`. It exits non-zero on both warnings and blocking issues so a passing run means the full check set completed cleanly.
+`npm run setup -- --verify` and its shorter alias `npm run doctor` are the fastest post-deploy confidence checks. They verify the resolved Google credential source, Worker `/ready`, Cloudflare Pages project presence, protected admin root plus proxied `/docs`, and Drive watch coverage for the spreadsheets declared in `sheetflare.setup.json`. They exit non-zero on both warnings and blocking issues so a passing run means the full check set completed cleanly.
 
 If you already have `wrangler` and `gcloud` authenticated, setup can now also provision the Google side instead of requiring a pre-existing service-account JSON:
 

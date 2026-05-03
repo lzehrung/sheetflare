@@ -32,7 +32,7 @@ export function readCacheHealthConfig(env: NodeJS.ProcessEnv = process.env): Cac
     }
 
     return {
-      baseUrl: requireEnv('SHEETFLARE_BASE_URL'),
+      baseUrl: requireEnv('SHEETFLARE_BASE_URL', 'Set SHEETFLARE_BASE_URL to the deployed API Worker URL.'),
       adminCredential: requireAdminCredential(),
       targets: targets.map((target) => ({
         project: target.project.trim(),

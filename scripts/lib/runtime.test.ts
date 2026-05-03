@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ScriptError, getFirstEnv, redactSecret, requestJson, requireAdminCredential, shouldShowSecrets } from './runtime';
+import { ScriptError, getFirstEnv, redactSecret, requestJson, requireAdminCredential, requireEnv, shouldShowSecrets } from './runtime';
 
 describe('requestJson', () => {
   afterEach(() => {
@@ -82,6 +82,21 @@ describe('admin credential helpers', () => {
   it('throws when no admin credential env var exists', () => {
     expect(() => requireAdminCredential()).toThrow(
       'Missing required environment variable SHEETFLARE_ADMIN_CREDENTIAL (or legacy SHEETFLARE_ADMIN_BEARER).'
+    );
+  });
+});
+
+describe('required env helpers', () => {
+  afterEach(() => {
+    delete process.env.SHEETFLARE_BASE_URL;
+  });
+
+  it('includes operator guidance when a required env var is missing', () => {
+    expect(() => requireEnv(
+      'SHEETFLARE_BASE_URL',
+      'Set SHEETFLARE_BASE_URL to the deployed API Worker URL.'
+    )).toThrow(
+      'Missing required environment variable SHEETFLARE_BASE_URL. Set SHEETFLARE_BASE_URL to the deployed API Worker URL.'
     );
   });
 });

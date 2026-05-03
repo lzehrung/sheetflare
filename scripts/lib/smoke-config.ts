@@ -37,12 +37,12 @@ export function readSmokeConfig(env: NodeJS.ProcessEnv = process.env): SmokeConf
   const idColumn = rawIdColumn?.trim() || '_id';
 
   return withEnv('SHEETFLARE_BASE_URL', () => ({
-    baseUrl: requireEnv('SHEETFLARE_BASE_URL'),
+    baseUrl: requireEnv('SHEETFLARE_BASE_URL', 'Set SHEETFLARE_BASE_URL to the deployed API Worker URL.'),
     adminCredential: requireAdminCredential(),
-    privateProject: requireEnv('SHEETFLARE_PRIVATE_PROJECT'),
-    privateTable: requireEnv('SHEETFLARE_PRIVATE_TABLE'),
-    privateReadKey: requireEnv('SHEETFLARE_PRIVATE_READ_KEY'),
-    mutationKey: requireEnv('SHEETFLARE_MUTATION_KEY'),
+    privateProject: requireEnv('SHEETFLARE_PRIVATE_PROJECT', 'Set SHEETFLARE_PRIVATE_PROJECT to the private smoke project slug.'),
+    privateTable: requireEnv('SHEETFLARE_PRIVATE_TABLE', 'Set SHEETFLARE_PRIVATE_TABLE to the private smoke table slug.'),
+    privateReadKey: requireEnv('SHEETFLARE_PRIVATE_READ_KEY', 'Set SHEETFLARE_PRIVATE_READ_KEY to a read-scoped key for the private smoke project.'),
+    mutationKey: requireEnv('SHEETFLARE_MUTATION_KEY', 'Set SHEETFLARE_MUTATION_KEY to a mutation-capable key for the private smoke project.'),
     publicProject: rawPublicProject,
     publicTable: rawPublicTable,
     idColumn,

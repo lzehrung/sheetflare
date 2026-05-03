@@ -21,7 +21,7 @@ type CreateApiKeyResponse = {
 };
 
 async function main() {
-  const baseUrl = requireEnv('SHEETFLARE_BASE_URL');
+  const baseUrl = requireEnv('SHEETFLARE_BASE_URL', 'Set SHEETFLARE_BASE_URL to the deployed API Worker URL.');
   const bearer = requireAdminCredential();
   const name = process.env.SHEETFLARE_ADMIN_KEY_NAME?.trim() || 'sheetflare-admin';
   const scopes = process.env.SHEETFLARE_ADMIN_KEY_SCOPES?.trim()

@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig } from './lib/setup-config';
-import { actionsRequireWranglerAuth, parseSetupArgs, resolveSetupActions } from './lib/setup-cli';
+import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
 import { createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, type SetupPrereqResult } from './lib/setup-prereqs';
 import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './lib/setup-bootstrap';
@@ -234,6 +234,11 @@ async function applyAdminPagesConfiguration(options: {
 
 async function main() {
   const options = parseSetupArgs(process.argv.slice(2));
+  if (options.help) {
+    console.log(renderSetupHelp());
+    return;
+  }
+
   const resolvedConfigPath = resolve(options.configPath);
   const localStatePath = getSetupLocalStatePath(resolvedConfigPath);
 
