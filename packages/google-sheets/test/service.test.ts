@@ -896,7 +896,7 @@ describe('GoogleSheetsService Drive watch lifecycle', () => {
   });
 });
 
-describe('GoogleSheetsService.writeRow', () => {
+describe('GoogleSheetsService write helpers', () => {
   it('sends raw values to Sheets so the API preserves literal cell contents', async () => {
     const requestedUrls: string[] = [];
     const service = new GoogleSheetsService({
@@ -1160,7 +1160,9 @@ describe('GoogleSheetsService.writeRow', () => {
 
     expect(requestedUrls.some((url) => url.includes("/values/'Users'!A2:D500001:clear"))).toBe(true);
   });
+});
 
+describe('GoogleSheetsService.writeRow', () => {
   it('appends a row skeleton through the managed id column when writable columns are sparse', async () => {
     const requestedUrls: string[] = [];
     const service = new GoogleSheetsService({

@@ -48,4 +48,15 @@ describe('readBenchmarkConfig', () => {
       'SHEETFLARE_BENCHMARK_TARGET_ROWS must be a positive integer when provided.'
     );
   });
+
+  it('allows a zero stale wait', () => {
+    const env = {
+      ...baseEnv,
+      SHEETFLARE_BENCHMARK_STALE_WAIT_MS: '0'
+    } satisfies NodeJS.ProcessEnv;
+
+    expect(readBenchmarkConfig(env)).toMatchObject({
+      staleWaitMs: 0
+    });
+  });
 });

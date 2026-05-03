@@ -688,14 +688,14 @@ export class GoogleSheetsService {
     config: GoogleSheetTableConfig,
     startRowNumber: number,
     endRowNumber: number,
-    lastColumnNumber?: number
+    lastColumnNumber: number
   ): Promise<void> {
     if (endRowNumber < startRowNumber) {
       return;
     }
 
     const accessToken = await this.getAccessToken();
-    const range = `${escapeSheetName(config.sheetTabName)}!${buildBoundedRowSpanRange(startRowNumber, endRowNumber, lastColumnNumber ?? 1)}`;
+    const range = `${escapeSheetName(config.sheetTabName)}!${buildBoundedRowSpanRange(startRowNumber, endRowNumber, lastColumnNumber)}`;
     const response = await this.authorizedRequest(
       `${this.sheetsApiBaseUrl}/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}:clear`,
       {

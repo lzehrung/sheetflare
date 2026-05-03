@@ -54,6 +54,8 @@ Artifacts written:
 - `<report>.md`: benchmark summary
 - `<report>.json`: structured latency, seed, and failure artifact
 
+Set `SHEETFLARE_BENCHMARK_STALE_WAIT_MS` to `0` if you want to skip the stale-wait phase for a quick operator smoke check.
+
 The benchmark suite:
 
 - seeds or tops up the configured table to the target row count directly through Google Sheets

@@ -18,6 +18,24 @@ function readPositiveInteger(
   return parsed;
 }
 
+function readNonNegativeInteger(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number
+) {
+  const raw = env[name];
+  if (raw === undefined || raw.trim().length === 0) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new ScriptError(`${name} must be a non-negative integer when provided.`);
+  }
+
+  return parsed;
+}
+
 export type BenchmarkConfig = {
   baseUrl: string;
   adminCredential: string;
@@ -56,7 +74,7 @@ export function readBenchmarkConfig(env: NodeJS.ProcessEnv = process.env): Bench
     reportPath: readRequiredEnv('SHEETFLARE_BENCHMARK_REPORT_PATH'),
     targetRows: readPositiveInteger(env, 'SHEETFLARE_BENCHMARK_TARGET_ROWS', 500_000),
     batchRows: readPositiveInteger(env, 'SHEETFLARE_BENCHMARK_BATCH_ROWS', 1_000),
-    staleWaitMs: readPositiveInteger(env, 'SHEETFLARE_BENCHMARK_STALE_WAIT_MS', 16_000),
+    staleWaitMs: readNonNegativeInteger(env, 'SHEETFLARE_BENCHMARK_STALE_WAIT_MS', 16_000),
     googleClientEmail: readRequiredEnv('GOOGLE_CLIENT_EMAIL'),
     googlePrivateKey: readRequiredEnv('GOOGLE_PRIVATE_KEY')
   };
