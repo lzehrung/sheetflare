@@ -35,7 +35,7 @@ type ApiKeyResponse = {
 };
 
 async function main() {
-  const baseUrl = requireEnv('SHEETFLARE_BASE_URL');
+  const baseUrl = requireEnv('SHEETFLARE_BASE_URL', 'Set SHEETFLARE_BASE_URL to the deployed API Worker URL.');
   const bearer = requireAdminCredential();
   const config = parseBootstrapConfig(readJsonEnv<BootstrapConfig>('SHEETFLARE_BOOTSTRAP_CONFIG_JSON'));
 

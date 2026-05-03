@@ -3,6 +3,7 @@ import { ScriptError } from './runtime';
 
 export type SetupCliOptions = {
   configPath: string;
+  help: boolean;
   writeDefaultConfig: boolean;
   applySecrets: boolean;
   deploy: boolean;
@@ -18,6 +19,7 @@ export type SetupCliOptions = {
 export function createDefaultSetupCliOptions(): SetupCliOptions {
   return {
     configPath: 'sheetflare.setup.json',
+    help: false,
     writeDefaultConfig: false,
     applySecrets: false,
     deploy: false,
@@ -36,6 +38,11 @@ export function parseSetupArgs(argv: string[]): SetupCliOptions {
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
+    if (argument === '--help' || argument === '-h') {
+      options.help = true;
+      return options;
+    }
+
     if (argument === '--config') {
       const nextValue = argv[index + 1];
       if (!nextValue) {
@@ -110,6 +117,39 @@ export function parseSetupArgs(argv: string[]): SetupCliOptions {
   }
 
   return options;
+}
+
+export function renderSetupHelp() {
+  return `
+Usage: npm run setup -- [options]
+
+Runs the Sheetflare operator setup flow. With no options, setup prompts for a
+configuration and writes sheetflare.setup.json. Add action flags to apply
+secrets, deploy, bootstrap projects and keys, smoke-test, or verify an existing
+deployment.
+
+Common flows:
+  npm run setup
+  npm run setup -- --apply-secrets
+  npm run setup -- --apply-secrets --provision-google
+  npm run setup -- --deploy --bootstrap --smoke --verify
+  npm run setup -- --verify
+  npm run doctor
+
+Options:
+  -h, --help                         Show this help.
+  --config <path>                    Use a setup config path. Default: sheetflare.setup.json.
+  --write-default-config             Write a starter setup config and exit.
+  --apply-secrets                    Apply Worker and admin Pages secrets.
+  --deploy                           Deploy the API Worker and admin Pages site.
+  --bootstrap                        Bootstrap projects, tables, and API keys.
+  --smoke                            Run smoke validation after setup/bootstrap.
+  --verify                           Run setup verification/doctor checks.
+  --show-secrets                     Show generated secrets in the final summary.
+  --provision-google                 Provision Google service-account resources with gcloud.
+  --google-project <id>              Google Cloud project id for provisioning.
+  --google-service-account <name>    Google service-account name for provisioning.
+`.trim();
 }
 
 export function resolveSetupActions(

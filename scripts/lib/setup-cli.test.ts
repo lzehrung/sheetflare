@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { actionsRequireWranglerAuth, parseSetupArgs, resolveSetupActions } from './setup-cli';
+import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './setup-cli';
 
 describe('parseSetupArgs', () => {
   it('parses combined setup action flags', () => {
@@ -18,6 +18,7 @@ describe('parseSetupArgs', () => {
     ]))
       .toEqual({
         configPath: 'configs/demo/sheetflare.setup.json',
+        help: false,
         writeDefaultConfig: false,
         applySecrets: true,
         deploy: true,
@@ -31,6 +32,17 @@ describe('parseSetupArgs', () => {
       });
   });
 
+  it('parses help flags without treating them as unknown arguments', () => {
+    expect(parseSetupArgs(['--help']).help).toBe(true);
+    expect(parseSetupArgs(['-h']).help).toBe(true);
+  });
+
+  it('lets help win before validating later arguments', () => {
+    expect(parseSetupArgs(['--help', '--wat'])).toMatchObject({
+      help: true
+    });
+  });
+
   it('throws on an unknown argument', () => {
     expect(() => parseSetupArgs(['--wat'])).toThrow('Unknown setup argument: --wat');
   });
@@ -38,6 +50,19 @@ describe('parseSetupArgs', () => {
   it('throws clearly when a Google provisioning flag is missing its value', () => {
     expect(() => parseSetupArgs(['--google-project'])).toThrow('Missing value for --google-project.');
     expect(() => parseSetupArgs(['--google-service-account'])).toThrow('Missing value for --google-service-account.');
+  });
+});
+
+describe('renderSetupHelp', () => {
+  it('documents common operator setup flows and flags', () => {
+    const help = renderSetupHelp();
+
+    expect(help).toContain('Usage: npm run setup -- [options]');
+    expect(help).toContain('npm run setup -- --apply-secrets --provision-google');
+    expect(help).toContain('npm run setup -- --deploy --bootstrap --smoke --verify');
+    expect(help).toContain('npm run doctor');
+    expect(help).toContain('--google-project <id>');
+    expect(help).toContain('--google-service-account <name>');
   });
 });
 

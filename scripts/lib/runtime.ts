@@ -11,10 +11,10 @@ export function getEnv(name: string) {
   return process.env[name]?.trim() || null;
 }
 
-export function requireEnv(name: string) {
+export function requireEnv(name: string, guidance?: string) {
   const value = getEnv(name);
   if (!value) {
-    throw new ScriptError(`Missing required environment variable ${name}.`);
+    throw new ScriptError(`Missing required environment variable ${name}.${guidance ? ` ${guidance}` : ''}`);
   }
 
   return value;

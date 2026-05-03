@@ -1,10 +1,10 @@
 import { logStep, requestJson, requireAdminCredential, requireEnv } from './lib/runtime';
 
 async function main() {
-  const baseUrl = requireEnv('SHEETFLARE_BASE_URL');
+  const baseUrl = requireEnv('SHEETFLARE_BASE_URL', 'Set SHEETFLARE_BASE_URL to the deployed API Worker URL.');
   const bearer = requireAdminCredential();
-  const project = requireEnv('SHEETFLARE_PROJECT');
-  const table = requireEnv('SHEETFLARE_TABLE');
+  const project = requireEnv('SHEETFLARE_PROJECT', 'Set SHEETFLARE_PROJECT to the project slug to inspect.');
+  const table = requireEnv('SHEETFLARE_TABLE', 'Set SHEETFLARE_TABLE to the table slug to inspect.');
 
   logStep(`Fetching cache status for ${project}/${table}`);
   const { data } = await requestJson({
