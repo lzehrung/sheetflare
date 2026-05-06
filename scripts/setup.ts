@@ -36,7 +36,7 @@ import {
   type SetupSecretsSummary
 } from './lib/setup-runtime';
 import { getSetupDoctorFailureMessage, runSetupDoctor } from './lib/setup-doctor';
-import { isPlaceholderGoogleClientEmail } from './lib/setup-google';
+import { checkGcloudAuthPrereq, isPlaceholderGoogleClientEmail } from './lib/setup-google';
 import { verifyAdminPagesDeployment } from './lib/setup-verify';
 import { getCommandName, runCommand } from './lib/process';
 import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
@@ -105,6 +105,17 @@ function assertRealGoogleClientEmail(value: string | null) {
   }
 
   return value;
+}
+
+function hasUsableGoogleClientEmail(value: string | null | undefined) {
+  return typeof value === 'string'
+    && value.trim().length > 0
+    && !isPlaceholderGoogleClientEmail(value);
+}
+
+function hasSetupGoogleCredential(localState: SetupLocalState | null) {
+  return hasUsableGoogleClientEmail(localState?.googleClientEmail)
+    || hasUsableGoogleClientEmail(getEnv('GOOGLE_CLIENT_EMAIL'));
 }
 
 async function runBootstrap(env: NodeJS.ProcessEnv) {
@@ -249,10 +260,12 @@ async function main() {
     return;
   }
 
+  let provisionGoogle = options.provisionGoogle;
+
   logStep('Checking setup prerequisites');
   const prereqResults = await checkSetupPrereqsWithOptions({
     includeWranglerAuth: options.applySecrets || options.deploy || options.verify,
-    includeGcloudAuth: options.provisionGoogle
+    includeGcloudAuth: provisionGoogle
   });
   renderPrereqSummary(prereqResults);
 
@@ -278,7 +291,19 @@ async function main() {
       }
 
       logStep(`No setup config found at ${resolvedConfigPath}; starting interactive setup`);
-      const promptResult = await promptForSetup(prompter);
+      const promptResult = await promptForSetup(prompter, {
+        mode: options.advanced ? 'advanced' : 'beginner',
+        googleCredentialAvailable: hasSetupGoogleCredential(localState)
+      });
+      if (promptResult.provisionGoogle && !provisionGoogle) {
+        provisionGoogle = true;
+        const gcloudResult = await checkGcloudAuthPrereq();
+        prereqResults.push(gcloudResult);
+        renderPrereqSummary([gcloudResult]);
+        if (gcloudResult.status === 'blocked') {
+          throw new ScriptError(gcloudResult.remediation);
+        }
+      }
       promptActions = promptResult.actions;
       configInput = promptResult.config;
       logStep(`Writing setup config ${resolvedConfigPath}`);
@@ -299,7 +324,7 @@ async function main() {
 
     const actions = resolveSetupActions(options, promptActions);
 
-    if (!actions.applySecretsNow && !actions.deployNow && !actions.bootstrapNow && !actions.smokeNow && !options.verify) {
+    if (!actions.applySecretsNow && !actions.deployNow && !actions.bootstrapNow && !actions.smokeNow && !actions.verifyNow) {
       return;
     }
 
@@ -332,7 +357,7 @@ async function main() {
         defaultAdminUiUsername: adminUiUsername,
         defaultAdminUiPassword: adminUiPassword,
         googleProvisioning: {
-          enabled: options.provisionGoogle,
+          enabled: provisionGoogle,
           profile: config.profile,
           projectId: options.googleProjectId,
           serviceAccountName: options.googleServiceAccountName
@@ -552,7 +577,7 @@ async function main() {
       })
     });
 
-    if (options.verify) {
+    if (actions.verifyNow) {
       logStep('Verifying setup-managed environment');
       const verificationResults = await runSetupDoctor({
         config,

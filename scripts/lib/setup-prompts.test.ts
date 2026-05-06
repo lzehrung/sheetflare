@@ -1,5 +1,51 @@
 import { describe, expect, it } from 'vitest';
-import { buildBeginnerSetupConfigFromAnswers, buildSetupConfigFromAnswers } from './setup-prompts';
+import {
+  buildBeginnerSetupConfigFromAnswers,
+  buildSetupConfigFromAnswers,
+  promptForSetup,
+  type SetupPrompter
+} from './setup-prompts';
+
+function createFakePrompter(options: {
+  textResponses: string[];
+  confirmResponses?: boolean[];
+}) {
+  const textPrompts: Array<{ message: string; defaultValue?: string }> = [];
+  const confirmPrompts: Array<{ message: string; defaultValue: boolean }> = [];
+  const textResponses = [...options.textResponses];
+  const confirmResponses = [...(options.confirmResponses ?? [])];
+  const prompter: SetupPrompter = {
+    async text(prompt) {
+      textPrompts.push({
+        message: prompt.message,
+        ...(prompt.defaultValue !== undefined ? { defaultValue: prompt.defaultValue } : {})
+      });
+      const response = textResponses.shift();
+      if (response === undefined) {
+        throw new Error(`Missing fake text response for ${prompt.message}`);
+      }
+      const error = prompt.validate?.(response) ?? null;
+      if (error) {
+        throw new Error(error);
+      }
+      return response;
+    },
+    async confirm(prompt) {
+      confirmPrompts.push(prompt);
+      const response = confirmResponses.shift();
+      if (response === undefined) {
+        throw new Error(`Missing fake confirm response for ${prompt.message}`);
+      }
+      return response;
+    }
+  };
+
+  return {
+    prompter,
+    textPrompts,
+    confirmPrompts
+  };
+}
 
 describe('buildBeginnerSetupConfigFromAnswers', () => {
   it('builds a beginner setup config with derived defaults', () => {
@@ -200,5 +246,90 @@ describe('buildSetupConfigFromAnswers', () => {
       publicReadProjectSlug: null,
       publicReadProjectName: null
     })).toThrow('Smoke field name must not use the managed ID column.');
+  });
+});
+
+describe('promptForSetup', () => {
+  it('asks only beginner questions and enables all setup actions by default', async () => {
+    const { prompter, textPrompts, confirmPrompts } = createFakePrompter({
+      textResponses: ['sheet-1', 'Users', 'name'],
+      confirmResponses: [true]
+    });
+
+    const result = await promptForSetup(prompter, {
+      mode: 'beginner',
+      googleCredentialAvailable: false
+    });
+
+    expect(textPrompts).toEqual([
+      { message: 'Google Sheet URL or spreadsheet ID' },
+      { message: 'Existing Google Sheets tab name', defaultValue: 'Sheet1' },
+      { message: 'Writable sheet column to use for setup validation' }
+    ]);
+    expect(confirmPrompts).toEqual([
+      {
+        message: 'Provision Google Cloud credentials now',
+        defaultValue: true
+      }
+    ]);
+    expect(result.actions).toEqual({
+      applySecretsNow: true,
+      deployNow: true,
+      bootstrapNow: true,
+      smokeNow: true,
+      verifyNow: true
+    });
+    expect(result.provisionGoogle).toBe(true);
+    expect(result.config.profile).toBe('production');
+    expect(result.config.privateProject.tables[0]?.tableSlug).toBe('users');
+  });
+
+  it('does not ask about Google provisioning when credentials are already available', async () => {
+    const { prompter, confirmPrompts } = createFakePrompter({
+      textResponses: ['sheet-1', 'Users', 'name']
+    });
+
+    const result = await promptForSetup(prompter, {
+      mode: 'beginner',
+      googleCredentialAvailable: true
+    });
+
+    expect(confirmPrompts).toEqual([]);
+    expect(result.provisionGoogle).toBe(false);
+  });
+
+  it('preserves the advanced setup prompt actions', async () => {
+    const { prompter } = createFakePrompter({
+      textResponses: [
+        'local',
+        'sheet-1',
+        'demo',
+        'Demo',
+        'users',
+        'Users',
+        '_id',
+        'email,status',
+        '60',
+        'email',
+        'Smoke Row',
+        'Smoke Row Updated'
+      ],
+      confirmResponses: [true, false, true, false, true, false]
+    });
+
+    const result = await promptForSetup(prompter, {
+      mode: 'advanced',
+      googleCredentialAvailable: false
+    });
+
+    expect(result.actions).toEqual({
+      applySecretsNow: true,
+      deployNow: false,
+      bootstrapNow: true,
+      smokeNow: false,
+      verifyNow: false
+    });
+    expect(result.provisionGoogle).toBe(false);
+    expect(result.config.privateProject.slug).toBe('demo');
   });
 });

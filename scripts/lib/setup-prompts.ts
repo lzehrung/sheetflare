@@ -39,11 +39,20 @@ export type SetupPromptActions = {
   deployNow: boolean;
   bootstrapNow: boolean;
   smokeNow: boolean;
+  verifyNow: boolean;
 };
+
+export type SetupPromptMode = 'beginner' | 'advanced';
 
 export type SetupPromptResult = {
   config: SetupConfig;
   actions: SetupPromptActions;
+  provisionGoogle: boolean;
+};
+
+export type SetupPromptOptions = {
+  mode: SetupPromptMode;
+  googleCredentialAvailable: boolean;
 };
 
 export type SetupPrompter = {
@@ -218,7 +227,64 @@ export function buildSetupConfigFromAnswers(answers: SetupAnswers): SetupConfig 
   });
 }
 
-export async function promptForSetup(prompter: SetupPrompter): Promise<SetupPromptResult> {
+async function promptForBeginnerSetup(
+  prompter: SetupPrompter,
+  options: Pick<SetupPromptOptions, 'googleCredentialAvailable'>
+): Promise<SetupPromptResult> {
+  const spreadsheetIdOrUrl = await prompter.text({
+    message: 'Google Sheet URL or spreadsheet ID',
+    validate: (value) => {
+      try {
+        normalizeSpreadsheetId(value);
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }
+  });
+  const sheetTabName = await prompter.text({
+    message: 'Existing Google Sheets tab name',
+    defaultValue: 'Sheet1',
+    validate: (value) => value.trim().length > 0 ? null : 'Sheet tab name must not be blank.'
+  });
+  const smokeFieldName = await prompter.text({
+    message: 'Writable sheet column to use for setup validation',
+    validate: (value) => {
+      const trimmed = value.trim();
+      if (trimmed.length === 0) {
+        return 'Smoke field name must not be blank.';
+      }
+      if (trimmed === '_id') {
+        return 'Smoke field name must not use the managed ID column.';
+      }
+      return null;
+    }
+  });
+  const provisionGoogle = options.googleCredentialAvailable
+    ? false
+    : await prompter.confirm({
+        message: 'Provision Google Cloud credentials now',
+        defaultValue: true
+      });
+
+  return {
+    config: buildBeginnerSetupConfigFromAnswers({
+      spreadsheetIdOrUrl,
+      sheetTabName,
+      smokeFieldName
+    }),
+    actions: {
+      applySecretsNow: true,
+      deployNow: true,
+      bootstrapNow: true,
+      smokeNow: true,
+      verifyNow: true
+    },
+    provisionGoogle
+  };
+}
+
+export async function promptForAdvancedSetup(prompter: SetupPrompter): Promise<SetupPromptResult> {
   const profile = await prompter.text({
     message: 'Setup profile',
     defaultValue: 'local',
@@ -389,9 +455,22 @@ export async function promptForSetup(prompter: SetupPrompter): Promise<SetupProm
       applySecretsNow,
       deployNow,
       bootstrapNow,
-      smokeNow
-    }
+      smokeNow,
+      verifyNow: false
+    },
+    provisionGoogle: false
   };
+}
+
+export async function promptForSetup(
+  prompter: SetupPrompter,
+  options: SetupPromptOptions = { mode: 'advanced', googleCredentialAvailable: false }
+): Promise<SetupPromptResult> {
+  if (options.mode === 'beginner') {
+    return promptForBeginnerSetup(prompter, options);
+  }
+
+  return promptForAdvancedSetup(prompter);
 }
 
 export function createConsolePrompter(): SetupPrompter {

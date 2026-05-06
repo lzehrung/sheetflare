@@ -173,7 +173,8 @@ export function resolveSetupActions(
     applySecretsNow: options.applySecrets,
     deployNow: options.deploy,
     bootstrapNow: options.bootstrap,
-    smokeNow: options.smoke
+    smokeNow: options.smoke,
+    verifyNow: options.verify
   };
 }
 

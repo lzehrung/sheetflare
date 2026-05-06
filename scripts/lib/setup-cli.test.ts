@@ -83,7 +83,8 @@ describe('resolveSetupActions', () => {
       applySecretsNow: true,
       deployNow: false,
       bootstrapNow: true,
-      smokeNow: false
+      smokeNow: false,
+      verifyNow: false
     });
   });
 
@@ -94,12 +95,22 @@ describe('resolveSetupActions', () => {
       applySecretsNow: false,
       deployNow: true,
       bootstrapNow: true,
-      smokeNow: true
+      smokeNow: true,
+      verifyNow: true
     })).toEqual({
       applySecretsNow: false,
       deployNow: true,
       bootstrapNow: true,
-      smokeNow: true
+      smokeNow: true,
+      verifyNow: true
+    });
+  });
+
+  it('maps explicit verify flags into setup actions', () => {
+    const options = parseSetupArgs(['--verify']);
+
+    expect(resolveSetupActions(options, null)).toMatchObject({
+      verifyNow: true
     });
   });
 });
@@ -110,14 +121,16 @@ describe('actionsRequireWranglerAuth', () => {
       applySecretsNow: false,
       deployNow: false,
       bootstrapNow: true,
-      smokeNow: true
+      smokeNow: true,
+      verifyNow: true
     })).toBe(false);
 
     expect(actionsRequireWranglerAuth({
       applySecretsNow: true,
       deployNow: false,
       bootstrapNow: false,
-      smokeNow: false
+      smokeNow: false,
+      verifyNow: false
     })).toBe(true);
   });
 });
