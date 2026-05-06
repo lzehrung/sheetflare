@@ -303,7 +303,7 @@ export async function checkGcloudAuthPrereq(dependencies: GcloudDependencies = {
     name: 'gcloud auth',
     status: 'blocked',
     summary: 'Google Cloud CLI is not authenticated on this machine.',
-    remediation: 'Run gcloud auth login before asking setup to provision Google resources.'
+    remediation: 'Run gcloud auth login, then rerun npm run setup.'
   } as const;
 }
 

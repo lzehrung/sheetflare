@@ -37,6 +37,7 @@ import {
 } from './lib/setup-runtime';
 import { getSetupDoctorFailureMessage, runSetupDoctor } from './lib/setup-doctor';
 import { checkGcloudAuthPrereq, isPlaceholderGoogleClientEmail } from './lib/setup-google';
+import { formatBeginnerSetupNextSteps } from './lib/setup-next-steps';
 import { verifyAdminPagesDeployment } from './lib/setup-verify';
 import { getCommandName, runCommand } from './lib/process';
 import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
@@ -95,12 +96,14 @@ function printExecutionSummary(summary: SetupExecutionSummary) {
 
 function assertRealGoogleClientEmail(value: string | null) {
   if (!value) {
-    throw new ScriptError('Deploy requires GOOGLE_CLIENT_EMAIL from setup secrets, local setup state, or the environment.');
+    throw new ScriptError(
+      'Deploy needs a real Google service-account email. Run npm run setup -- --apply-secrets --provision-google, set GOOGLE_APPLICATION_CREDENTIALS, or set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY before deploying.'
+    );
   }
 
   if (isPlaceholderGoogleClientEmail(value)) {
     throw new ScriptError(
-      `Deploy cannot use the checked-in placeholder GOOGLE_CLIENT_EMAIL (${value}). Run npm run setup -- --apply-secrets --provision-google, or provide a real GOOGLE_CLIENT_EMAIL before deploying.`
+      `Deploy cannot use the checked-in placeholder GOOGLE_CLIENT_EMAIL (${value}). Run npm run setup -- --apply-secrets --provision-google, or set GOOGLE_CLIENT_EMAIL to the real service-account email before deploying.`
     );
   }
 
@@ -128,10 +131,15 @@ async function runBootstrap(env: NodeJS.ProcessEnv) {
     }
   );
   if (result.code !== 0) {
+    if (result.stdout.trim().length > 0) {
+      process.stdout.write(result.stdout);
+    }
     if (result.stderr.trim().length > 0) {
       process.stderr.write(result.stderr);
     }
-    throw new ScriptError('Bootstrap failed.');
+    throw new ScriptError(
+      'Bootstrap failed. Confirm the spreadsheet is shared with the Google service-account email as Editor, the configured tab exists, the _id header exists, and existing _id values are unique and non-blank.'
+    );
   }
 
   return parseBootstrapOutput(result.stdout);
@@ -147,7 +155,15 @@ async function runSmoke(env: NodeJS.ProcessEnv) {
     }
   );
   if (result.code !== 0) {
-    throw new ScriptError('Smoke validation failed.');
+    if (result.stdout.trim().length > 0) {
+      process.stdout.write(result.stdout);
+    }
+    if (result.stderr.trim().length > 0) {
+      process.stderr.write(result.stderr);
+    }
+    throw new ScriptError(
+      'Smoke validation failed. Confirm the configured smoke column exists in the sheet, is not the _id column, and can be written by the API.'
+    );
   }
 }
 
@@ -276,6 +292,7 @@ async function main() {
   let localStateWritten = false;
   let configInput: unknown;
   let promptActions: SetupPromptActions | null = null;
+  let beginnerSetupStarted = false;
 
   try {
     try {
@@ -291,8 +308,10 @@ async function main() {
       }
 
       logStep(`No setup config found at ${resolvedConfigPath}; starting interactive setup`);
+      const promptMode = options.advanced ? 'advanced' : 'beginner';
+      beginnerSetupStarted = promptMode === 'beginner';
       const promptResult = await promptForSetup(prompter, {
-        mode: options.advanced ? 'advanced' : 'beginner',
+        mode: promptMode,
         googleCredentialAvailable: hasSetupGoogleCredential(localState)
       });
       if (promptResult.provisionGoogle && !provisionGoogle) {
@@ -461,7 +480,7 @@ async function main() {
 
     if (!apiUrl && (actions.bootstrapNow || actions.smokeNow)) {
       if (!prompter) {
-        throw new ScriptError('Bootstrap or smoke requires SHEETFLARE_BASE_URL or a prior local setup state file when no fresh deploy was run.');
+        throw new ScriptError('Bootstrap or smoke needs the deployed API URL. Rerun setup after deploy, or set SHEETFLARE_BASE_URL to the Worker URL.');
       }
       apiUrl = (await promptForText(prompter, {
         message: 'Deployed API base URL',
@@ -476,7 +495,7 @@ async function main() {
 
       if (!adminBearerToken) {
         if (!prompter) {
-          throw new ScriptError('Bootstrap requires an admin credential from the environment or an interactive prompt.');
+          throw new ScriptError('Bootstrap needs an admin credential. Set SHEETFLARE_ADMIN_CREDENTIAL to the bootstrap admin token or run setup interactively.');
         }
         adminBearerToken = (await promptForText(prompter, {
           message: 'Admin bootstrap credential',
@@ -525,7 +544,7 @@ async function main() {
       });
       if (!smokeAdminCredential) {
         if (!prompter) {
-          throw new ScriptError('Smoke requires an admin API key or bootstrap credential from the environment or an interactive prompt.');
+          throw new ScriptError('Smoke validation needs an admin credential. Set SHEETFLARE_ADMIN_CREDENTIAL to an admin API key or the bootstrap admin token.');
         }
         adminApiKey = (await promptForText(prompter, {
           message: 'Admin API key for smoke',
@@ -535,7 +554,7 @@ async function main() {
       }
       if (!privateReadKey) {
         if (!prompter) {
-          throw new ScriptError('Smoke requires a private read key from the environment or an interactive prompt.');
+          throw new ScriptError('Smoke validation needs a private read API key. Set SHEETFLARE_PRIVATE_READ_KEY or run setup interactively after bootstrap.');
         }
         privateReadKey = (await promptForText(prompter, {
           message: 'Private read API key for smoke'
@@ -543,7 +562,7 @@ async function main() {
       }
       if (!mutationKey) {
         if (!prompter) {
-          throw new ScriptError('Smoke requires a mutation API key from the environment or an interactive prompt.');
+          throw new ScriptError('Smoke validation needs a mutation API key. Set SHEETFLARE_MUTATION_KEY or run setup interactively after bootstrap.');
         }
         mutationKey = (await promptForText(prompter, {
           message: 'Mutation API key for smoke'
@@ -576,6 +595,19 @@ async function main() {
         mutationKey
       })
     });
+
+    if (beginnerSetupStarted) {
+      console.log('');
+      for (const line of formatBeginnerSetupNextSteps({
+        googleClientEmail: setupSecrets?.googleClientEmail
+          ?? localState?.googleClientEmail
+          ?? resolvedRuntimeState.googleClientEmail,
+        apiUrl,
+        adminUrl
+      })) {
+        console.log(line);
+      }
+    }
 
     if (actions.verifyNow) {
       logStep('Verifying setup-managed environment');

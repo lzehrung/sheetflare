@@ -84,6 +84,20 @@ describe('checkGcloudAuthPrereq', () => {
       remediation: 'Install Python 3 and ensure gcloud can see it, or set CLOUDSDK_PYTHON to a working python.exe before running setup.'
     });
   });
+
+  it('tells operators how to authenticate gcloud for setup provisioning', async () => {
+    await expect(checkGcloudAuthPrereq({
+      commandRunner: vi.fn(async () => ({
+        code: 1,
+        stdout: '',
+        stderr: 'No credentialed accounts.'
+      }))
+    })).resolves.toMatchObject({
+      name: 'gcloud auth',
+      status: 'blocked',
+      remediation: 'Run gcloud auth login, then rerun npm run setup.'
+    });
+  });
 });
 
 describe('provisionGoogleServiceAccount', () => {
