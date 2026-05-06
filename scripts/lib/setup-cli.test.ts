@@ -65,6 +65,7 @@ describe('renderSetupHelp', () => {
     const help = renderSetupHelp();
 
     expect(help).toContain('Usage: npm run setup -- [options]');
+    expect(help).toContain('beginner questions');
     expect(help).toContain('npm run setup -- --advanced');
     expect(help).toContain('npm run setup -- --apply-secrets --provision-google');
     expect(help).toContain('npm run setup -- --deploy --bootstrap --smoke --verify');

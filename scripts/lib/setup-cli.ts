@@ -130,10 +130,11 @@ export function renderSetupHelp() {
   return `
 Usage: npm run setup -- [options]
 
-Runs the Sheetflare operator setup flow. With no options, setup prompts for a
-configuration and writes sheetflare.setup.json. Add action flags to apply
-secrets, deploy, bootstrap projects and keys, smoke-test, or verify an existing
-deployment.
+Runs the Sheetflare operator setup flow. With no options and no existing
+configuration, setup asks beginner questions, writes sheetflare.setup.json,
+applies secrets, deploys, bootstraps projects and keys, smoke-tests, and
+verifies the deployment. Add action flags to rerun one step from an existing
+configuration.
 
 Common flows:
   npm run setup
