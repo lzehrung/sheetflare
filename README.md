@@ -60,13 +60,15 @@ For the normal setup flow:
 
 1. Follow [docs/quickstart.md](./docs/quickstart.md).
 2. Run `npm run setup`.
-3. Use [docs/google-service-accounts.md](./docs/google-service-accounts.md) only if you still need help provisioning the Google service account itself.
+3. Share your sheet with the service-account email that setup prints.
 4. Use [docs/deploy.md](./docs/deploy.md) for CI deployment details, manual fallback commands, and Cloudflare token scopes.
 5. Use [docs/operator-runbook.md](./docs/operator-runbook.md) for day-2 operations and failure handling.
 
 Run `npm run setup -- --help` for the setup flags and common operator flows.
 
-`npm run setup` writes `sheetflare.setup.json`, keeps reusable local setup metadata in `.sheetflare.setup.local.json`, can apply secrets, can deploy, can bootstrap the first project and keys, automatically registers Google Drive watches when deploy or bootstrap provide enough context, and can run smoke validation. The local state file stays untracked, may still contain admin-site basic-auth material, and should not be shared. For reruns from an existing config:
+On a first run, `npm run setup` uses a beginner flow that asks for the Sheet URL, tab name, and one writable smoke-test column. It then writes `sheetflare.setup.json`, applies secrets, deploys, bootstraps the first project and keys, registers Google Drive watches when possible, runs smoke validation, and runs setup verification.
+
+The local state file `.sheetflare.setup.local.json` stays untracked, may contain admin-site Basic Auth material, and should not be shared. For reruns from an existing config:
 
 - `npm run setup -- --apply-secrets`
 - `npm run setup -- --deploy`
@@ -75,14 +77,16 @@ Run `npm run setup -- --help` for the setup flags and common operator flows.
 - `npm run setup -- --verify`
 - `npm run doctor`
 
+Use `npm run setup -- --advanced` when you want setup to ask for project names, table slugs, indexed fields, cache TTL, public-read coverage, and per-step actions. You can also edit `sheetflare.setup.json` directly; advanced customization remains config-driven.
+
 `npm run setup -- --verify` and its shorter alias `npm run doctor` are the fastest post-deploy confidence checks. They verify the resolved Google credential source, Worker `/ready`, Cloudflare Pages project presence, protected admin root plus proxied `/docs`, and Drive watch coverage for the spreadsheets declared in `sheetflare.setup.json`. They exit non-zero on both warnings and blocking issues so a passing run means the full check set completed cleanly.
 
-If you already have `wrangler` and `gcloud` authenticated, setup can now also provision the Google side instead of requiring a pre-existing service-account JSON:
+If you already have `wrangler` and `gcloud` authenticated, setup can provision the Google side instead of requiring a pre-existing service-account JSON:
 
 ```powershell
 gcloud auth login
 npx wrangler login
-npm run setup -- --apply-secrets --provision-google
+npm run setup
 ```
 
 `npx wrangler login` is fine for interactive local use. Expect to log back in periodically when using Wrangler's OAuth session. For unattended deploys or CI, prefer `CLOUDFLARE_API_TOKEN`.

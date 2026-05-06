@@ -10,7 +10,15 @@ Use this guide when you are:
 - deciding whether to use one shared credential or named per-project credentials
 - rotating Google credentials after initial deploy
 
-If you already have `gcloud` authenticated locally, the fastest path is now usually to let `npm run setup -- --apply-secrets --provision-google` perform the project/service-account creation for you. Use the rest of this guide when you want the exact manual commands or a custom Google layout.
+If you already have `gcloud` authenticated locally, the fastest path is usually the beginner setup flow:
+
+```powershell
+gcloud auth login
+npx wrangler login
+npm run setup
+```
+
+Choose Google provisioning when setup asks. Use the rest of this guide when you want the exact manual commands, a noninteractive rerun, or a custom Google layout.
 
 ## Recommended Setup
 
@@ -69,6 +77,12 @@ Setup now automates that same sequence when you opt into Google provisioning:
 ```powershell
 gcloud auth login
 npx wrangler login
+npm run setup
+```
+
+For an existing config or noninteractive rerun, use:
+
+```powershell
 npm run setup -- --apply-secrets --provision-google --google-project sheetflare-prod --google-service-account sheetflare-prod
 ```
 
@@ -79,6 +93,8 @@ That path:
 - creates the service account when missing
 - creates a key JSON temporarily and uses it immediately for Worker secret application
 - persists only `googleClientEmail` in local setup state
+
+After setup prints the service-account email, share the spreadsheet with that email as `Editor`. Setup cannot grant spreadsheet access automatically.
 
 After setup applies the credential and deploys the Worker, prefer:
 

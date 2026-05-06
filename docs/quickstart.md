@@ -1,17 +1,14 @@
 # Quickstart
 
-This is the fastest safe path to get Sheetflare running and prove the core loop works.
+This is the shortest safe path from one Google Sheet tab to a deployed API.
 
-Use this document if you are:
+Use this document if you want Sheetflare to make the setup decisions for you. If you need CI deploy details, manual fallback commands, or deeper operations, use [deploy.md](./deploy.md), [operator-runbook.md](./operator-runbook.md), and [google-service-accounts.md](./google-service-accounts.md).
 
-- a human operator deploying the system
-- an agent automating setup and verification
+## 1. Prepare One Sheet
 
-If you need deeper operational detail, use [deploy.md](./deploy.md), [operator-runbook.md](./operator-runbook.md), and [google-service-accounts.md](./google-service-accounts.md).
+Create one Google Sheet with one tab such as `Users`.
 
-## 1. Prepare a sheet
-
-Create one Google Sheet with one tab such as `Users` and a header row like:
+Add a header row:
 
 ```text
 _id | name | status
@@ -19,97 +16,91 @@ _id | name | status
 
 Rules:
 
-- `_id` must be present
-- every `_id` value must be unique
-- no `_id` cell may be blank
-- header names must be unique
+- `_id` must be present.
+- Every `_id` value must be unique.
+- No `_id` cell may be blank.
+- Header names must be unique.
+- The smoke-test column you give setup, such as `name`, must exist and be writable.
 
-## 2. Prepare Google access
+Setup cannot share the spreadsheet for you. You will share it with the service-account email after setup prints that email.
 
-Create a dedicated Google service account for this environment.
+## 2. Log In
 
-Recommended shape:
-
-- one user-managed service account per environment
-- Google Sheets API and Google Drive API enabled in that GCP project
-- spreadsheet-level `Editor` sharing only on the exact spreadsheets Sheetflare will manage
-
-Share the sheet with the service-account email as an editor.
-
-Use [google-service-accounts.md](./google-service-accounts.md) for the exact setup, secret-handling model, `GOOGLE_CREDENTIALS_JSON` format, and key-rotation guidance.
-
-You will need:
-
-- service-account client email
-- service-account private key
-
-If you do not already have those, and `gcloud` is authenticated locally, setup can now provision them for you.
-
-## 3. Install and run setup
-
-From repo root:
+From the repository root:
 
 ```powershell
 npm install
+npx wrangler login
+gcloud auth login
+```
+
+`wrangler` deploys the Cloudflare Worker and admin Pages site. `gcloud` is only needed if you want setup to create the Google Cloud project and service account for you.
+
+If you already have a service-account JSON file, you can skip `gcloud auth login`. Setup will ask for the file path instead.
+
+## 3. Run Setup
+
+```powershell
 npm run setup
 ```
 
-The setup flow will:
+For a first run with no `sheetflare.setup.json`, setup asks only for:
 
-- check repo prerequisites and, when needed, Wrangler auth for secret or deploy steps
-- prompt for the spreadsheet URL or ID
-- prompt for the first private project and table mapping
-- write `sheetflare.setup.json`
-- optionally apply Worker secrets
-- optionally deploy the API Worker
-- optionally deploy the admin UI
-- optionally bootstrap the first project, tables, and keys
-- optionally run the smoke suite
+- Google Sheet URL or spreadsheet ID
+- existing tab name
+- writable column to use for setup validation
+- whether to provision Google Cloud credentials, when no credential is already available
 
-The simplest happy path is:
+Beginner setup then uses safe defaults:
 
-- share the sheet with the Google service-account email first
-- point setup at the service-account JSON file when prompted
-- let setup generate the bootstrap admin token
-- let setup create the initial admin, read, and mutation keys
+- deployment profile: `production`
+- project slug/name: `main` / `Main`
+- table slug: derived from the tab name
+- ID column: `_id`
+- cache TTL: `60` seconds
+- admin UI: enabled
+- public-read API: disabled
+- setup actions: apply secrets, deploy, bootstrap, smoke-test, verify
 
-If you have not created the Google service account yet, use this variant instead:
-
-```powershell
-gcloud auth login
-npx wrangler login
-npm run setup -- --apply-secrets --provision-google
-```
-
-When Google provisioning is enabled, setup can:
-
-- create the Google Cloud project when it does not exist yet
-- enable the Google Sheets API and Google Drive API
-- create the environment-specific service account
-- create a service-account key JSON and use it immediately for Worker secret application
-- keep only the service-account email in local setup state
-
-Default names are derived from the setup profile:
-
-- `production` or `prod` -> project and service account `sheetflare-prod`
-- `staging` -> project and service account `sheetflare-staging`
-- any other profile -> `sheetflare-<profile>`
-
-Override those defaults when needed:
+When setup prints the service-account email, share your Google Sheet with that email as `Editor`. If setup pauses or fails before bootstrap because the sheet is not shared yet, share the sheet and rerun:
 
 ```powershell
-npm run setup -- --apply-secrets --provision-google --google-project my-prod-project --google-service-account sheetflare-prod
+npm run setup -- --bootstrap --smoke --verify
 ```
 
-Setup writes a checked non-secret config file at repo root:
+## 4. What Setup Creates
+
+Setup writes `sheetflare.setup.json` at the repo root. This checked, non-secret file describes the Sheetflare project, table, and smoke-test shape.
+
+When setup applies secrets, deploys, or bootstraps, it also creates or updates `.sheetflare.setup.local.json`. That file is gitignored local operator state. It can contain deployment URLs and admin-site Basic Auth material, so keep it on your machine.
+
+Setup can create or update:
+
+- Worker secrets
+- Google Cloud project and service account, when you choose provisioning
+- API Worker deployment
+- admin Pages project and deployment
+- first Sheetflare project and table
+- initial admin, read, and mutation API keys
+- Google Drive watches for automatic reindexing
+
+Setup still expects you to:
+
+- create the Google Sheet and tab
+- share the sheet with the service-account email
+- keep service-account keys and local setup state private
+
+## 5. Check The Deployment
+
+Beginner setup runs verification by default. You can rerun it any time:
 
 ```powershell
-sheetflare.setup.json
+npm run doctor
 ```
 
-When setup applies secrets, deploys, or bootstraps, it creates or updates `.sheetflare.setup.local.json` beside the checked config. That local state file stores deployment URLs and reusable setup metadata so reruns can stay partially noninteractive. It no longer persists bootstrap or API-key credentials; provide those again through the environment or prompts when needed. A config-only run may not create it. It is still gitignored and should stay on the operator machine only.
+`npm run doctor` checks the local config, resolved Google credential source, API `/ready`, protected admin root, proxied `/docs`, proxied admin API surface, and Drive watch coverage.
 
-The generated config is reusable. Common reruns:
+Use these when you only want one step:
 
 ```powershell
 npm run setup -- --apply-secrets
@@ -119,219 +110,83 @@ npm run setup -- --smoke
 npm run setup -- --verify
 ```
 
-Notes for reruns:
+## Advanced Configuration
 
-- `npm run setup -- --deploy` will redeploy the admin UI only when `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD` are available from local setup state or the environment.
-- `npm run setup -- --smoke` can use either a scoped admin API key or the bootstrap admin credential from `SHEETFLARE_ADMIN_CREDENTIAL` or an interactive prompt. It no longer reuses those credentials from local setup state.
-- `npm run setup -- --verify` checks the resolved Google credential source, API `/ready`, protected admin root, proxied `/docs`, and Drive watch coverage for the spreadsheets declared in the setup config.
-
-## 4. What setup still expects from you
-
-Setup does not automate:
-
-- sharing the spreadsheet with the service-account email
-- creating new sheet tabs for you
-- custom Worker or Pages naming beyond the checked public defaults
-- advanced multi-credential topologies using `GOOGLE_CREDENTIALS_JSON`
-
-Without `--provision-google`, setup also does not automate:
-
-- creating the Google service account itself
-- enabling the Google Sheets API and Google Drive API in GCP
-
-For those details, use:
-
-- [google-service-accounts.md](./google-service-accounts.md)
-- [deploy.md](./deploy.md)
-- [operator-runbook.md](./operator-runbook.md)
-
-## 5. The first table shape setup expects
-
-Add a table config such as:
-
-- `tableSlug`: `users`
-- `sheetTabName`: `Users`
-- `idColumn`: `_id`
-- `indexedFields`: `["name","status"]`
-- `readOnlyFields`: optional, for formula-derived or operator-managed columns
-- `fieldRules`: optional, for required, unique, enum, normalize, and type validation
-- `cacheTtlSeconds`: `15` or `60`
-
-In `sheetflare.setup.json`, `privateProject` is always bootstrapped as a private project.
-If you also want anonymous reads, add `publicReadProject` instead of trying to set `defaultAuthMode` inside the setup config.
-
-Set `googleCredentialRef`:
-
-- leave it blank or use `default` if the Worker uses one shared Google credential
-- set it explicitly if the project should use a named credential from `GOOGLE_CREDENTIALS_JSON`
-
-If a sheet contains formula-derived columns that the API must never overwrite, configure them in `readOnlyFields`.
-Those columns remain readable through the API, but create/update requests cannot target them.
-
-If a table needs basic write-time validation, add `fieldRules`.
-Typical uses:
-
-- required fields such as `email`
-- finite string options such as `status`
-- unique values such as `email`
-- normalized fields such as trimmed/lowercased email addresses
-- explicitly typed fields such as numeric scores or ISO dates
-
-Sheetflare reads raw sheet cell text as strings by default. Add `fieldRules.type` only when a field should be treated as a number, boolean, date, or datetime for validation and indexed query behavior.
-
-## 6. Manual fallback paths
-
-If you do not want setup to perform one or more actions immediately, it is safe to stop after `sheetflare.setup.json` has been written.
-
-You can then rerun only the needed step:
+Run the full prompt flow when you want setup to ask for all configurable fields:
 
 ```powershell
-npm run setup -- --apply-secrets
-npm run setup -- --deploy
-npm run setup -- --bootstrap
-npm run setup -- --smoke
+npm run setup -- --advanced
 ```
 
-If you want a completely manual bootstrap path instead of using setup, set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON` and run `npm run ops:bootstrap`.
-
-Template:
+Or write a starter config and edit it:
 
 ```powershell
-$env:SHEETFLARE_BOOTSTRAP_CONFIG_JSON = @'
-{
-  "projects": [
-    {
-      "slug": "demo",
-      "name": "Demo",
-      "spreadsheetId": "<SPREADSHEET_ID>",
-      "googleCredentialRef": "default",
-      "defaultAuthMode": "private",
-      "tables": [
-        {
-          "tableSlug": "users",
-          "sheetTabName": "Users",
-          "idColumn": "_id",
-          "indexedFields": ["name", "status"],
-          "readOnlyFields": ["status_label"],
-          "fieldRules": {
-            "email": {
-              "required": true,
-              "unique": true,
-              "normalize": ["trim", "lowercase"]
-            },
-            "status": {
-              "enum": ["pending", "active"]
-            },
-            "score": {
-              "type": "number"
-            }
-          },
-          "cacheTtlSeconds": 15
-        }
-      ]
-    }
-  ],
-  "apiKeys": [
-    {
-      "name": "read",
-      "projectSlug": "demo",
-      "scopes": ["table:read"]
-    },
-    {
-      "name": "mutation",
-      "projectSlug": "demo",
-      "scopes": ["table:create", "table:update", "table:delete"]
-    },
-    {
-      "name": "ops-admin",
-      "projectSlug": null,
-      "scopes": ["admin:projects", "admin:keys"]
-    }
-  ]
-}
-'@
+npm run setup -- --write-default-config
+```
 
+Customization stays in `sheetflare.setup.json` unless noted below.
+
+| Customization | Where to configure | Rerun after changing |
+| --- | --- | --- |
+| Project slug/name | `privateProject.slug`, `privateProject.name` | `npm run setup -- --bootstrap --verify` |
+| Table slug/tab name | `privateProject.tables[]` | `npm run setup -- --bootstrap --smoke --verify` |
+| Indexed fields | `privateProject.tables[].indexedFields` | `npm run setup -- --bootstrap --verify`, then reindex affected tables |
+| Read-only fields | `privateProject.tables[].readOnlyFields` | `npm run setup -- --bootstrap --smoke --verify` |
+| Field rules | `privateProject.tables[].fieldRules` | `npm run setup -- --bootstrap --smoke --verify` |
+| Cache TTL | `privateProject.tables[].cacheTtlSeconds` | `npm run setup -- --bootstrap --verify` |
+| Public-read API | `publicReadProject` | `npm run setup -- --bootstrap --smoke --verify` |
+| Named Google credentials | Worker `GOOGLE_CREDENTIALS_JSON` plus `googleCredentialRef` | `npm run setup -- --apply-secrets --deploy --verify` |
+| Separate deploy/bootstrap/smoke steps | CLI flags | Run only the matching flag |
+
+### Table Shape
+
+Example table config:
+
+```json
+{
+  "tableSlug": "users",
+  "sheetTabName": "Users",
+  "idColumn": "_id",
+  "indexedFields": ["name", "status"],
+  "readOnlyFields": ["status_label"],
+  "fieldRules": {
+    "email": {
+      "required": true,
+      "unique": true,
+      "normalize": ["trim", "lowercase"]
+    },
+    "status": {
+      "enum": ["pending", "active"]
+    },
+    "score": {
+      "type": "number"
+    }
+  },
+  "cacheTtlSeconds": 60
+}
+```
+
+Use `readOnlyFields` for formula-derived or operator-managed columns that API writes must never overwrite.
+
+Use `fieldRules` for write-time validation such as required fields, unique values, finite options, normalization, and explicit number/boolean/date/datetime typing. Sheetflare reads raw cell text as strings unless a field rule gives it a stronger type.
+
+### Public-Read API
+
+`privateProject` is always private. If you also want anonymous reads, add `publicReadProject`; do not add `defaultAuthMode` inside setup config.
+
+The smoke suite always checks private access. It adds anonymous `public-read` coverage when `publicReadProject` is configured.
+
+### Manual Bootstrap Fallback
+
+Prefer setup for normal use. If you need the lower-level bootstrap path, set `SHEETFLARE_BOOTSTRAP_CONFIG_JSON` and run:
+
+```powershell
 npm run ops:bootstrap
 ```
 
-## 7. Optional public-read coverage
+Use [deploy.md](./deploy.md) for raw deploy commands and [operator-runbook.md](./operator-runbook.md) for day-2 operations.
 
-If you also want to exercise anonymous `public-read` behavior, create a second project with:
-
-- `defaultAuthMode: "public-read"`
-- its own spreadsheet or tab mapping
-- a table such as `users`
-
-The bundled smoke suite always checks the private path. It adds anonymous `public-read` coverage only when `SHEETFLARE_PUBLIC_PROJECT` and `SHEETFLARE_PUBLIC_TABLE` are set.
-
-## 8. Manual smoke inputs
-
-Set the smoke-test environment:
-
-```powershell
-$env:SHEETFLARE_PRIVATE_PROJECT = "demo"
-$env:SHEETFLARE_PRIVATE_TABLE = "users"
-$env:SHEETFLARE_PRIVATE_READ_KEY = "sfk_private-read.secret"
-$env:SHEETFLARE_MUTATION_KEY = "sfk_mutation.secret"
-$env:SHEETFLARE_SMOKE_CREATE_VALUES_JSON = '{"name":"Smoke Row","status":"active"}'
-$env:SHEETFLARE_SMOKE_UPDATE_VALUES_JSON = '{"name":"Smoke Row Updated"}'
-```
-
-Optional for anonymous `public-read` coverage:
-
-```powershell
-$env:SHEETFLARE_PUBLIC_PROJECT = "demo-public"
-$env:SHEETFLARE_PUBLIC_TABLE = "users"
-```
-
-Run:
-
-```powershell
-npm run smoke
-```
-
-Optional artifact:
-
-```powershell
-$env:SHEETFLARE_SMOKE_REPORT_PATH = "reports/smoke-$(Get-Date -Format yyyyMMdd-HHmmss).md"
-npm run smoke
-```
-
-The smoke suite checks:
-
-- readiness endpoint internal checks
-- admin access
-- private-table anonymous rejection
-- private-table keyed reads
-- cache status with `staleReason`
-- create/get/update/delete on a smoke row
-- admin reindex
-
-When `SHEETFLARE_PUBLIC_PROJECT` and `SHEETFLARE_PUBLIC_TABLE` are set, it also checks:
-
-- public-read anonymous access
-- public-read anonymous write rejection
-
-## 9. Inspect cache health
-
-```powershell
-$env:SHEETFLARE_PROJECT = "demo"
-$env:SHEETFLARE_TABLE = "users"
-npm run ops:cache
-```
-
-Healthy output should show:
-
-- `status: "ready"`
-- `staleReason: "fresh"` after healthy activity or reindex
-- `lastSyncError: null`
-- `validation.status: "ok"` unless the last full sync detected direct sheet drift against configured `fieldRules`
-- `validation.validatedAt` shows when that validation snapshot was last recomputed
-- `externalChange.pending: false` unless a Drive notification has queued a debounced auto-reindex
-
-`lastSyncStartedAt` and `validation` refer to the last full rebuild from Google Sheets. `validation.validatedAt` is the timestamp for that full-rebuild validation snapshot. `lastSyncCompletedAt` may reflect either the last full rebuild completion or the most recent successful create/update/delete that refreshed cache freshness.
-
-## 10. Useful operator commands
+## Common Operations
 
 Create admin key:
 
@@ -339,15 +194,11 @@ Create admin key:
 npm run ops:create-admin-key
 ```
 
-Bootstrap projects, tables, and keys:
+Inspect cache status:
 
 ```powershell
-npm run ops:bootstrap
-```
-
-Get cache status:
-
-```powershell
+$env:SHEETFLARE_PROJECT = "main"
+$env:SHEETFLARE_TABLE = "users"
 npm run ops:cache
 ```
 
@@ -357,94 +208,28 @@ Force reindex:
 npm run ops:reindex
 ```
 
-Register or renew Google Drive watches for automatic debounced reindexing:
-
-```powershell
-npm run ops:watch:drive
-```
-
-If you used `npm run setup` with deploy or bootstrap actions, setup now runs this registration step automatically when it has the API URL and an admin credential.
-
-This requires:
-
-- `GOOGLE_DRIVE_WEBHOOK_SECRET` deployed on the API Worker
-- the Google Drive API enabled for the same service-account project
-- the deployed API URL to be reachable by Google
-
-Inspect current watch state, including expiration and any last watch error:
+Inspect Drive watch state:
 
 ```powershell
 npm run ops:watch:drive:status
 ```
 
-Ask Sheetflare when it is conservatively safe to retry watch registration:
-
-```powershell
-npm run ops:watch:drive:retry-advice
-```
-
-Stop known Drive watches before retrying registration if you need to clear the current locally tracked channels:
-
-```powershell
-npm run ops:watch:drive:stop
-```
-
-```powershell
-$env:SHEETFLARE_DRIVE_WATCH_SPREADSHEET_ID = "your-spreadsheet-id"
-npm run ops:watch:drive:stop
-```
-
-If registration fails with `Rate limit exceeded for creating file subscriptions.`, Google is still counting one or more existing file subscriptions. Stop the known watch, wait for Google to release stale subscriptions, and then retry `npm run ops:watch:drive`.
-
-Google Drive watch references:
-
-- https://developers.google.com/workspace/drive/api/guides/push
-- https://developers.google.com/workspace/drive/api/reference/rest/v3/files/watch
-- https://developers.google.com/workspace/drive/api/reference/rest/v3/channels/stop
-
-Run the load and churn harness:
-
-```powershell
-$env:SHEETFLARE_LOAD_REPORT_PATH = "reports/load-$(Get-Date -Format yyyyMMdd-HHmmss).md"
-npm run load
-```
-
-## 11. If setup fails
-
-Check these first:
-
-- spreadsheet is shared with the service account
-- `_id` column exists
-- `_id` cells are unique and non-blank
-- headers are unique
-- project points at the correct spreadsheet
-- table points at the correct tab
-- auth keys have the expected scopes
-
-For deeper troubleshooting, use [operator-runbook.md](./operator-runbook.md).
-
-## Local End-To-End Check
-
-After you have the local Worker, the admin UI, Google credentials, and the smoke-test projects/tables configured, you can run the local end-to-end path:
-
-Required smoke env vars:
-
-- `SHEETFLARE_ADMIN_CREDENTIAL`
-- `SHEETFLARE_PRIVATE_PROJECT`
-- `SHEETFLARE_PRIVATE_TABLE`
-- `SHEETFLARE_PRIVATE_READ_KEY`
-- `SHEETFLARE_MUTATION_KEY`
-- `SHEETFLARE_SMOKE_CREATE_VALUES_JSON`
-- `SHEETFLARE_SMOKE_UPDATE_VALUES_JSON`
-
-Optional for anonymous `public-read` coverage:
-
-- `SHEETFLARE_PUBLIC_PROJECT`
-- `SHEETFLARE_PUBLIC_TABLE`
+Run a local end-to-end check after local Worker/admin setup:
 
 ```powershell
 npx playwright install chromium
 npm run e2e:local
 ```
 
-This starts the local API and admin UI, runs the API smoke suite against the local Worker, and then runs browser automation against the admin UI.
+## If Setup Fails
+
+Check these first:
+
+- `npx wrangler whoami` succeeds.
+- `gcloud auth list` shows an active account when you chose Google provisioning.
+- The spreadsheet is shared with the service-account email as `Editor`.
+- The configured tab exists.
+- `_id` exists, is unique, and has no blanks.
+- The smoke-test column exists and is writable.
+
+For deeper troubleshooting, use [operator-runbook.md](./operator-runbook.md).

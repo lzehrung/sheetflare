@@ -12,6 +12,8 @@ For a normal first deployment, start with:
 
 ```powershell
 npm install
+npx wrangler login
+gcloud auth login
 npm run setup
 ```
 
@@ -26,7 +28,7 @@ The setup command can:
 - write `sheetflare.setup.json`
 - keep local reusable secret state in `.sheetflare.setup.local.json`
 - apply Worker secrets
-- provision a Google Cloud project and service account when `--provision-google` is used with a working `gcloud` login
+- provision a Google Cloud project and service account during first-run beginner setup, or when `--provision-google` is used with a working `gcloud` login
 - ensure the target Cloudflare Pages project exists for admin deploys
 - apply the admin Pages runtime binding to the deployed API base URL
 - deploy the API Worker
@@ -47,6 +49,7 @@ npm run setup -- --verify
 
 Rerun notes:
 
+- `npm run setup -- --advanced` uses the full prompt flow for project names, table slugs, indexed fields, cache TTL, public-read coverage, and per-step action choices.
 - `npm run setup -- --deploy` requires admin-site auth secrets for the admin Pages deploy. Setup reuses `.sheetflare.setup.local.json` when available, or falls back to `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD`. It also ensures the Pages project exists and applies `SHEETFLARE_API_BASE_URL` at the Pages project level before the deploy.
 - `npm run setup -- --smoke` accepts either a scoped admin API key or the bootstrap admin credential through `SHEETFLARE_ADMIN_CREDENTIAL` or an interactive prompt. It no longer reuses those credentials from local setup state.
 - `npm run setup -- --apply-secrets --provision-google` can create the Google project, enable Sheets and Drive APIs, create the service account, and mint a key JSON before applying Worker secrets. Use `--google-project` and `--google-service-account` when the default names derived from the setup profile are not what you want.
@@ -68,6 +71,12 @@ When you want setup to create the Google credential instead of pointing at an ex
 ```powershell
 gcloud auth login
 npx wrangler login
+npm run setup
+```
+
+On first-run beginner setup, choose Google provisioning when prompted. For noninteractive reruns or existing configs, use:
+
+```powershell
 npm run setup -- --apply-secrets --provision-google
 ```
 
@@ -84,6 +93,8 @@ npm run setup -- --apply-secrets --provision-google --google-project my-prod-pro
 ```
 
 Setup keeps the generated private key ephemeral, writes only the service-account email into local setup state, and still expects you to share the spreadsheet with that email afterward.
+
+Setup cannot share the spreadsheet automatically. Share each managed spreadsheet with the printed service-account email as `Editor` before bootstrap and smoke validation can succeed.
 
 ## Required Environment
 
