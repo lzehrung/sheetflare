@@ -896,7 +896,7 @@ describe('GoogleSheetsService Drive watch lifecycle', () => {
   });
 });
 
-describe('GoogleSheetsService.writeRow', () => {
+describe('GoogleSheetsService write helpers', () => {
   it('sends raw values to Sheets so the API preserves literal cell contents', async () => {
     const requestedUrls: string[] = [];
     const service = new GoogleSheetsService({
@@ -1037,6 +1037,131 @@ describe('GoogleSheetsService.writeRow', () => {
     });
   });
 
+  it('batch writes contiguous rows through values batch update', async () => {
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input, init) => {
+        const url = decodeURIComponent(String(input));
+        const method = init?.method ?? 'GET';
+        requests.push({
+          method,
+          url,
+          body:
+            init?.body && typeof init.body === 'string' && init.body.trim().startsWith('{')
+              ? JSON.parse(init.body)
+              : null
+        });
+
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes('/values:batchUpdate')) {
+          return Response.json({
+            totalUpdatedRows: 2
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    const updatedRows = await service.writeRowsBatch({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    }, ['_id', 'name'], [
+      {
+        _id: 'row-1',
+        name: 'Ada'
+      },
+      {
+        _id: 'row-2',
+        name: 'Grace'
+      }
+    ], 2);
+
+    expect(updatedRows).toBe(2);
+    expect(requests.find((request) => request.url.includes('/values:batchUpdate'))?.body).toEqual({
+      valueInputOption: 'RAW',
+      data: [
+        {
+          range: "'Users'!A2:B3",
+          values: [
+            ['row-1', 'Ada'],
+            ['row-2', 'Grace']
+          ]
+        }
+      ]
+    });
+  });
+
+  it('clears a bounded row range through the values clear endpoint', async () => {
+    const requestedUrls: string[] = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = decodeURIComponent(String(input));
+        requestedUrls.push(url);
+
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({
+            access_token: 'token',
+            expires_in: 3600
+          });
+        }
+
+        if (url.includes(':clear')) {
+          return Response.json({
+            clearedRange: "'Users'!A2:D500001"
+          });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    await service.clearRowsRange({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    }, 2, 500001, 4);
+
+    expect(requestedUrls.some((url) => url.includes("/values/'Users'!A2:D500001:clear"))).toBe(true);
+  });
+});
+
+describe('GoogleSheetsService.writeRow', () => {
   it('appends a row skeleton through the managed id column when writable columns are sparse', async () => {
     const requestedUrls: string[] = [];
     const service = new GoogleSheetsService({

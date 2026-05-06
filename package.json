@@ -45,6 +45,7 @@
     "ops:bootstrap": "tsx scripts/bootstrap-run.ts",
     "smoke": "tsx scripts/smoke-run.ts",
     "load": "tsx scripts/load-run.ts",
+    "benchmark": "tsx scripts/benchmark-large-sheet.ts",
     "ops:cache": "tsx scripts/get-cache-status.ts",
     "ops:cache:health": "tsx scripts/check-cache-health.ts",
     "ops:watch:drive": "tsx scripts/register-drive-watches.ts",

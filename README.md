@@ -31,6 +31,7 @@ npm run dev:admin
 npm run deploy
 npm run e2e:local
 npm run smoke
+npm run benchmark
 ```
 
 ## Operator Scripts
@@ -53,6 +54,7 @@ npm run smoke
 - `npm run deploy:raw`
 - `npm run smoke`
 - `npm run load`
+- `npm run benchmark`
 
 ## Setup Path
 

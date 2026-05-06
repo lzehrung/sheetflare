@@ -4,7 +4,7 @@ This document defines how to generate the evidence bundle needed for broader pro
 
 ## Smoke Report
 
-The smoke harness can now write both markdown and JSON artifacts.
+The smoke harness writes both markdown and JSON artifacts.
 
 Set the normal smoke environment plus a report path:
 
@@ -28,7 +28,58 @@ The smoke report captures:
 - reindex
 - request and response samples for each major path
 
+## Large Sheet Benchmark
+
+The benchmark suite is the primary way to prove the system still behaves well at very large sizes.
+It is designed around a dedicated benchmark table with writable columns and a target row count of `500000` by default.
+
+Set the same base environment used by smoke for the admin/read paths, then add the benchmark-specific values:
+
+```powershell
+$env:SHEETFLARE_BASE_URL = "https://<worker-host>"
+$env:SHEETFLARE_ADMIN_CREDENTIAL = "<admin-token>"
+$env:SHEETFLARE_PRIVATE_PROJECT = "<project-slug>"
+$env:SHEETFLARE_PRIVATE_TABLE = "<table-slug>"
+$env:SHEETFLARE_PRIVATE_READ_KEY = "<private-read-key>"
+$env:SHEETFLARE_BENCHMARK_REPORT_PATH = "reports/benchmark-$(Get-Date -Format yyyyMMdd-HHmmss).md"
+$env:SHEETFLARE_BENCHMARK_TARGET_ROWS = "500000"
+$env:SHEETFLARE_BENCHMARK_BATCH_ROWS = "1000"
+$env:SHEETFLARE_BENCHMARK_STALE_WAIT_MS = "16000"
+$env:GOOGLE_CLIENT_EMAIL = "<service-account-email>"
+$env:GOOGLE_PRIVATE_KEY = "<service-account-private-key>"
+npm run benchmark
+```
+
+Use a smaller `SHEETFLARE_BENCHMARK_BATCH_ROWS` if you want shorter individual Google Sheets writes during seed, or keep the default `1000` for fewer requests.
+
+Artifacts written:
+
+- `<report>.md`: benchmark summary
+- `<report>.json`: structured latency, seed, and failure artifact
+
+Set `SHEETFLARE_BENCHMARK_STALE_WAIT_MS` to `0` if you want to skip the stale point-read scenario entirely for a quick operator smoke check.
+
+The benchmark suite:
+
+- seeds or tops up the configured table to the target row count directly through Google Sheets
+- clears any excess rows when the table is larger than the requested target
+- forces a reindex and records the rebuild time
+- measures hot indexed list reads
+- measures point reads after a stale-wait window
+- confirms `contains` is rejected on a large table instead of silently degrading into a scan
+- measures reindex while reads continue
+
+Recommended benchmark table shape:
+
+- a managed ID column such as `_id`
+- at least one additional indexed string field such as `name`
+- an optional status field such as `status`
+- an optional numeric field such as `score`
+- no read-only or formula-managed columns in the benchmark table itself
+
 ## Load And Churn Report
+
+The load harness is still useful for steady-state pressure tests once the large-sheet path is proven.
 
 Set the same smoke variables used by the smoke harness, then add:
 
@@ -41,7 +92,7 @@ npm run load
 
 Artifacts written:
 
-- `<report>.md`: benchmark summary
+- `<report>.md`: load summary
 - `<report>.json`: structured latency/failure artifact
 
 The load harness covers:
@@ -54,7 +105,7 @@ The load harness covers:
 - reindex while reads continue
 - optional manual churn window for direct sheet edits during traffic
 
-## Recommended First Pilot Settings
+## Recommended Starting Constraints
 
 Use these as a conservative first pass, not as a proven public limit:
 
@@ -66,12 +117,15 @@ Use these as a conservative first pass, not as a proven public limit:
 
 ## What To Publish After A Real Run
 
-After running `npm run smoke` and `npm run load` against a real deployment, publish these numbers in the root README:
+After running `npm run smoke`, `npm run benchmark`, and `npm run load` against a real deployment, publish these numbers in the root README:
 
-- row count tested
+- benchmark target row count
+- seeded row count before the run
 - configured `TABLE_MAX_FULL_SCAN_ROWS`
 - request mix
 - concurrency used
+- seed duration
+- reindex duration
 - p50 / p95 / max latency per scenario
 - first `429` point for same-principal pressure
 - whether manual churn was exercised
