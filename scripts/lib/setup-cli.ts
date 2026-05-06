@@ -11,6 +11,7 @@ export type SetupCliOptions = {
   smoke: boolean;
   verify: boolean;
   showSecrets: boolean;
+  advanced: boolean;
   provisionGoogle: boolean;
   googleProjectId: string | null;
   googleServiceAccountName: string | null;
@@ -27,6 +28,7 @@ export function createDefaultSetupCliOptions(): SetupCliOptions {
     smoke: false,
     verify: false,
     showSecrets: false,
+    advanced: false,
     provisionGoogle: false,
     googleProjectId: null,
     googleServiceAccountName: null
@@ -88,6 +90,11 @@ export function parseSetupArgs(argv: string[]): SetupCliOptions {
       continue;
     }
 
+    if (argument === '--advanced') {
+      options.advanced = true;
+      continue;
+    }
+
     if (argument === '--provision-google') {
       options.provisionGoogle = true;
       continue;
@@ -130,6 +137,7 @@ deployment.
 
 Common flows:
   npm run setup
+  npm run setup -- --advanced
   npm run setup -- --apply-secrets
   npm run setup -- --apply-secrets --provision-google
   npm run setup -- --deploy --bootstrap --smoke --verify
@@ -146,6 +154,7 @@ Options:
   --smoke                            Run smoke validation after setup/bootstrap.
   --verify                           Run setup verification/doctor checks.
   --show-secrets                     Show generated secrets in the final summary.
+  --advanced                         Ask for all setup config fields instead of beginner defaults.
   --provision-google                 Provision Google service-account resources with gcloud.
   --google-project <id>              Google Cloud project id for provisioning.
   --google-service-account <name>    Google service-account name for provisioning.

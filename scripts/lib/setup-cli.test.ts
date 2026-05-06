@@ -26,10 +26,17 @@ describe('parseSetupArgs', () => {
         smoke: true,
         verify: true,
         showSecrets: false,
+        advanced: false,
         provisionGoogle: true,
         googleProjectId: 'sheetflare-prod',
         googleServiceAccountName: 'sheetflare-prod'
       });
+  });
+
+  it('parses advanced setup mode', () => {
+    expect(parseSetupArgs(['--advanced'])).toMatchObject({
+      advanced: true
+    });
   });
 
   it('parses help flags without treating them as unknown arguments', () => {
@@ -58,9 +65,11 @@ describe('renderSetupHelp', () => {
     const help = renderSetupHelp();
 
     expect(help).toContain('Usage: npm run setup -- [options]');
+    expect(help).toContain('npm run setup -- --advanced');
     expect(help).toContain('npm run setup -- --apply-secrets --provision-google');
     expect(help).toContain('npm run setup -- --deploy --bootstrap --smoke --verify');
     expect(help).toContain('npm run doctor');
+    expect(help).toContain('--advanced');
     expect(help).toContain('--google-project <id>');
     expect(help).toContain('--google-service-account <name>');
   });
