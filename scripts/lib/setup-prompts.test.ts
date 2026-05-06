@@ -1,5 +1,77 @@
 import { describe, expect, it } from 'vitest';
-import { buildSetupConfigFromAnswers } from './setup-prompts';
+import { buildBeginnerSetupConfigFromAnswers, buildSetupConfigFromAnswers } from './setup-prompts';
+
+describe('buildBeginnerSetupConfigFromAnswers', () => {
+  it('builds a beginner setup config with derived defaults', () => {
+    const config = buildBeginnerSetupConfigFromAnswers({
+      spreadsheetIdOrUrl: 'https://docs.google.com/spreadsheets/d/sheet-1/edit#gid=0',
+      sheetTabName: 'Contacts 2026',
+      smokeFieldName: 'name'
+    });
+
+    expect(config).toMatchObject({
+      profile: 'production',
+      deploy: {
+        api: true,
+        admin: true
+      },
+      privateProject: {
+        slug: 'main',
+        name: 'Main',
+        spreadsheetId: 'sheet-1',
+        tables: [
+          {
+            tableSlug: 'contacts-2026',
+            sheetTabName: 'Contacts 2026',
+            idColumn: '_id',
+            cacheTtlSeconds: 60
+          }
+        ]
+      },
+      publicReadProject: null,
+      smoke: {
+        enabled: true,
+        privateTableSlug: 'contacts-2026',
+        publicTableSlug: null,
+        adminKeyName: 'main-admin',
+        privateReadKeyName: 'main-read',
+        mutationKeyName: 'main-mutation',
+        createValues: {
+          name: 'Sheetflare smoke row'
+        },
+        updateValues: {
+          name: 'Sheetflare smoke row updated'
+        }
+      }
+    });
+  });
+
+  it('falls back to a generic table slug for punctuation-only tab names', () => {
+    const config = buildBeginnerSetupConfigFromAnswers({
+      spreadsheetIdOrUrl: 'sheet-1',
+      sheetTabName: ' !!! ',
+      smokeFieldName: 'name'
+    });
+
+    expect(config.privateProject.tables[0]?.tableSlug).toBe('table');
+  });
+
+  it('rejects a blank beginner smoke field name', () => {
+    expect(() => buildBeginnerSetupConfigFromAnswers({
+      spreadsheetIdOrUrl: 'sheet-1',
+      sheetTabName: 'Users',
+      smokeFieldName: '   '
+    })).toThrow('Smoke field name must not be blank.');
+  });
+
+  it('rejects using the managed id column for beginner smoke writes', () => {
+    expect(() => buildBeginnerSetupConfigFromAnswers({
+      spreadsheetIdOrUrl: 'sheet-1',
+      sheetTabName: 'Users',
+      smokeFieldName: '_id'
+    })).toThrow('Smoke field name must not use the managed ID column.');
+  });
+});
 
 describe('buildSetupConfigFromAnswers', () => {
   it('builds a private-only setup config from prompt answers', () => {

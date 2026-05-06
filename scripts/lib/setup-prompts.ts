@@ -28,6 +28,12 @@ export type SetupAnswers = {
   publicReadProjectName: string | null;
 };
 
+export type BeginnerSetupAnswers = {
+  spreadsheetIdOrUrl: string;
+  sheetTabName: string;
+  smokeFieldName: string;
+};
+
 export type SetupPromptActions = {
   applySecretsNow: boolean;
   deployNow: boolean;
@@ -76,17 +82,82 @@ function selectDefaultSmokeField(options: {
   return options.indexedFields.find((fieldName) => fieldName.trim() !== '' && fieldName.trim() !== options.idColumn.trim());
 }
 
+function assertSmokeFieldNameIsWritable(smokeFieldName: string, idColumn: string) {
+  const trimmed = smokeFieldName.trim();
+  if (trimmed.length === 0) {
+    throw new ScriptError('Smoke field name must not be blank.');
+  }
+  if (trimmed === idColumn.trim()) {
+    throw new ScriptError('Smoke field name must not use the managed ID column.');
+  }
+
+  return trimmed;
+}
+
+function deriveTableSlugFromTabName(sheetTabName: string) {
+  const derived = sheetTabName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return normalizeTableSlug(derived.length > 0 ? derived : 'table');
+}
+
+export function buildBeginnerSetupConfigFromAnswers(answers: BeginnerSetupAnswers): SetupConfig {
+  const spreadsheetId = normalizeSpreadsheetId(answers.spreadsheetIdOrUrl);
+  const sheetTabName = answers.sheetTabName.trim();
+  if (sheetTabName.length === 0) {
+    throw new ScriptError('Sheet tab name must not be blank.');
+  }
+
+  const tableSlug = deriveTableSlugFromTabName(sheetTabName);
+  const idColumn = '_id';
+  const smokeFieldName = assertSmokeFieldNameIsWritable(answers.smokeFieldName, idColumn);
+
+  return parseSetupConfig({
+    profile: 'production',
+    deploy: {
+      api: true,
+      admin: true
+    },
+    privateProject: {
+      slug: 'main',
+      name: 'Main',
+      spreadsheetId,
+      googleCredentialRef: 'default',
+      tables: [
+        {
+          tableSlug,
+          sheetTabName,
+          idColumn,
+          cacheTtlSeconds: 60
+        }
+      ]
+    },
+    publicReadProject: null,
+    smoke: {
+      enabled: true,
+      privateTableSlug: tableSlug,
+      publicTableSlug: null,
+      adminKeyName: 'main-admin',
+      privateReadKeyName: 'main-read',
+      mutationKeyName: 'main-mutation',
+      createValues: {
+        [smokeFieldName]: 'Sheetflare smoke row'
+      },
+      updateValues: {
+        [smokeFieldName]: 'Sheetflare smoke row updated'
+      }
+    }
+  });
+}
+
 export function buildSetupConfigFromAnswers(answers: SetupAnswers): SetupConfig {
   const privateProjectSlug = normalizeProjectSlug(answers.privateProjectSlug);
   const privateTableSlug = normalizeTableSlug(answers.privateTableSlug);
   const idColumn = answers.idColumn.trim();
-  const smokeFieldName = answers.smokeFieldName.trim();
-  if (smokeFieldName.length === 0) {
-    throw new ScriptError('Smoke field name must not be blank.');
-  }
-  if (smokeFieldName === idColumn) {
-    throw new ScriptError('Smoke field name must not use the managed ID column.');
-  }
+  const smokeFieldName = assertSmokeFieldNameIsWritable(answers.smokeFieldName, idColumn);
 
   const spreadsheetId = normalizeSpreadsheetId(answers.spreadsheetIdOrUrl);
   const indexedFields = Array.from(new Set(splitCommaSeparatedList(answers.indexedFields.join(','))));
