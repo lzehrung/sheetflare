@@ -312,6 +312,19 @@ export function parseSetupConfig(input: unknown): SetupConfig {
   };
 }
 
+export function getSetupConfigGoogleCredentialRefs(config: SetupConfig) {
+  const refs = new Set<string>([config.privateProject.googleCredentialRef ?? 'default']);
+  if (config.publicReadProject) {
+    refs.add(config.publicReadProject.googleCredentialRef ?? 'default');
+  }
+
+  return refs;
+}
+
+export function setupConfigUsesDefaultGoogleCredential(config: SetupConfig) {
+  return getSetupConfigGoogleCredentialRefs(config).has('default');
+}
+
 export function normalizeSpreadsheetId(value: string) {
   return createProjectInputSchema.shape.spreadsheetId.parse(parseSpreadsheetId(value));
 }

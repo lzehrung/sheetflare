@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig } from './lib/setup-config';
+import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setupConfigUsesDefaultGoogleCredential } from './lib/setup-config';
 import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
 import { confirmSheetShared, createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, type SetupPrereqResult } from './lib/setup-prereqs';
@@ -33,6 +33,7 @@ import {
 import {
   resolvePreferredAdminCredential,
   resolveSetupRuntimeState,
+  mergeSetupRuntimeState,
   summarizeSetupSecrets,
   type SetupSecretsSummary
 } from './lib/setup-runtime';
@@ -431,9 +432,11 @@ async function main() {
     }
 
     if (actions.deployNow) {
-      const googleClientEmail = assertRealGoogleClientEmail(setupSecrets?.googleClientEmail
-        ?? localState?.googleClientEmail
-        ?? resolvedRuntimeState.googleClientEmail);
+      const googleClientEmail = setupConfigUsesDefaultGoogleCredential(config)
+        ? assertRealGoogleClientEmail(setupSecrets?.googleClientEmail
+          ?? localState?.googleClientEmail
+          ?? resolvedRuntimeState.googleClientEmail)
+        : null;
 
       logStep('Deploying API Worker');
       const apiDeploy = await deployApiWorker(config.profile, googleClientEmail);
@@ -479,7 +482,7 @@ async function main() {
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
-          googleClientEmail,
+          googleClientEmail: googleClientEmail ?? undefined,
           apiUrl,
           adminUrl,
           adminUiUsername,
@@ -620,9 +623,22 @@ async function main() {
 
     if (actions.verifyNow) {
       logStep('Verifying setup-managed environment');
+      const verificationRuntimeState = mergeSetupRuntimeState(resolveSetupRuntimeState(localState), {
+        googleClientEmail: setupSecrets?.googleClientEmail
+          ?? localState?.googleClientEmail
+          ?? resolvedRuntimeState.googleClientEmail,
+        apiUrl,
+        adminUrl,
+        adminBearerToken,
+        adminUiUsername,
+        adminUiPassword,
+        adminApiKey,
+        privateReadKey,
+        mutationKey
+      });
       const verificationResults = await runSetupDoctor({
         config,
-        runtimeState: resolveSetupRuntimeState(localState),
+        runtimeState: verificationRuntimeState,
         prereqResults
       });
       renderPrereqSummary(verificationResults);

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  mergeSetupRuntimeState,
   resolvePreferredAdminCredential,
   resolveSetupRuntimeState,
   summarizeSetupSecrets
@@ -80,6 +81,38 @@ describe('resolvePreferredAdminCredential', () => {
       adminApiKey: null,
       adminBearerToken: 'bootstrap.secret'
     })).toBe('bootstrap.secret');
+  });
+});
+
+describe('mergeSetupRuntimeState', () => {
+  it('enriches persisted runtime state with fresh setup credentials without replacing stable fields with blanks', () => {
+    const base = resolveSetupRuntimeState({
+      googleClientEmail: 'persisted@example.com',
+      apiUrl: 'https://persisted.workers.dev',
+      adminUrl: 'https://persisted.pages.dev',
+      adminUiUsername: 'operator',
+      adminUiPassword: 'password'
+    });
+
+    expect(mergeSetupRuntimeState(base, {
+      googleClientEmail: 'fresh@example.com',
+      apiUrl: 'https://fresh.workers.dev',
+      adminUrl: '',
+      adminBearerToken: 'bootstrap.secret',
+      adminApiKey: 'sfk_admin.secret',
+      privateReadKey: 'sfk_read.secret',
+      mutationKey: 'sfk_mutation.secret'
+    })).toMatchObject({
+      googleClientEmail: 'fresh@example.com',
+      apiUrl: 'https://fresh.workers.dev',
+      adminUrl: 'https://persisted.pages.dev',
+      adminBearerToken: 'bootstrap.secret',
+      adminApiKey: 'sfk_admin.secret',
+      privateReadKey: 'sfk_read.secret',
+      mutationKey: 'sfk_mutation.secret',
+      adminUiUsername: 'operator',
+      adminUiPassword: 'password'
+    });
   });
 });
 

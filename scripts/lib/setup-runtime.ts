@@ -43,6 +43,24 @@ export function resolveSetupRuntimeState(localState: SetupLocalState | null): Re
   };
 }
 
+export function mergeSetupRuntimeState(
+  base: ResolvedSetupRuntimeState,
+  updates: Partial<Omit<ResolvedSetupRuntimeState, 'namedGoogleCredentials'>>
+): ResolvedSetupRuntimeState {
+  return {
+    ...base,
+    googleClientEmail: resolveValue(updates.googleClientEmail, base.googleClientEmail),
+    apiUrl: resolveValue(updates.apiUrl, base.apiUrl),
+    adminUrl: resolveValue(updates.adminUrl, base.adminUrl),
+    adminBearerToken: resolveValue(updates.adminBearerToken, base.adminBearerToken),
+    adminUiUsername: resolveValue(updates.adminUiUsername, base.adminUiUsername),
+    adminUiPassword: resolveValue(updates.adminUiPassword, base.adminUiPassword),
+    adminApiKey: resolveValue(updates.adminApiKey, base.adminApiKey),
+    privateReadKey: resolveValue(updates.privateReadKey, base.privateReadKey),
+    mutationKey: resolveValue(updates.mutationKey, base.mutationKey)
+  };
+}
+
 export function resolvePreferredAdminCredential(state: Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'>) {
   return resolveValue(state.adminApiKey, state.adminBearerToken);
 }

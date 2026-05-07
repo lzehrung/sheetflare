@@ -80,12 +80,16 @@ function extractPagesDeploymentUrl(output: string) {
   return match[match.length - 1]!;
 }
 
-function patchApiConfig(config: JsonObject, googleClientEmail: string) {
+export function patchApiConfigForDeploy(config: JsonObject, googleClientEmail: string | null) {
   const next = structuredClone(config);
   const vars = typeof next.vars === 'object' && next.vars !== null
     ? { ...(next.vars as Record<string, unknown>) }
     : {};
-  vars.GOOGLE_CLIENT_EMAIL = googleClientEmail;
+  if (googleClientEmail) {
+    vars.GOOGLE_CLIENT_EMAIL = googleClientEmail;
+  } else {
+    delete vars.GOOGLE_CLIENT_EMAIL;
+  }
   next.vars = vars;
   return next;
 }
@@ -145,10 +149,10 @@ export function buildPagesProjectCreateCommand(projectName: string) {
   return ['wrangler@4.85.0', 'pages', 'project', 'create', projectName, '--production-branch', 'main'];
 }
 
-export async function deployApiWorker(profile: string, googleClientEmail: string) {
+export async function deployApiWorker(profile: string, googleClientEmail: string | null) {
   return withPatchedJsonConfig(
     getApiWranglerConfigPath(profile),
-    (config) => patchApiConfig(config, googleClientEmail),
+    (config) => patchApiConfigForDeploy(config, googleClientEmail),
     async (tempConfigPath) => {
       const result = await runCommand(
         getCommandName('npx'),

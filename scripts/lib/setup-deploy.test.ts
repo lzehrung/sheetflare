@@ -11,6 +11,7 @@ import {
   getAdminPagesProjectName,
   getAdminPagesSiteUrl,
   parsePagesProjectList,
+  patchApiConfigForDeploy,
   withPatchedJsonConfig
 } from './setup-deploy';
 
@@ -138,6 +139,33 @@ describe('setup deploy command builders', () => {
 
     expect(result.vars.GOOGLE_CLIENT_EMAIL).toBe('service-account@example.com');
     expect(result.vars.RATE_LIMIT_MAX_REQUESTS).toBe('300');
+  });
+
+  it('patches or removes GOOGLE_CLIENT_EMAIL for API deploys', () => {
+    expect(patchApiConfigForDeploy({
+      name: 'sheetflare-api',
+      vars: {
+        RATE_LIMIT_MAX_REQUESTS: '300'
+      }
+    }, 'service-account@example.com')).toMatchObject({
+      vars: {
+        GOOGLE_CLIENT_EMAIL: 'service-account@example.com',
+        RATE_LIMIT_MAX_REQUESTS: '300'
+      }
+    });
+
+    const namedOnlyConfig = patchApiConfigForDeploy({
+      name: 'sheetflare-api',
+      vars: {
+        GOOGLE_CLIENT_EMAIL: 'stale-default@example.com',
+        RATE_LIMIT_MAX_REQUESTS: '300'
+      }
+    }, null);
+
+    expect(namedOnlyConfig.vars).toMatchObject({
+      RATE_LIMIT_MAX_REQUESTS: '300'
+    });
+    expect((namedOnlyConfig.vars as Record<string, unknown>).GOOGLE_CLIENT_EMAIL).toBeUndefined();
   });
 
   it('removes the temporary patched config after failure', async () => {
