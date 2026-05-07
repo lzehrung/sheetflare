@@ -25,6 +25,38 @@ describe('requestJson', () => {
     );
   });
 
+  it('accepts any configured expected status', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ok: true }, {
+      status: 200
+    })));
+
+    await expect(requestJson({
+      baseUrl: 'https://example.com',
+      path: '/v1/admin/projects?upsert=true',
+      method: 'POST',
+      expectedStatus: [200, 201]
+    })).resolves.toMatchObject({
+      data: {
+        ok: true
+      }
+    });
+  });
+
+  it('formats multiple expected statuses in error messages', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('conflict', {
+      status: 409
+    })));
+
+    await expect(requestJson({
+      baseUrl: 'https://example.com',
+      path: '/v1/admin/projects?upsert=true',
+      method: 'POST',
+      expectedStatus: [200, 201]
+    })).rejects.toThrow(
+      'Expected POST /v1/admin/projects?upsert=true to return 200 or 201, received 409. body=conflict'
+    );
+  });
+
   it('throws a script error when a successful response body is not valid JSON', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>oops</html>', {
       status: 200,
