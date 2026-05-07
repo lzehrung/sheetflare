@@ -53,6 +53,7 @@ export type SetupPromptResult = {
 export type SetupPromptOptions = {
   mode: SetupPromptMode;
   googleCredentialAvailable: boolean;
+  provisionGoogleRequested?: boolean;
 };
 
 export type SetupPrompter = {
@@ -241,7 +242,7 @@ export function buildSetupConfigFromAnswers(answers: SetupAnswers): SetupConfig 
 
 async function promptForBeginnerSetup(
   prompter: SetupPrompter,
-  options: Pick<SetupPromptOptions, 'googleCredentialAvailable'>
+  options: Pick<SetupPromptOptions, 'googleCredentialAvailable' | 'provisionGoogleRequested'>
 ): Promise<SetupPromptResult> {
   const spreadsheetIdOrUrl = await prompter.text({
     message: 'Google Sheet URL or spreadsheet ID',
@@ -272,12 +273,15 @@ async function promptForBeginnerSetup(
       return null;
     }
   });
-  const provisionGoogle = options.googleCredentialAvailable
-    ? false
-    : await prompter.confirm({
+  let provisionGoogle = false;
+  if (!options.googleCredentialAvailable && options.provisionGoogleRequested) {
+    provisionGoogle = true;
+  } else if (!options.googleCredentialAvailable) {
+    provisionGoogle = await prompter.confirm({
         message: 'Set up Google credentials automatically with gcloud',
         defaultValue: true
       });
+  }
 
   return {
     config: buildBeginnerSetupConfigFromAnswers({

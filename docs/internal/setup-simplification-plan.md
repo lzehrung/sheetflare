@@ -1,6 +1,6 @@
 # Setup Simplification Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Implementation note:** Work through this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the default Sheetflare setup path easy for a nontechnical operator who wants one Google Sheet tab exposed as an API, while preserving every advanced customization through explicit config and advanced flags.
 

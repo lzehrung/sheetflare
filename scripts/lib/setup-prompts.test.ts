@@ -299,6 +299,21 @@ describe('promptForSetup', () => {
     expect(result.provisionGoogle).toBe(false);
   });
 
+  it('does not ask about Google provisioning when the CLI already requested it', async () => {
+    const { prompter, confirmPrompts } = createFakePrompter({
+      textResponses: ['sheet-1', 'Users', 'name']
+    });
+
+    const result = await promptForSetup(prompter, {
+      mode: 'beginner',
+      googleCredentialAvailable: false,
+      provisionGoogleRequested: true
+    });
+
+    expect(confirmPrompts).toEqual([]);
+    expect(result.provisionGoogle).toBe(true);
+  });
+
   it('preserves the advanced setup prompt actions', async () => {
     const { prompter } = createFakePrompter({
       textResponses: [

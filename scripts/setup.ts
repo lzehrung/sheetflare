@@ -109,7 +109,7 @@ function formatWranglerAuthRequiredMessage(beginnerSetupStarted: boolean) {
 function assertRealGoogleClientEmail(value: string | null) {
   if (!value) {
     throw new ScriptError(
-      'Deploy needs a real Google service-account email. Run npm run setup -- --apply-secrets --provision-google, set GOOGLE_APPLICATION_CREDENTIALS, or set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY before deploying.'
+      'Deploy needs a real Google service-account email. Run npm run setup -- --apply-secrets --provision-google before deploying, or set GOOGLE_CLIENT_EMAIL to the real service-account email.'
     );
   }
 
@@ -325,7 +325,8 @@ async function main() {
       beginnerSetupStarted = promptMode === 'beginner';
       const promptResult = await promptForSetup(prompter, {
         mode: promptMode,
-        googleCredentialAvailable: hasSetupGoogleCredential(localState)
+        googleCredentialAvailable: hasSetupGoogleCredential(localState),
+        provisionGoogleRequested: provisionGoogle
       });
       if (promptResult.provisionGoogle && !provisionGoogle) {
         provisionGoogle = true;
