@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ScriptError, getFirstEnv, redactSecret, requestJson, requireAdminCredential, requireEnv, shouldShowSecrets } from './runtime';
+import { ScriptError, getFirstEnv, logStep, redactSecret, requestJson, requireAdminCredential, requireEnv, shouldShowSecrets } from './runtime';
 
 describe('requestJson', () => {
   afterEach(() => {
@@ -147,5 +147,19 @@ describe('secret helpers', () => {
     process.env.SHEETFLARE_SHOW_SECRETS = 'true';
 
     expect(shouldShowSecrets()).toBe(true);
+  });
+});
+
+describe('terminal log helpers', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('uses neutral labels outside the setup script', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    logStep('Checking cache');
+
+    expect(log).toHaveBeenCalledWith('\n[step] Checking cache');
   });
 });

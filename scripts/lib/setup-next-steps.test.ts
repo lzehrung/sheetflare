@@ -21,15 +21,28 @@ describe('formatBeginnerSetupNextSteps', () => {
       adminUrl: 'https://sheetflare-admin.pages.dev'
     })).toEqual([
       'Beginner setup complete.',
-      '1. API URL: https://sheetflare-api.example.workers.dev',
-      '2. Admin URL: https://sheetflare-admin.pages.dev',
-      '3. Run npm run doctor any time you want to re-check this deployment.'
+      '1. Share your Google Sheet with service-account@example.com as Editor.',
+      '2. API URL: https://sheetflare-api.example.workers.dev',
+      '3. Admin URL: https://sheetflare-admin.pages.dev',
+      '4. Run npm run doctor any time you want to re-check this deployment.'
     ]);
   });
 
   it('omits unavailable deployment URLs and keeps the doctor step numbered correctly', () => {
     expect(formatBeginnerSetupNextSteps({
       googleClientEmail: 'service-account@example.com',
+      apiUrl: null,
+      adminUrl: null
+    })).toEqual([
+      'Beginner setup complete.',
+      '1. Share your Google Sheet with service-account@example.com as Editor.',
+      '2. Run npm run doctor any time you want to re-check this deployment.'
+    ]);
+  });
+
+  it('omits the sharing step when the service-account email is unavailable', () => {
+    expect(formatBeginnerSetupNextSteps({
+      googleClientEmail: null,
       apiUrl: null,
       adminUrl: null
     })).toEqual([

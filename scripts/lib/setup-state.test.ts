@@ -6,6 +6,7 @@ import {
   createSetupLocalState,
   createSetupLocalStateFromUnknown,
   getSetupLocalStatePath,
+  mergeSetupLocalState,
   readSetupLocalState,
   redactSetupLocalState,
   writeSetupLocalState
@@ -35,6 +36,18 @@ describe('setup local state', () => {
     expect(getSetupLocalStatePath(configPath)).toBe(join(dir, '.sheetflare.setup.local.json'));
   });
 
+  it('removes null update keys when merging local state updates', () => {
+    expect(mergeSetupLocalState({
+      googleClientEmail: 'service-account@example.com',
+      apiUrl: 'https://old.example.workers.dev'
+    }, createSetupLocalState({
+      googleClientEmail: null,
+      apiUrl: 'https://new.example.workers.dev'
+    }))).toEqual({
+      apiUrl: 'https://new.example.workers.dev'
+    });
+  });
+
   it('redacts secret values for terminal summaries', () => {
     expect(redactSetupLocalState({
       googleClientEmail: 'service-account@example.iam.gserviceaccount.com',
@@ -56,6 +69,16 @@ describe('setup local state', () => {
     })).toEqual({
       apiUrl: 'https://example.workers.dev',
       adminUiUsername: 'operator@example.com'
+    });
+  });
+
+  it('removes keys explicitly set to null when writing local state updates', () => {
+    expect(createSetupLocalState({
+      googleClientEmail: null,
+      apiUrl: 'https://example.workers.dev'
+    })).toEqual({
+      googleClientEmail: null,
+      apiUrl: 'https://example.workers.dev'
     });
   });
 

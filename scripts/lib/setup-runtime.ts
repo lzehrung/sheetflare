@@ -1,5 +1,5 @@
 import { getEnv } from './runtime';
-import { createSetupLocalState, redactSetupLocalState, type SetupLocalState } from './setup-state';
+import { createSetupLocalState, mergeSetupLocalState, redactSetupLocalState, type SetupLocalState } from './setup-state';
 import { getNamedGoogleCredentialsStatus, type GoogleCredentialSourceStatus } from './setup-google';
 
 export type ResolvedSetupRuntimeState = {
@@ -97,10 +97,13 @@ export function summarizeSetupSecrets(options: {
     };
   }
 
-  const redactedLocalState = redactSetupLocalState(createSetupLocalState({
-    adminUiUsername: options.adminUiUsername,
-    adminUiPassword: options.adminUiPassword
-  }));
+  const redactedLocalState = redactSetupLocalState(mergeSetupLocalState(
+    null,
+    createSetupLocalState({
+      adminUiUsername: options.adminUiUsername,
+      adminUiPassword: options.adminUiPassword
+    })
+  ));
 
   return {
     adminUiUsername: redactedLocalState.adminUiUsername,

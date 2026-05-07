@@ -16,6 +16,11 @@ export function formatBeginnerSetupNextSteps(input: BeginnerSetupNextStepsInput)
   const lines = ['Beginner setup complete.'];
   let stepNumber = 1;
 
+  if (input.googleClientEmail) {
+    lines.push(`${stepNumber}. Share your Google Sheet with ${input.googleClientEmail} as Editor.`);
+    stepNumber += 1;
+  }
+
   if (input.apiUrl) {
     lines.push(`${stepNumber}. API URL: ${input.apiUrl}`);
     stepNumber += 1;

@@ -163,9 +163,17 @@ export function assertPresent<T>(value: T | null | undefined, message: string): 
 }
 
 export function logStep(message: string) {
-  console.log(`\nSetup: ${message}`);
+  console.log(`\n[step] ${message}`);
 }
 
 export function logSuccess(message: string) {
+  console.log(`[ok] ${message}`);
+}
+
+export function logSetupStep(message: string) {
+  console.log(`\nSetup: ${message}`);
+}
+
+export function logSetupSuccess(message: string) {
   console.log(`Done: ${message}`);
 }

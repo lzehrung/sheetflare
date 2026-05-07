@@ -26,8 +26,10 @@ import { createSmokeEnv } from './lib/setup-smoke';
 import {
   createSetupLocalState,
   getSetupLocalStatePath,
+  mergeSetupLocalState,
   readSetupLocalState,
   type SetupLocalState,
+  type SetupLocalStateUpdate,
   writeSetupLocalState
 } from './lib/setup-state';
 import {
@@ -42,7 +44,7 @@ import { checkGcloudAuthPrereq, isPlaceholderGoogleClientEmail } from './lib/set
 import { formatBeginnerSetupNextSteps, formatSheetShareInstruction } from './lib/setup-next-steps';
 import { verifyAdminPagesDeployment } from './lib/setup-verify';
 import { getCommandName, runCommand } from './lib/process';
-import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
+import { ScriptError, getEnv, logSetupStep as logStep, logSetupSuccess as logSuccess } from './lib/runtime';
 
 type SetupExecutionSummary = {
   configPath: string;
@@ -177,11 +179,8 @@ async function runSmoke(env: NodeJS.ProcessEnv) {
   }
 }
 
-async function persistLocalState(configPath: string, currentState: SetupLocalState | null, updates: SetupLocalState) {
-  const nextState = {
-    ...(currentState ?? {}),
-    ...updates
-  };
+async function persistLocalState(configPath: string, currentState: SetupLocalState | null, updates: SetupLocalStateUpdate) {
+  const nextState = mergeSetupLocalState(currentState, updates);
   await writeSetupLocalState(configPath, nextState);
   return nextState;
 }
@@ -484,7 +483,7 @@ async function main() {
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
-          googleClientEmail: googleClientEmail ?? undefined,
+          googleClientEmail: googleClientEmail ?? null,
           apiUrl,
           adminUrl,
           adminUiUsername,
