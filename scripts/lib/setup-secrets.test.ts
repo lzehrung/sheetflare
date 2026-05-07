@@ -96,17 +96,30 @@ describe('setup secret command builders', () => {
     expect(result.adminUiPassword).toBeNull();
   });
 
-  it('detects GOOGLE_APPLICATION_CREDENTIALS before offering beginner provisioning', () => {
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = 'C:\\service-account.json';
+  it('detects valid GOOGLE_APPLICATION_CREDENTIALS before offering beginner provisioning', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-secrets-'));
+    tempDirs.push(dir);
+    const credentialsPath = join(dir, 'service-account.json');
+    await writeFile(credentialsPath, JSON.stringify({
+      client_email: 'service-account@example.com',
+      private_key: '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n'
+    }), 'utf8');
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
 
-    expect(hasDefaultGoogleCredentialEnvironment()).toBe(true);
+    expect(await hasDefaultGoogleCredentialEnvironment()).toBe(true);
   });
 
-  it('does not treat the checked-in placeholder client email as a usable credential', () => {
+  it('does not detect invalid GOOGLE_APPLICATION_CREDENTIALS as usable for beginner setup', async () => {
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = join(tmpdir(), 'missing-service-account.json');
+
+    expect(await hasDefaultGoogleCredentialEnvironment()).toBe(false);
+  });
+
+  it('does not treat the checked-in placeholder client email as a usable credential', async () => {
     process.env.GOOGLE_CLIENT_EMAIL = 'service-account@your-gcp-project.iam.gserviceaccount.com';
     process.env.GOOGLE_PRIVATE_KEY = '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n';
 
-    expect(hasDefaultGoogleCredentialEnvironment()).toBe(false);
+    expect(await hasDefaultGoogleCredentialEnvironment()).toBe(false);
   });
 
   it('fails clearly when noninteractive secret collection lacks Google credentials', async () => {

@@ -82,15 +82,23 @@ export function createBootstrapCommandOptions(env: NodeJS.ProcessEnv) {
   } as const;
 }
 
+const bootstrapResultMarker = '__SHEETFLARE_BOOTSTRAP_RESULT__=';
+
+export function redactBootstrapResultMarker(stdout: string) {
+  return stdout
+    .split(/\r?\n/u)
+    .filter((line) => !line.startsWith(bootstrapResultMarker))
+    .join('\n');
+}
+
 export function parseBootstrapOutput(stdout: string): SetupBootstrapOutput {
-  const marker = '__SHEETFLARE_BOOTSTRAP_RESULT__=';
-  const markerIndex = stdout.lastIndexOf(marker);
+  const markerIndex = stdout.lastIndexOf(bootstrapResultMarker);
   if (markerIndex < 0) {
     throw new Error('Bootstrap output did not include the setup bootstrap result marker.');
   }
 
   const markerLine = stdout
-    .slice(markerIndex + marker.length)
+    .slice(markerIndex + bootstrapResultMarker.length)
     .split(/\r?\n/u, 1)[0];
   if (!markerLine) {
     throw new Error('Bootstrap output marker was present but empty.');

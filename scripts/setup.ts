@@ -4,7 +4,7 @@ import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setup
 import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
 import { confirmSheetShared, createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, recordPrereqResult, type SetupPrereqResult } from './lib/setup-prereqs';
-import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './lib/setup-bootstrap';
+import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput, redactBootstrapResultMarker } from './lib/setup-bootstrap';
 import {
   deployAdminPages,
   deployApiWorker,
@@ -128,9 +128,9 @@ function hasUsableGoogleClientEmail(value: string | null | undefined) {
     && !isPlaceholderGoogleClientEmail(value);
 }
 
-function hasSetupGoogleCredential(localState: SetupLocalState | null) {
+async function hasSetupGoogleCredential(localState: SetupLocalState | null) {
   return hasUsableGoogleClientEmail(localState?.googleClientEmail)
-    || hasDefaultGoogleCredentialEnvironment();
+    || await hasDefaultGoogleCredentialEnvironment();
 }
 
 async function runBootstrap(env: NodeJS.ProcessEnv) {
@@ -143,8 +143,9 @@ async function runBootstrap(env: NodeJS.ProcessEnv) {
     }
   );
   if (result.code !== 0) {
-    if (result.stdout.trim().length > 0) {
-      process.stdout.write(result.stdout);
+    const safeStdout = redactBootstrapResultMarker(result.stdout);
+    if (safeStdout.trim().length > 0) {
+      process.stdout.write(safeStdout);
     }
     if (result.stderr.trim().length > 0) {
       process.stderr.write(result.stderr);
@@ -325,7 +326,7 @@ async function main() {
       beginnerSetupStarted = promptMode === 'beginner';
       const promptResult = await promptForSetup(prompter, {
         mode: promptMode,
-        googleCredentialAvailable: hasSetupGoogleCredential(localState),
+        googleCredentialAvailable: await hasSetupGoogleCredential(localState),
         provisionGoogleRequested: provisionGoogle
       });
       if (promptResult.provisionGoogle && !provisionGoogle) {

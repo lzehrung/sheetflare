@@ -58,7 +58,7 @@ function readEnvValue(name: string) {
   return value && value.length > 0 ? value : null;
 }
 
-export function hasDefaultGoogleCredentialEnvironment() {
+export async function hasDefaultGoogleCredentialEnvironment() {
   const googleClientEmail = readEnvValue('GOOGLE_CLIENT_EMAIL');
   const googlePrivateKey = process.env.GOOGLE_PRIVATE_KEY;
   const hasEmailAndKey = Boolean(
@@ -68,7 +68,21 @@ export function hasDefaultGoogleCredentialEnvironment() {
       && googlePrivateKey.trim().length > 0
   );
 
-  return hasEmailAndKey || Boolean(readEnvValue('GOOGLE_APPLICATION_CREDENTIALS'));
+  if (hasEmailAndKey) {
+    return true;
+  }
+
+  const credentialsPath = readEnvValue('GOOGLE_APPLICATION_CREDENTIALS');
+  if (!credentialsPath) {
+    return false;
+  }
+
+  try {
+    await readServiceAccountFile(credentialsPath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function readServiceAccountFile(path: string) {
@@ -92,7 +106,10 @@ async function readServiceAccountFile(path: string) {
     throw new ScriptError(`Service-account JSON file ${path} must include non-empty client_email and private_key fields.`);
   }
 
-  return parsed as ServiceAccountCredentials;
+  return {
+    client_email: parsed.client_email,
+    private_key: parsed.private_key
+  };
 }
 
 export async function collectAdminSiteSecrets(options: {
