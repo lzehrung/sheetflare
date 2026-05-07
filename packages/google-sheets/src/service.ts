@@ -233,7 +233,7 @@ function parseUpdatedRangeRowNumber(updatedRange: string | undefined): number {
     throw new Error('Google Sheets append response did not include an updated range.');
   }
 
-  const match = updatedRange.match(/![A-Z]+(\d+):/);
+  const match = updatedRange.match(/![A-Z]+(\d+)(?::|$)/);
   if (!match) {
     throw new Error(`Could not parse row number from range: ${updatedRange}`);
   }
