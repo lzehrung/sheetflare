@@ -123,6 +123,22 @@ describe('checkGcloudAuthPrereq', () => {
     });
   });
 
+  it('tells operators to install gcloud when the command is missing', async () => {
+    await expect(checkGcloudAuthPrereq({
+      pythonExecutableResolver: noPythonLookup,
+      commandRunner: vi.fn(async () => ({
+        code: 1,
+        stdout: '',
+        stderr: 'spawn gcloud ENOENT\n'
+      }))
+    })).resolves.toEqual({
+      name: 'gcloud auth',
+      status: 'blocked',
+      summary: 'Google Cloud CLI is not installed or is not on PATH.',
+      remediation: 'Install the Google Cloud CLI, then run gcloud auth login and rerun npm run setup.'
+    });
+  });
+
   it('tells operators how to authenticate gcloud for setup provisioning', async () => {
     await expect(checkGcloudAuthPrereq({
       pythonExecutableResolver: noPythonLookup,

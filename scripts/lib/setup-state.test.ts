@@ -72,7 +72,7 @@ describe('setup local state', () => {
     });
   });
 
-  it('removes keys explicitly set to null when writing local state updates', () => {
+  it('preserves null markers when building local state updates', () => {
     expect(createSetupLocalState({
       googleClientEmail: null,
       apiUrl: 'https://example.workers.dev'

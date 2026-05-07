@@ -246,6 +246,13 @@ function parseLineList(value: string) {
     .filter((entry) => entry.length > 0);
 }
 
+function isMissingGcloudCommand(stderr: string) {
+  const normalized = stderr.toLowerCase();
+  return normalized.includes('spawn gcloud enoent')
+    || normalized.includes('gcloud') && normalized.includes('not recognized')
+    || normalized.includes('gcloud') && normalized.includes('command not found');
+}
+
 function validateServiceAccountKeyJson(path: string, text: string) {
   let parsed: unknown;
   try {
@@ -320,6 +327,15 @@ export async function checkGcloudAuthPrereq(dependencies: GcloudDependencies = {
       status: 'blocked',
       summary: 'Google Cloud CLI is installed but cannot start because it has no usable Python runtime.',
       remediation: 'Install Python 3 and ensure gcloud can see it, or set CLOUDSDK_PYTHON to a working python.exe before running setup.'
+    } as const;
+  }
+
+  if (isMissingGcloudCommand(result.stderr ?? '')) {
+    return {
+      name: 'gcloud auth',
+      status: 'blocked',
+      summary: 'Google Cloud CLI is not installed or is not on PATH.',
+      remediation: 'Install the Google Cloud CLI, then run gcloud auth login and rerun npm run setup.'
     } as const;
   }
 
