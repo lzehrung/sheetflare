@@ -3,6 +3,7 @@ import {
   checkGcloudAuthPrereq,
   createGoogleServiceAccountEmail,
   getNamedGoogleCredentialsStatus,
+  getActiveGcloudProjectId,
   getDefaultGoogleProjectId,
   getDefaultGoogleServiceAccountName,
   isPlaceholderGoogleClientEmail,
@@ -10,6 +11,8 @@ import {
   normalizeGoogleServiceAccountName,
   provisionGoogleServiceAccount
 } from './setup-google';
+
+const noPythonLookup = async () => null;
 
 describe('google setup defaults', () => {
   it('derives production and staging defaults from the setup profile', () => {
@@ -54,9 +57,43 @@ describe('google setup defaults', () => {
   });
 });
 
+describe('getActiveGcloudProjectId', () => {
+  it('returns the active gcloud project when it is valid', async () => {
+    await expect(getActiveGcloudProjectId({
+      pythonExecutableResolver: noPythonLookup,
+      commandRunner: vi.fn(async () => ({
+        code: 0,
+        stdout: 'operator-project\n',
+        stderr: ''
+      }))
+    })).resolves.toBe('operator-project');
+  });
+
+  it('ignores unset or invalid active gcloud projects', async () => {
+    await expect(getActiveGcloudProjectId({
+      pythonExecutableResolver: noPythonLookup,
+      commandRunner: vi.fn(async () => ({
+        code: 0,
+        stdout: '(unset)\n',
+        stderr: ''
+      }))
+    })).resolves.toBeNull();
+
+    await expect(getActiveGcloudProjectId({
+      pythonExecutableResolver: noPythonLookup,
+      commandRunner: vi.fn(async () => ({
+        code: 0,
+        stdout: 'Not Valid\n',
+        stderr: ''
+      }))
+    })).resolves.toBeNull();
+  });
+});
+
 describe('checkGcloudAuthPrereq', () => {
   it('reports ready when gcloud has an active account', async () => {
     await expect(checkGcloudAuthPrereq({
+      pythonExecutableResolver: noPythonLookup,
       commandRunner: vi.fn(async () => ({
         code: 0,
         stdout: 'user@example.com\n',
@@ -72,6 +109,7 @@ describe('checkGcloudAuthPrereq', () => {
 
   it('reports a Python-specific remediation when gcloud cannot start', async () => {
     await expect(checkGcloudAuthPrereq({
+      pythonExecutableResolver: noPythonLookup,
       commandRunner: vi.fn(async () => ({
         code: 1,
         stdout: '',
@@ -87,6 +125,7 @@ describe('checkGcloudAuthPrereq', () => {
 
   it('tells operators how to authenticate gcloud for setup provisioning', async () => {
     await expect(checkGcloudAuthPrereq({
+      pythonExecutableResolver: noPythonLookup,
       commandRunner: vi.fn(async () => ({
         code: 1,
         stdout: '',

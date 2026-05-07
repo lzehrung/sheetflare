@@ -8,6 +8,7 @@ import {
   buildApiSecretCommands,
   collectAdminSiteSecrets,
   collectSetupSecrets,
+  hasDefaultGoogleCredentialEnvironment,
   requireAdminSiteSecrets
 } from './setup-secrets';
 
@@ -95,6 +96,19 @@ describe('setup secret command builders', () => {
     expect(result.adminUiPassword).toBeNull();
   });
 
+  it('detects GOOGLE_APPLICATION_CREDENTIALS before offering beginner provisioning', () => {
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = 'C:\\service-account.json';
+
+    expect(hasDefaultGoogleCredentialEnvironment()).toBe(true);
+  });
+
+  it('does not treat the checked-in placeholder client email as a usable credential', () => {
+    process.env.GOOGLE_CLIENT_EMAIL = 'service-account@your-gcp-project.iam.gserviceaccount.com';
+    process.env.GOOGLE_PRIVATE_KEY = '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n';
+
+    expect(hasDefaultGoogleCredentialEnvironment()).toBe(false);
+  });
+
   it('fails clearly when noninteractive secret collection lacks Google credentials', async () => {
     await expect(collectSetupSecrets({
       prompter: null,
@@ -143,13 +157,14 @@ describe('setup secret command builders', () => {
     });
   });
 
-  it('can provision Google credentials from defaults without asking for project details', async () => {
-    const prompts: string[] = [];
+  it('asks for a beginner provisioning project id and defaults to the active gcloud project', async () => {
+    const textPrompts: Array<{ message: string; defaultValue?: string }> = [];
+    const confirmPrompts: string[] = [];
     const provisionGoogleServiceAccountSpy = vi.fn(async () => ({
-      googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+      googleClientEmail: 'sheetflare-prod@operator-project.iam.gserviceaccount.com',
       googlePrivateKey: '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n',
-      projectId: 'sheetflare-prod',
-      serviceAccountEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+      projectId: 'operator-project',
+      serviceAccountEmail: 'sheetflare-prod@operator-project.iam.gserviceaccount.com',
       createdProject: true,
       createdServiceAccount: true
     }));
@@ -157,11 +172,14 @@ describe('setup secret command builders', () => {
     const result = await collectSetupSecrets({
       prompter: {
         async text(options) {
-          prompts.push(options.message);
-          throw new Error(`Unexpected prompt: ${options.message}`);
+          textPrompts.push({
+            message: options.message,
+            ...(options.defaultValue !== undefined ? { defaultValue: options.defaultValue } : {})
+          });
+          return 'operator-project';
         },
         async confirm(options) {
-          prompts.push(options.message);
+          confirmPrompts.push(options.message);
           throw new Error(`Unexpected prompt: ${options.message}`);
         }
       },
@@ -177,14 +195,21 @@ describe('setup secret command builders', () => {
         status: 'ready',
         summary: 'Google Cloud authentication is available for setup provisioning.',
         remediation: null
-      } as const))
+      } as const)),
+      googleProjectIdResolver: vi.fn(async () => 'active-project')
     });
 
-    expect(prompts).toEqual([]);
-    expect(result.googleClientEmail).toBe('sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com');
+    expect(textPrompts).toEqual([
+      {
+        message: 'Google Cloud project ID (must be globally unique)',
+        defaultValue: 'active-project'
+      }
+    ]);
+    expect(confirmPrompts).toEqual([]);
+    expect(result.googleClientEmail).toBe('sheetflare-prod@operator-project.iam.gserviceaccount.com');
     expect(provisionGoogleServiceAccountSpy).toHaveBeenCalledWith({
       profile: 'production',
-      projectId: 'sheetflare-prod',
+      projectId: 'operator-project',
       serviceAccountName: 'sheetflare-prod'
     });
   });

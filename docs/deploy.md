@@ -92,7 +92,7 @@ Explicit override example:
 npm run setup -- --apply-secrets --provision-google --google-project my-prod-project --google-service-account sheetflare-prod
 ```
 
-Setup keeps the generated private key ephemeral, writes only the service-account email into local setup state, and still expects you to share the spreadsheet with that email afterward.
+Setup keeps the generated private key ephemeral, writes only the service-account email into local setup state, and still expects you to share the spreadsheet with that email afterward. Interactive provisioning asks for the Google Cloud project ID and defaults to your active `gcloud` project when one is configured.
 
 Setup cannot share the spreadsheet automatically. Share each managed spreadsheet with the printed service-account email as `Editor` before bootstrap and smoke validation can succeed.
 

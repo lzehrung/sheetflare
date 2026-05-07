@@ -307,6 +307,32 @@ export async function checkGcloudAuthPrereq(dependencies: GcloudDependencies = {
   } as const;
 }
 
+export async function getActiveGcloudProjectId(dependencies: GcloudDependencies = {}) {
+  const result = await runGcloudCommand(
+    ['config', 'get-value', 'project'],
+    dependencies,
+    {
+      echoStdout: false,
+      echoStderr: false
+    }
+  );
+
+  if (result.code !== 0) {
+    return null;
+  }
+
+  const projectId = result.stdout.trim();
+  if (projectId.length === 0 || projectId === '(unset)') {
+    return null;
+  }
+
+  try {
+    return normalizeGoogleProjectId(projectId);
+  } catch {
+    return null;
+  }
+}
+
 export type ProvisionGoogleServiceAccountOptions = {
   profile: string;
   projectId: string;

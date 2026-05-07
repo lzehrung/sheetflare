@@ -13,11 +13,8 @@ export function formatSheetShareInstruction(googleClientEmail: string | null) {
 }
 
 export function formatBeginnerSetupNextSteps(input: BeginnerSetupNextStepsInput) {
-  const lines = ['Beginner setup next steps:'];
+  const lines = ['Beginner setup complete.'];
   let stepNumber = 1;
-
-  lines.push(`${stepNumber}. ${formatSheetShareInstruction(input.googleClientEmail)}`);
-  stepNumber += 1;
 
   if (input.apiUrl) {
     lines.push(`${stepNumber}. API URL: ${input.apiUrl}`);

@@ -49,6 +49,7 @@ Recommended approach: **guided default setup with explicit advanced escape hatch
   - sheet tab name
   - writable smoke-test column
   - whether setup should provision Google credentials when none are available
+  - Google Cloud project ID when setup provisions Google credentials
 - Beginner defaults:
   - `profile`: `production`
   - private project slug/name: `main` / `Main`
@@ -203,6 +204,7 @@ export type SetupPromptMode = 'beginner' | 'advanced';
   - `Existing Google Sheets tab name`
   - `Writable sheet column to use for setup validation`
   - `Provision Google Cloud credentials now` only when no usable Google credential is already visible from environment/local state
+  - `Google Cloud project ID (must be globally unique)` only after the operator chooses Google provisioning
 - [x] Beginner mode should return actions:
 
 ```ts

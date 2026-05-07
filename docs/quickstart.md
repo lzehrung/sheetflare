@@ -38,6 +38,8 @@ gcloud auth login
 
 If you already have a service-account JSON file, you can skip `gcloud auth login`. When setup asks whether to provision Google Cloud credentials, choose `No`; setup will then ask for the file path.
 
+If setup provisions Google Cloud credentials, it will ask for the Google Cloud project ID to use. Project IDs are globally unique; setup defaults to your active `gcloud` project when one is configured.
+
 ## 3. Run Setup
 
 ```powershell
@@ -50,6 +52,7 @@ For a first run with no `sheetflare.setup.json`, setup asks only for:
 - existing tab name
 - writable column to use for setup validation
 - whether to provision Google Cloud credentials, when no credential is already available
+- Google Cloud project ID, when setup provisions Google Cloud credentials
 
 Beginner setup then uses safe defaults:
 

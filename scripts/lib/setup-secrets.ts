@@ -2,8 +2,10 @@ import { readFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import {
   checkGcloudAuthPrereq,
+  getActiveGcloudProjectId,
   getDefaultGoogleProjectId,
   getDefaultGoogleServiceAccountName,
+  isPlaceholderGoogleClientEmail,
   normalizeGoogleProjectId,
   normalizeGoogleServiceAccountName,
   provisionGoogleServiceAccount,
@@ -53,6 +55,19 @@ function generateSecretToken(byteLength = 32) {
 function readEnvValue(name: string) {
   const value = process.env[name]?.trim();
   return value && value.length > 0 ? value : null;
+}
+
+export function hasDefaultGoogleCredentialEnvironment() {
+  const googleClientEmail = readEnvValue('GOOGLE_CLIENT_EMAIL');
+  const googlePrivateKey = process.env.GOOGLE_PRIVATE_KEY;
+  const hasEmailAndKey = Boolean(
+    googleClientEmail
+      && !isPlaceholderGoogleClientEmail(googleClientEmail)
+      && googlePrivateKey
+      && googlePrivateKey.trim().length > 0
+  );
+
+  return hasEmailAndKey || Boolean(readEnvValue('GOOGLE_APPLICATION_CREDENTIALS'));
 }
 
 async function readServiceAccountFile(path: string) {
@@ -146,6 +161,7 @@ export async function collectSetupSecrets(options: {
   googleProvisioning?: GoogleProvisioningOptions;
   googleProvisioner?: typeof provisionGoogleServiceAccount;
   gcloudAuthChecker?: typeof checkGcloudAuthPrereq;
+  googleProjectIdResolver?: typeof getActiveGcloudProjectId;
 }) : Promise<SetupSecrets> {
   const envGoogleClientEmail = readEnvValue('GOOGLE_CLIENT_EMAIL');
   const envGooglePrivateKey = process.env.GOOGLE_PRIVATE_KEY;
@@ -225,6 +241,7 @@ async function maybeProvisionGoogleCredentials(options: {
   googleProvisioning?: GoogleProvisioningOptions;
   googleProvisioner?: typeof provisionGoogleServiceAccount;
   gcloudAuthChecker?: typeof checkGcloudAuthPrereq;
+  googleProjectIdResolver?: typeof getActiveGcloudProjectId;
 }): Promise<ProvisionGoogleServiceAccountResult | null> {
   const provisioning = options.googleProvisioning;
   if (!provisioning) {
@@ -241,7 +258,9 @@ async function maybeProvisionGoogleCredentials(options: {
     return null;
   }
 
-  const defaultProjectId = getDefaultGoogleProjectId(provisioning.profile);
+  const googleProjectIdResolver = options.googleProjectIdResolver ?? getActiveGcloudProjectId;
+  const activeProjectId = provisioning.projectId ? null : await googleProjectIdResolver();
+  const defaultProjectId = activeProjectId ?? getDefaultGoogleProjectId(provisioning.profile);
   const defaultServiceAccountName = getDefaultGoogleServiceAccountName(provisioning.profile);
 
   if (!options.prompter) {
@@ -272,9 +291,23 @@ async function maybeProvisionGoogleCredentials(options: {
   }
 
   if (provisioning.promptForDetails === false) {
+    const projectId = provisioning.projectId
+      ?? await options.prompter.text({
+        message: 'Google Cloud project ID (must be globally unique)',
+        defaultValue: defaultProjectId,
+        validate: (value) => {
+          try {
+            normalizeGoogleProjectId(value);
+            return null;
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        }
+      });
+
     return googleProvisioner({
       profile: provisioning.profile,
-      projectId: normalizeGoogleProjectId(provisioning.projectId ?? defaultProjectId),
+      projectId: normalizeGoogleProjectId(projectId),
       serviceAccountName: normalizeGoogleServiceAccountName(provisioning.serviceAccountName ?? defaultServiceAccountName)
     });
   }

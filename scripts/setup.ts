@@ -19,6 +19,7 @@ import {
   applyApiSecrets,
   collectAdminSiteSecrets,
   collectSetupSecrets,
+  hasDefaultGoogleCredentialEnvironment,
   requireAdminSiteSecrets
 } from './lib/setup-secrets';
 import { createSmokeEnv } from './lib/setup-smoke';
@@ -126,7 +127,7 @@ function hasUsableGoogleClientEmail(value: string | null | undefined) {
 
 function hasSetupGoogleCredential(localState: SetupLocalState | null) {
   return hasUsableGoogleClientEmail(localState?.googleClientEmail)
-    || hasUsableGoogleClientEmail(getEnv('GOOGLE_CLIENT_EMAIL'));
+    || hasDefaultGoogleCredentialEnvironment();
 }
 
 async function runBootstrap(env: NodeJS.ProcessEnv) {
@@ -617,19 +618,6 @@ async function main() {
       })
     });
 
-    if (beginnerSetupStarted) {
-      console.log('');
-      for (const line of formatBeginnerSetupNextSteps({
-        googleClientEmail: setupSecrets?.googleClientEmail
-          ?? localState?.googleClientEmail
-          ?? resolvedRuntimeState.googleClientEmail,
-        apiUrl,
-        adminUrl
-      })) {
-        console.log(line);
-      }
-    }
-
     if (actions.verifyNow) {
       logStep('Verifying setup-managed environment');
       const verificationResults = await runSetupDoctor({
@@ -645,6 +633,19 @@ async function main() {
       }
 
       logSuccess('Setup verification completed without warnings or blocking issues');
+    }
+
+    if (beginnerSetupStarted) {
+      console.log('');
+      for (const line of formatBeginnerSetupNextSteps({
+        googleClientEmail: setupSecrets?.googleClientEmail
+          ?? localState?.googleClientEmail
+          ?? resolvedRuntimeState.googleClientEmail,
+        apiUrl,
+        adminUrl
+      })) {
+        console.log(line);
+      }
     }
   } finally {
     prompter?.close?.();

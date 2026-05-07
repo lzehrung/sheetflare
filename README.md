@@ -91,7 +91,7 @@ npm run setup
 
 `npx wrangler login` is fine for interactive local use. Expect to log back in periodically when using Wrangler's OAuth session. For unattended deploys or CI, prefer `CLOUDFLARE_API_TOKEN`.
 
-Use `--google-project` and `--google-service-account` when you want explicit names instead of the default profile-derived ones such as `sheetflare-prod` or `sheetflare-staging`.
+Use `--google-project` and `--google-service-account` when you want explicit names. Interactive provisioning defaults the project prompt from your active `gcloud` project when available; noninteractive provisioning otherwise falls back to profile-derived names such as `sheetflare-prod` or `sheetflare-staging`.
 
 If you are maintaining this repository's own shared staging environment, use [docs/contributor-staging.md](./docs/contributor-staging.md).
 
