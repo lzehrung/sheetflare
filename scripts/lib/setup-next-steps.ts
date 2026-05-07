@@ -1,12 +1,22 @@
+import { isPlaceholderGoogleClientEmail } from './setup-google';
+
 export type BeginnerSetupNextStepsInput = {
   googleClientEmail: string | null;
   apiUrl: string | null;
   adminUrl: string | null;
 };
 
+function getUsableGoogleClientEmail(value: string | null) {
+  if (!value || isPlaceholderGoogleClientEmail(value)) {
+    return null;
+  }
+  return value;
+}
+
 export function formatSheetShareInstruction(googleClientEmail: string | null) {
-  if (googleClientEmail) {
-    return `Share your Google Sheet with ${googleClientEmail} as Editor before bootstrap or smoke validation.`;
+  const usableEmail = getUsableGoogleClientEmail(googleClientEmail);
+  if (usableEmail) {
+    return `Share your Google Sheet with ${usableEmail} as Editor before bootstrap or smoke validation.`;
   }
 
   return 'Add Google service-account credentials, then share your Google Sheet with that service-account email as Editor before bootstrap or smoke validation.';
@@ -15,9 +25,10 @@ export function formatSheetShareInstruction(googleClientEmail: string | null) {
 export function formatBeginnerSetupNextSteps(input: BeginnerSetupNextStepsInput) {
   const lines = ['Beginner setup complete.'];
   let stepNumber = 1;
+  const usableEmail = getUsableGoogleClientEmail(input.googleClientEmail);
 
-  if (input.googleClientEmail) {
-    lines.push(`${stepNumber}. Share your Google Sheet with ${input.googleClientEmail} as Editor.`);
+  if (usableEmail) {
+    lines.push(`${stepNumber}. Share your Google Sheet with ${usableEmail} as Editor.`);
     stepNumber += 1;
   }
 

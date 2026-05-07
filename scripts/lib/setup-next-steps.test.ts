@@ -11,6 +11,11 @@ describe('formatSheetShareInstruction', () => {
     expect(formatSheetShareInstruction(null))
       .toBe('Add Google service-account credentials, then share your Google Sheet with that service-account email as Editor before bootstrap or smoke validation.');
   });
+
+  it('prints a credential-first instruction for the checked-in placeholder email', () => {
+    expect(formatSheetShareInstruction('service-account@your-gcp-project.iam.gserviceaccount.com'))
+      .toBe('Add Google service-account credentials, then share your Google Sheet with that service-account email as Editor before bootstrap or smoke validation.');
+  });
 });
 
 describe('formatBeginnerSetupNextSteps', () => {
@@ -48,6 +53,18 @@ describe('formatBeginnerSetupNextSteps', () => {
     })).toEqual([
       'Beginner setup complete.',
       '1. Run npm run doctor any time you want to re-check this deployment.'
+    ]);
+  });
+
+  it('omits the sharing step when the service-account email is the checked-in placeholder', () => {
+    expect(formatBeginnerSetupNextSteps({
+      googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
+      apiUrl: 'https://sheetflare-api.example.workers.dev',
+      adminUrl: null
+    })).toEqual([
+      'Beginner setup complete.',
+      '1. API URL: https://sheetflare-api.example.workers.dev',
+      '2. Run npm run doctor any time you want to re-check this deployment.'
     ]);
   });
 });
