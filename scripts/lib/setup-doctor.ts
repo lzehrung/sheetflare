@@ -148,12 +148,19 @@ export async function runSetupDoctor(options: {
   const usesNamedGoogleCredential = [...configuredRefs].some((ref) => ref !== 'default');
   const hasDefaultGoogleCredential = Boolean(googleClientEmail) && !isPlaceholderGoogleClientEmail(googleClientEmail);
 
-  if (usesDefaultGoogleCredential && !googleClientEmail) {
+  if (usesDefaultGoogleCredential && !googleClientEmail && !options.runtimeState.apiUrl) {
     results.push(createResult(
       'Google credential',
       'blocked',
       'A configured project uses the default Google credential, but no default Google service-account email is available from local setup state or the environment.',
       'Run npm run setup -- --apply-secrets --provision-google, or set a real GOOGLE_CLIENT_EMAIL before deploy/bootstrap.'
+    ));
+  } else if (usesDefaultGoogleCredential && !googleClientEmail) {
+    results.push(createResult(
+      'Google credential',
+      'ready',
+      'A configured project uses the default Google credential; deployed Worker readiness will verify that credential because the local service-account email is not available.',
+      null
     ));
   } else if (usesDefaultGoogleCredential && googleClientEmail && isPlaceholderGoogleClientEmail(googleClientEmail)) {
     results.push(createResult(

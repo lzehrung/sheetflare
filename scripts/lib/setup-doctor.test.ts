@@ -161,6 +161,76 @@ describe('runSetupDoctor', () => {
     );
   });
 
+  it('allows deployed readiness to verify a secret-backed default Google credential', async () => {
+    const results = await runSetupDoctor({
+      config: {
+        ...baseConfig,
+        deploy: {
+          api: true,
+          admin: false
+        }
+      },
+      runtimeState: {
+        googleClientEmail: null,
+        namedGoogleCredentials: 'missing',
+        apiUrl: 'https://sheetflare-api.example.workers.dev',
+        adminUrl: null,
+        adminBearerToken: 'bootstrap.secret',
+        adminUiUsername: null,
+        adminUiPassword: null,
+        adminApiKey: 'sfk_admin.secret',
+        privateReadKey: null,
+        mutationKey: null
+      },
+      prereqResults: []
+    }, {
+      fetchReady: vi.fn(async () => ({
+        ok: true,
+        checks: {
+          defaultGoogleCredential: 'configured' as const,
+          namedGoogleCredentials: 'missing' as const,
+          googleDriveWebhookSecret: 'configured' as const,
+          bootstrapAdmin: 'configured' as const
+        },
+        notes: []
+      })),
+      listDriveWatches: vi.fn(async () => [
+        {
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef: 'default',
+          channelId: 'channel-1',
+          resourceId: 'resource-1',
+          resourceUri: null,
+          expirationAt: '2099-05-01T00:00:00.000Z',
+          lastWatchError: null,
+          lastNotificationAt: null,
+          pendingChangedAt: null,
+          debounceUntil: null,
+          lastReindexStartedAt: null,
+          lastReindexCompletedAt: null,
+          lastReindexError: null,
+          projectSlugs: ['sheetflare-prod']
+        }
+      ]),
+      listDriveWatchRetryAdvice: vi.fn(async () => activeRetryAdvice())
+    });
+
+    expect(results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'Google credential',
+          status: 'ready',
+          summary: expect.stringContaining('deployed Worker readiness will verify')
+        }),
+        expect.objectContaining({
+          name: 'API readiness',
+          status: 'ready'
+        })
+      ])
+    );
+    expect(getSetupDoctorFailureMessage(results)).toBeNull();
+  });
+
   it('warns when Drive watch status is missing for the configured spreadsheet', async () => {
     const results = await runSetupDoctor({
       config: baseConfig,
