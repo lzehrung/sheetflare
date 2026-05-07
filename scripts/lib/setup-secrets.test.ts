@@ -247,12 +247,12 @@ describe('setup secret command builders', () => {
         profile: 'production',
         allowInteractivePrompt: false
       },
-      gcloudAuthChecker: vi.fn(async () => ({
-        name: 'gcloud auth',
-        status: 'ready',
-        summary: 'Google Cloud authentication is available for setup provisioning.',
-        remediation: null
-      } as const))
+      gcloudAuthChecker: vi.fn(async () => {
+        throw new Error('gcloud auth should not run when provisioning prompts are disabled.');
+      }),
+      googleProjectIdResolver: vi.fn(async () => {
+        throw new Error('gcloud project lookup should not run when provisioning prompts are disabled.');
+      })
     });
 
     expect(prompts).not.toContain('Provision a Google Cloud project and service account with gcloud now');

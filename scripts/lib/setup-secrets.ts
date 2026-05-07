@@ -249,6 +249,10 @@ async function maybeProvisionGoogleCredentials(options: {
     return null;
   }
 
+  if (!provisioning.enabled && provisioning.allowInteractivePrompt === false) {
+    return null;
+  }
+
   const gcloudAuthChecker = options.gcloudAuthChecker ?? checkGcloudAuthPrereq;
   const googleProvisioner = options.googleProvisioner ?? provisionGoogleServiceAccount;
   const debug = Boolean(provisioning.debug);
