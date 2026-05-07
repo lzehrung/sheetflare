@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -31,6 +31,7 @@ type GcloudDependencies = {
   readTextFile?: (path: string) => Promise<string>;
   removePath?: (path: string) => Promise<void>;
   pythonExecutableResolver?: () => Promise<string | null>;
+  debug?: boolean;
 };
 
 type ServiceAccountKeyJson = {
@@ -144,6 +145,11 @@ export function createGoogleServiceAccountDisplayName(profile: string) {
 }
 
 async function defaultPythonExecutableResolver() {
+  const pyenvPython = await resolvePyenvPythonExecutable();
+  if (pyenvPython) {
+    return pyenvPython;
+  }
+
   try {
     const result = await execFileAsync('python', ['-c', 'import sys; print(sys.executable)'], {
       encoding: 'utf8',
@@ -151,6 +157,30 @@ async function defaultPythonExecutableResolver() {
     });
     const executable = result.stdout.trim();
     return executable.length > 0 ? executable : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolvePyenvPythonExecutable() {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+
+  const pyenvRoot = process.env.PYENV_ROOT?.trim() || process.env.PYENV_HOME?.trim() || process.env.PYENV?.trim();
+  if (!pyenvRoot) {
+    return null;
+  }
+
+  try {
+    const version = (await readFile(join(pyenvRoot, 'version'), 'utf8')).trim().split(/\s+/)[0];
+    if (!version) {
+      return null;
+    }
+
+    const candidate = join(pyenvRoot, 'versions', version, 'python.exe');
+    await access(candidate);
+    return candidate;
   } catch {
     return null;
   }
@@ -200,10 +230,12 @@ async function runGcloudCommand(
 ) {
   const commandRunner = dependencies.commandRunner ?? defaultCommandRunner;
   const gcloudEnv = await createGcloudEnvironment(dependencies);
+  const echoStdout = options?.echoStdout ?? Boolean(dependencies.debug);
+  const echoStderr = options?.echoStderr ?? Boolean(dependencies.debug);
   return commandRunner(getCommandName('gcloud'), args, {
     env: gcloudEnv,
-    ...(options?.echoStdout !== undefined ? { echoStdout: options.echoStdout } : {}),
-    ...(options?.echoStderr !== undefined ? { echoStderr: options.echoStderr } : {})
+    echoStdout,
+    echoStderr
   });
 }
 
@@ -250,11 +282,7 @@ async function waitForServiceAccountVisibility(
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const listResult = await runGcloudCommand(
       ['iam', 'service-accounts', 'list', '--project', projectId, '--format=value(email)'],
-      dependencies,
-      {
-        echoStdout: false,
-        echoStderr: false
-      }
+      dependencies
     );
     if (listResult.code === 0) {
       const emails = new Set(parseLineList(listResult.stdout));
@@ -274,11 +302,7 @@ async function waitForServiceAccountVisibility(
 export async function checkGcloudAuthPrereq(dependencies: GcloudDependencies = {}) {
   const result = await runGcloudCommand(
     ['auth', 'list', '--filter=status:ACTIVE', '--format=value(account)'],
-    dependencies,
-    {
-      echoStdout: false,
-      echoStderr: false
-    }
+    dependencies
   );
 
   if (result.code === 0 && result.stdout.trim().length > 0) {
@@ -310,11 +334,7 @@ export async function checkGcloudAuthPrereq(dependencies: GcloudDependencies = {
 export async function getActiveGcloudProjectId(dependencies: GcloudDependencies = {}) {
   const result = await runGcloudCommand(
     ['config', 'get-value', 'project'],
-    dependencies,
-    {
-      echoStdout: false,
-      echoStderr: false
-    }
+    dependencies
   );
 
   if (result.code !== 0) {
@@ -358,11 +378,7 @@ export async function provisionGoogleServiceAccount(
 
   const projectListResult = await runGcloudCommand(
     ['projects', 'list', `--filter=projectId=${projectId}`, '--format=value(projectId)'],
-    dependencies,
-    {
-      echoStdout: false,
-      echoStderr: false
-    }
+    dependencies
   );
   if (projectListResult.code !== 0) {
     throw new ScriptError(`Failed to inspect Google Cloud projects for ${projectId}.`);
@@ -389,11 +405,7 @@ export async function provisionGoogleServiceAccount(
 
   const serviceAccountListResult = await runGcloudCommand(
     ['iam', 'service-accounts', 'list', '--project', projectId, '--format=value(email)'],
-    dependencies,
-    {
-      echoStdout: false,
-      echoStderr: false
-    }
+    dependencies
   );
   if (serviceAccountListResult.code !== 0) {
     throw new ScriptError(`Failed to inspect Google service accounts for ${projectId}.`);

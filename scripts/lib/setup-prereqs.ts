@@ -34,6 +34,7 @@ type SetupPrereqDependencies = {
 type SetupPrereqOptions = {
   includeWranglerAuth?: boolean;
   includeGcloudAuth?: boolean;
+  debug?: boolean;
 };
 
 export async function runPrereqCommand(command: string, args: string[]) {
@@ -137,7 +138,8 @@ export async function checkSetupPrereqsWithOptions(
 
   if (options.includeGcloudAuth) {
     results.push(await checkGcloudAuthPrereq({
-      commandRunner
+      commandRunner,
+      debug: Boolean(options.debug)
     }));
   }
 

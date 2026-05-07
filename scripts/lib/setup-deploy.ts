@@ -117,13 +117,14 @@ export function parsePagesProjectList(output: string) {
   });
 }
 
-export async function listPagesProjects() {
+export async function listPagesProjects(options: { debug?: boolean } = {}) {
   const result = await runCommand(
     getCommandName('npx'),
     buildPagesProjectListCommand(),
     {
       cwd: resolve('.'),
-      echoStdout: false
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug)
     }
   );
   if (result.code !== 0) {
@@ -149,7 +150,7 @@ export function buildPagesProjectCreateCommand(projectName: string) {
   return ['wrangler@4.85.0', 'pages', 'project', 'create', projectName, '--production-branch', 'main'];
 }
 
-export async function deployApiWorker(profile: string, googleClientEmail: string | null) {
+export async function deployApiWorker(profile: string, googleClientEmail: string | null, options: { debug?: boolean } = {}) {
   return withPatchedJsonConfig(
     getApiWranglerConfigPath(profile),
     (config) => patchApiConfigForDeploy(config, googleClientEmail),
@@ -158,7 +159,9 @@ export async function deployApiWorker(profile: string, googleClientEmail: string
         getCommandName('npx'),
         buildApiDeployCommand(tempConfigPath),
         {
-          cwd: resolve('apps/api')
+          cwd: resolve('apps/api'),
+          echoStdout: Boolean(options.debug),
+          echoStderr: Boolean(options.debug)
         }
       );
       if (result.code !== 0) {
@@ -173,8 +176,8 @@ export async function deployApiWorker(profile: string, googleClientEmail: string
   );
 }
 
-export async function ensurePagesProjectExists(projectName: string) {
-  const existingProjects = await listPagesProjects();
+export async function ensurePagesProjectExists(projectName: string, options: { debug?: boolean } = {}) {
+  const existingProjects = await listPagesProjects(options);
   if (existingProjects.some((project) => project.name === projectName)) {
     return {
       created: false,
@@ -186,7 +189,9 @@ export async function ensurePagesProjectExists(projectName: string) {
     getCommandName('npx'),
     buildPagesProjectCreateCommand(projectName),
     {
-      cwd: resolve('.')
+      cwd: resolve('.'),
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug)
     }
   );
   if (result.code !== 0) {
@@ -199,13 +204,15 @@ export async function ensurePagesProjectExists(projectName: string) {
   };
 }
 
-export async function deployAdminPages(profile: string) {
+export async function deployAdminPages(profile: string, options: { debug?: boolean } = {}) {
   const projectName = getAdminPagesProjectName(profile);
   const buildResult = await runCommand(
     getCommandName('npm'),
     ['run', 'build'],
     {
-      cwd: resolve('apps/admin')
+      cwd: resolve('apps/admin'),
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug)
     }
   );
   if (buildResult.code !== 0) {
@@ -216,7 +223,9 @@ export async function deployAdminPages(profile: string) {
     getCommandName('npx'),
     buildAdminDeployCommand(projectName),
     {
-      cwd: resolve('apps/admin')
+      cwd: resolve('apps/admin'),
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug)
     }
   );
   if (result.code !== 0) {

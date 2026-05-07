@@ -46,6 +46,7 @@ type GoogleProvisioningOptions = {
   serviceAccountName?: string | null;
   allowInteractivePrompt?: boolean;
   promptForDetails?: boolean;
+  debug?: boolean;
 };
 
 function generateSecretToken(byteLength = 32) {
@@ -250,7 +251,8 @@ async function maybeProvisionGoogleCredentials(options: {
 
   const gcloudAuthChecker = options.gcloudAuthChecker ?? checkGcloudAuthPrereq;
   const googleProvisioner = options.googleProvisioner ?? provisionGoogleServiceAccount;
-  const gcloudAuthResult = await gcloudAuthChecker();
+  const debug = Boolean(provisioning.debug);
+  const gcloudAuthResult = await gcloudAuthChecker({ debug });
   if (gcloudAuthResult.status !== 'ready') {
     if (provisioning.enabled) {
       throw new ScriptError(gcloudAuthResult.remediation ?? 'Google Cloud authentication is required before provisioning Google resources.');
@@ -268,11 +270,14 @@ async function maybeProvisionGoogleCredentials(options: {
       return null;
     }
 
-    return googleProvisioner({
-      profile: provisioning.profile,
-      projectId: normalizeGoogleProjectId(provisioning.projectId ?? defaultProjectId),
-      serviceAccountName: normalizeGoogleServiceAccountName(provisioning.serviceAccountName ?? defaultServiceAccountName)
-    });
+    return googleProvisioner(
+      {
+        profile: provisioning.profile,
+        projectId: normalizeGoogleProjectId(provisioning.projectId ?? defaultProjectId),
+        serviceAccountName: normalizeGoogleServiceAccountName(provisioning.serviceAccountName ?? defaultServiceAccountName)
+      },
+      { debug }
+    );
   }
 
   let shouldProvision = provisioning.enabled;
@@ -305,11 +310,14 @@ async function maybeProvisionGoogleCredentials(options: {
         }
       });
 
-    return googleProvisioner({
-      profile: provisioning.profile,
-      projectId: normalizeGoogleProjectId(projectId),
-      serviceAccountName: normalizeGoogleServiceAccountName(provisioning.serviceAccountName ?? defaultServiceAccountName)
-    });
+    return googleProvisioner(
+      {
+        profile: provisioning.profile,
+        projectId: normalizeGoogleProjectId(projectId),
+        serviceAccountName: normalizeGoogleServiceAccountName(provisioning.serviceAccountName ?? defaultServiceAccountName)
+      },
+      { debug }
+    );
   }
 
   const googleProjectId = normalizeGoogleProjectId(await options.prompter.text({
@@ -337,15 +345,19 @@ async function maybeProvisionGoogleCredentials(options: {
     }
   }));
 
-  return googleProvisioner({
-    profile: provisioning.profile,
-    projectId: googleProjectId,
-    serviceAccountName: googleServiceAccountName
-  });
+  return googleProvisioner(
+    {
+      profile: provisioning.profile,
+      projectId: googleProjectId,
+      serviceAccountName: googleServiceAccountName
+    },
+    { debug }
+  );
 }
 
 export async function applyApiSecrets(options: {
   apiWranglerConfigPath: string;
+  debug?: boolean;
   googlePrivateKey: string;
   driveWebhookSecret: string;
   adminBearerToken: string;
@@ -356,6 +368,8 @@ export async function applyApiSecrets(options: {
     wrangler,
     commands.googlePrivateKey,
     {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug),
       input: `${options.googlePrivateKey}\n`
     }
   );
@@ -367,6 +381,8 @@ export async function applyApiSecrets(options: {
     wrangler,
     commands.googleDriveWebhookSecret,
     {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug),
       input: `${options.driveWebhookSecret}\n`
     }
   );
@@ -378,6 +394,8 @@ export async function applyApiSecrets(options: {
     wrangler,
     commands.adminBearerToken,
     {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug),
       input: `${options.adminBearerToken}\n`
     }
   );
@@ -387,6 +405,7 @@ export async function applyApiSecrets(options: {
 }
 
 export async function applyAdminSecrets(options: {
+  debug?: boolean;
   pagesProjectName: string;
   username: string;
   password: string;
@@ -397,6 +416,8 @@ export async function applyAdminSecrets(options: {
     wrangler,
     commands.username,
     {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug),
       input: `${options.username}\n`
     }
   );
@@ -408,6 +429,8 @@ export async function applyAdminSecrets(options: {
     wrangler,
     commands.password,
     {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug),
       input: `${options.password}\n`
     }
   );
@@ -418,6 +441,7 @@ export async function applyAdminSecrets(options: {
 
 export async function applyAdminApiBaseUrl(options: {
   apiBaseUrl: string;
+  debug?: boolean;
   pagesProjectName: string;
 }) {
   const wrangler = getCommandName('npx');
@@ -426,6 +450,8 @@ export async function applyAdminApiBaseUrl(options: {
     wrangler,
     command,
     {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug),
       input: `${options.apiBaseUrl}\n`
     }
   );

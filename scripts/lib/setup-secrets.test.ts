@@ -150,11 +150,14 @@ describe('setup secret command builders', () => {
 
     expect(result.googleClientEmail).toBe('sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com');
     expect(result.googlePrivateKey).toContain('BEGIN PRIVATE KEY');
-    expect(provisionGoogleServiceAccountSpy).toHaveBeenCalledWith({
-      profile: 'production',
-      projectId: 'sheetflare-prod',
-      serviceAccountName: 'sheetflare-prod'
-    });
+    expect(provisionGoogleServiceAccountSpy).toHaveBeenCalledWith(
+      {
+        profile: 'production',
+        projectId: 'sheetflare-prod',
+        serviceAccountName: 'sheetflare-prod'
+      },
+      { debug: false }
+    );
   });
 
   it('asks for a beginner provisioning project id and defaults to the active gcloud project', async () => {
@@ -207,11 +210,14 @@ describe('setup secret command builders', () => {
     ]);
     expect(confirmPrompts).toEqual([]);
     expect(result.googleClientEmail).toBe('sheetflare-prod@operator-project.iam.gserviceaccount.com');
-    expect(provisionGoogleServiceAccountSpy).toHaveBeenCalledWith({
-      profile: 'production',
-      projectId: 'operator-project',
-      serviceAccountName: 'sheetflare-prod'
-    });
+    expect(provisionGoogleServiceAccountSpy).toHaveBeenCalledWith(
+      {
+        profile: 'production',
+        projectId: 'operator-project',
+        serviceAccountName: 'sheetflare-prod'
+      },
+      { debug: false }
+    );
   });
 
   it('respects a prior decision not to offer interactive Google provisioning', async () => {

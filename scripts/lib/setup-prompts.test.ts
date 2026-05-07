@@ -269,7 +269,7 @@ describe('promptForSetup', () => {
     ]);
     expect(confirmPrompts).toEqual([
       {
-        message: 'Provision Google Cloud credentials now (choose no if you already have a service-account JSON file)',
+        message: 'Set up Google credentials automatically with gcloud',
         defaultValue: true
       }
     ]);

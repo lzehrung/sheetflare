@@ -27,6 +27,7 @@ describe('parseSetupArgs', () => {
         verify: true,
         showSecrets: false,
         advanced: false,
+        debug: false,
         provisionGoogle: true,
         googleProjectId: 'sheetflare-prod',
         googleServiceAccountName: 'sheetflare-prod'
@@ -36,6 +37,12 @@ describe('parseSetupArgs', () => {
   it('parses advanced setup mode', () => {
     expect(parseSetupArgs(['--advanced'])).toMatchObject({
       advanced: true
+    });
+  });
+
+  it('parses debug setup output mode', () => {
+    expect(parseSetupArgs(['--debug'])).toMatchObject({
+      debug: true
     });
   });
 

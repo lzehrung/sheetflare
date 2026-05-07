@@ -245,4 +245,85 @@ describe('provisionGoogleServiceAccount', () => {
     expect(commands.some((command) => command.includes('projects create sheetflare-prod'))).toBe(false);
     expect(commands.some((command) => command.includes('iam service-accounts create sheetflare-prod'))).toBe(false);
   });
+
+  it('keeps gcloud provisioning command output quiet by default', async () => {
+    const commandOptions: Array<{ echoStdout?: boolean; echoStderr?: boolean } | undefined> = [];
+
+    await provisionGoogleServiceAccount(
+      {
+        profile: 'production',
+        projectId: 'sheetflare-prod',
+        serviceAccountName: 'sheetflare-prod'
+      },
+      {
+        commandRunner: vi.fn(async (_command, args, options) => {
+          commandOptions.push(options);
+          const joined = args.join(' ');
+          if (joined.startsWith('projects list')) {
+            return { code: 0, stdout: 'sheetflare-prod\n', stderr: '' };
+          }
+          if (joined.startsWith('services enable')) {
+            return { code: 0, stdout: 'enabled', stderr: '' };
+          }
+          if (joined.startsWith('iam service-accounts list')) {
+            return { code: 0, stdout: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com\n', stderr: '' };
+          }
+          if (joined.startsWith('iam service-accounts keys create')) {
+            return { code: 0, stdout: 'created key', stderr: '' };
+          }
+          throw new Error(`Unexpected gcloud command: ${joined}`);
+        }),
+        tempDirFactory: vi.fn(async () => 'C:/tmp/sheetflare-google-test'),
+        readTextFile: vi.fn(async () => JSON.stringify({
+          client_email: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+          private_key: 'secret'
+        })),
+        removePath: vi.fn(async () => undefined),
+        pythonExecutableResolver: vi.fn(async () => 'C:/Python313/python.exe')
+      }
+    );
+
+    expect(commandOptions.every((options) => options?.echoStdout === false && options.echoStderr === false)).toBe(true);
+  });
+
+  it('shows gcloud provisioning command output in debug mode', async () => {
+    const commandOptions: Array<{ echoStdout?: boolean; echoStderr?: boolean } | undefined> = [];
+
+    await provisionGoogleServiceAccount(
+      {
+        profile: 'production',
+        projectId: 'sheetflare-prod',
+        serviceAccountName: 'sheetflare-prod'
+      },
+      {
+        debug: true,
+        commandRunner: vi.fn(async (_command, args, options) => {
+          commandOptions.push(options);
+          const joined = args.join(' ');
+          if (joined.startsWith('projects list')) {
+            return { code: 0, stdout: 'sheetflare-prod\n', stderr: '' };
+          }
+          if (joined.startsWith('services enable')) {
+            return { code: 0, stdout: 'enabled', stderr: '' };
+          }
+          if (joined.startsWith('iam service-accounts list')) {
+            return { code: 0, stdout: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com\n', stderr: '' };
+          }
+          if (joined.startsWith('iam service-accounts keys create')) {
+            return { code: 0, stdout: 'created key', stderr: '' };
+          }
+          throw new Error(`Unexpected gcloud command: ${joined}`);
+        }),
+        tempDirFactory: vi.fn(async () => 'C:/tmp/sheetflare-google-test'),
+        readTextFile: vi.fn(async () => JSON.stringify({
+          client_email: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+          private_key: 'secret'
+        })),
+        removePath: vi.fn(async () => undefined),
+        pythonExecutableResolver: vi.fn(async () => 'C:/Python313/python.exe')
+      }
+    );
+
+    expect(commandOptions.every((options) => options?.echoStdout === true && options.echoStderr === true)).toBe(true);
+  });
 });

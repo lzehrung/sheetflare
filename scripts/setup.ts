@@ -66,11 +66,11 @@ function isMissingFileError(error: unknown) {
 
 function renderPrereqSummary(results: SetupPrereqResult[]) {
   for (const result of results) {
-    let prefix = '[blocked]';
+    let prefix = 'Needs attention';
     if (result.status === 'ready') {
-      prefix = '[ok]';
+      prefix = 'Ready';
     } else if (result.status === 'warning') {
-      prefix = '[warn]';
+      prefix = 'Note';
     }
     console.log(`${prefix} ${result.name}: ${result.summary}`);
     if (result.remediation) {
@@ -233,9 +233,9 @@ async function registerDriveWatchesIfPossible(options: {
   }
 }
 
-async function ensureAdminPagesProjectReady(profile: string) {
+async function ensureAdminPagesProjectReady(profile: string, options: { debug?: boolean } = {}) {
   const pagesProjectName = getAdminPagesProjectName(profile);
-  const result = await ensurePagesProjectExists(pagesProjectName);
+  const result = await ensurePagesProjectExists(pagesProjectName, options);
   if (result.created) {
     logSuccess(`Created Cloudflare Pages project ${pagesProjectName}`);
   }
@@ -247,26 +247,29 @@ async function applyAdminPagesConfiguration(options: {
   adminUiPassword: string;
   adminUiUsername: string;
   apiUrl?: string | null;
+  debug?: boolean;
   pagesProjectName: string;
 }) {
-  logStep('Applying admin Pages site secrets');
+  logStep('Saving admin site sign-in secrets');
   await applyAdminSecrets({
+    debug: Boolean(options.debug),
     pagesProjectName: options.pagesProjectName,
     username: options.adminUiUsername,
     password: options.adminUiPassword
   });
-  logSuccess('Admin site secrets applied');
+  logSuccess('Admin site sign-in secrets saved');
 
   if (!options.apiUrl) {
     return;
   }
 
-  logStep('Applying admin Pages API base URL');
+  logStep('Connecting the admin site to the API');
   await applyAdminApiBaseUrl({
     apiBaseUrl: options.apiUrl,
+    debug: Boolean(options.debug),
     pagesProjectName: options.pagesProjectName
   });
-  logSuccess('Admin Pages API base URL applied');
+  logSuccess('Admin site API URL saved');
 }
 
 async function main() {
@@ -280,18 +283,19 @@ async function main() {
   const localStatePath = getSetupLocalStatePath(resolvedConfigPath);
 
   if (options.writeDefaultConfig) {
-    logStep(`Writing starter setup config to ${resolvedConfigPath}`);
+    logStep(`Writing starter setup file to ${resolvedConfigPath}`);
     await writeFile(resolvedConfigPath, createDefaultSetupConfig(), 'utf8');
-    logSuccess(`Starter config written to ${resolvedConfigPath}`);
+    logSuccess(`Starter setup file written to ${resolvedConfigPath}`);
     return;
   }
 
   let provisionGoogle = options.provisionGoogle;
 
-  logStep('Checking setup prerequisites');
+  logStep('Checking your computer');
   const prereqResults = await checkSetupPrereqsWithOptions({
     includeWranglerAuth: options.applySecrets || options.deploy || options.verify,
-    includeGcloudAuth: provisionGoogle
+    includeGcloudAuth: provisionGoogle,
+    debug: options.debug
   });
   renderPrereqSummary(prereqResults);
 
@@ -306,7 +310,7 @@ async function main() {
 
   try {
     try {
-      logStep(`Loading setup config ${resolvedConfigPath}`);
+      logStep(`Looking for setup config at ${resolvedConfigPath}`);
       configInput = await readConfigFile(resolvedConfigPath);
     } catch (error) {
       if (!isMissingFileError(error)) {
@@ -317,7 +321,7 @@ async function main() {
         throw new ScriptError(`Setup config ${resolvedConfigPath} does not exist, and interactive setup requires a TTY. Use --write-default-config to create a starter config.`);
       }
 
-      logStep(`No setup config found at ${resolvedConfigPath}; starting interactive setup`);
+      logStep(`No setup config found at ${resolvedConfigPath}; we will create one together`);
       const promptMode = options.advanced ? 'advanced' : 'beginner';
       beginnerSetupStarted = promptMode === 'beginner';
       const promptResult = await promptForSetup(prompter, {
@@ -326,7 +330,7 @@ async function main() {
       });
       if (promptResult.provisionGoogle && !provisionGoogle) {
         provisionGoogle = true;
-        const gcloudResult = await checkGcloudAuthPrereq();
+        const gcloudResult = await checkGcloudAuthPrereq({ debug: options.debug });
         prereqResults.push(gcloudResult);
         renderPrereqSummary([gcloudResult]);
         if (gcloudResult.status === 'blocked') {
@@ -335,21 +339,15 @@ async function main() {
       }
       promptActions = promptResult.actions;
       configInput = promptResult.config;
-      logStep(`Writing setup config ${resolvedConfigPath}`);
+      logStep(`Saving setup choices to ${resolvedConfigPath}`);
       await writeFile(resolvedConfigPath, serializeSetupConfig(promptResult.config), 'utf8');
-      logSuccess(`Setup config written to ${resolvedConfigPath}`);
+      logSuccess(`Setup choices saved to ${resolvedConfigPath}`);
     }
 
-    logStep(`Validating setup config ${resolvedConfigPath}`);
+    logStep('Checking setup choices');
     const config = parseSetupConfig(configInput);
-    logSuccess(`Validated setup config for profile ${config.profile} with private project ${config.privateProject.slug}.`);
-    console.log(JSON.stringify({
-      profile: config.profile,
-      privateProject: config.privateProject.slug,
-      publicReadProject: config.publicReadProject?.slug ?? null,
-      privateTables: config.privateProject.tables.map((table) => table.tableSlug),
-      publicReadTables: config.publicReadProject?.tables.map((table) => table.tableSlug) ?? []
-    }, null, 2));
+    const tableCount = config.privateProject.tables.length + (config.publicReadProject?.tables.length ?? 0);
+    logSuccess(`Setup choices look valid for project ${config.privateProject.slug} with ${tableCount} table${tableCount === 1 ? '' : 's'}.`);
 
     const actions = resolveSetupActions(options, promptActions);
 
@@ -379,7 +377,7 @@ async function main() {
 
     let setupSecrets: Awaited<ReturnType<typeof collectSetupSecrets>> | null = null;
     if (actions.applySecretsNow) {
-      logStep('Collecting setup secrets');
+      logStep('Preparing credentials');
       setupSecrets = await collectSetupSecrets({
         prompter,
         includeAdminUiSecrets: config.deploy.admin,
@@ -391,21 +389,23 @@ async function main() {
           projectId: options.googleProjectId,
           serviceAccountName: options.googleServiceAccountName,
           allowInteractivePrompt: !beginnerSetupStarted,
-          promptForDetails: !beginnerSetupStarted
+          promptForDetails: !beginnerSetupStarted,
+          debug: options.debug
         }
       });
       adminBearerToken = setupSecrets.adminBearerToken;
       adminUiUsername = setupSecrets.adminUiUsername;
       adminUiPassword = setupSecrets.adminUiPassword;
 
-      logStep('Applying Worker secrets');
+      logStep('Saving API secrets to Cloudflare');
       await applyApiSecrets({
         apiWranglerConfigPath: getApiWranglerConfigPath(config.profile),
+        debug: options.debug,
         googlePrivateKey: setupSecrets.googlePrivateKey,
         driveWebhookSecret: setupSecrets.driveWebhookSecret,
         adminBearerToken: setupSecrets.adminBearerToken
       });
-      logSuccess('Worker secrets applied');
+      logSuccess('API secrets saved');
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
@@ -421,11 +421,12 @@ async function main() {
           adminUiUsername,
           adminUiPassword
         });
-        const pagesProjectName = await ensureAdminPagesProjectReady(config.profile);
+        const pagesProjectName = await ensureAdminPagesProjectReady(config.profile, { debug: options.debug });
         await applyAdminPagesConfiguration({
           adminUiPassword: adminSiteSecrets.adminUiPassword,
           adminUiUsername: adminSiteSecrets.adminUiUsername,
           apiUrl,
+          debug: options.debug,
           pagesProjectName,
         });
       }
@@ -438,13 +439,13 @@ async function main() {
           ?? resolvedRuntimeState.googleClientEmail)
         : null;
 
-      logStep('Deploying API Worker');
-      const apiDeploy = await deployApiWorker(config.profile, googleClientEmail);
+      logStep('Deploying the API');
+      const apiDeploy = await deployApiWorker(config.profile, googleClientEmail, { debug: options.debug });
       apiUrl = apiDeploy.url;
-      logSuccess(`API deployed at ${apiUrl}`);
+      logSuccess(`API is live at ${apiUrl}`);
 
       if (config.deploy.admin) {
-        const pagesProjectName = await ensureAdminPagesProjectReady(config.profile);
+        const pagesProjectName = await ensureAdminPagesProjectReady(config.profile, { debug: options.debug });
         if (!adminUiUsername || !adminUiPassword) {
           const adminSiteSecrets = await collectAdminSiteSecrets({
             prompter,
@@ -463,21 +464,22 @@ async function main() {
           adminUiPassword: adminSiteSecrets.adminUiPassword,
           adminUiUsername: adminSiteSecrets.adminUiUsername,
           apiUrl,
+          debug: options.debug,
           pagesProjectName,
         });
 
-        logStep('Deploying admin Pages site');
-        const adminDeploy = await deployAdminPages(config.profile);
+        logStep('Deploying the admin site');
+        const adminDeploy = await deployAdminPages(config.profile, { debug: options.debug });
         adminUrl = adminDeploy.siteUrl;
-        logSuccess(`Admin deployed at ${adminUrl}`);
+        logSuccess(`Admin site is live at ${adminUrl}`);
 
-        logStep('Verifying admin Pages site');
+        logStep('Checking the admin site');
         await verifyAdminPagesDeployment({
           password: adminSiteSecrets.adminUiPassword,
           siteUrl: adminDeploy.siteUrl,
           username: adminSiteSecrets.adminUiUsername
         });
-        logSuccess('Admin Pages site verified');
+        logSuccess('Admin site is reachable');
       }
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
@@ -528,14 +530,14 @@ async function main() {
         })).trim();
       }
 
-      logStep('Bootstrapping projects and API keys');
+      logStep('Creating projects and API keys');
       const bootstrapOutput = await runBootstrap(createBootstrapEnv(config, apiUrl, adminBearerToken));
       if (config.smoke.enabled) {
         adminApiKey = findCreatedKey(bootstrapOutput, config.smoke.adminKeyName);
         privateReadKey = findCreatedKey(bootstrapOutput, config.smoke.privateReadKeyName);
         mutationKey = findCreatedKey(bootstrapOutput, config.smoke.mutationKeyName);
       }
-      logSuccess('Bootstrap completed');
+      logSuccess('Projects and API keys are ready');
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
@@ -594,7 +596,7 @@ async function main() {
         })).trim();
       }
 
-      logStep('Running smoke validation');
+      logStep('Testing the API with your sheet');
       await runSmoke(createSmokeEnv({
         config,
         baseUrl: apiUrl,
@@ -602,7 +604,7 @@ async function main() {
         privateReadKey,
         mutationKey
       }));
-      logSuccess('Smoke validation completed');
+      logSuccess('Sheet read/write test passed');
     }
 
     printExecutionSummary({
@@ -622,7 +624,7 @@ async function main() {
     });
 
     if (actions.verifyNow) {
-      logStep('Verifying setup-managed environment');
+      logStep('Checking the finished setup');
       const verificationRuntimeState = mergeSetupRuntimeState(resolveSetupRuntimeState(localState), {
         googleClientEmail: setupSecrets?.googleClientEmail
           ?? localState?.googleClientEmail
@@ -648,7 +650,7 @@ async function main() {
         throw new ScriptError(verificationFailureMessage);
       }
 
-      logSuccess('Setup verification completed without warnings or blocking issues');
+      logSuccess('Setup checks passed');
     }
 
     if (beginnerSetupStarted) {

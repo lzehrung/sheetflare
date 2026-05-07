@@ -12,6 +12,7 @@ export type SetupCliOptions = {
   verify: boolean;
   showSecrets: boolean;
   advanced: boolean;
+  debug: boolean;
   provisionGoogle: boolean;
   googleProjectId: string | null;
   googleServiceAccountName: string | null;
@@ -29,6 +30,7 @@ export function createDefaultSetupCliOptions(): SetupCliOptions {
     verify: false,
     showSecrets: false,
     advanced: false,
+    debug: false,
     provisionGoogle: false,
     googleProjectId: null,
     googleServiceAccountName: null
@@ -95,6 +97,11 @@ export function parseSetupArgs(argv: string[]): SetupCliOptions {
       continue;
     }
 
+    if (argument === '--debug') {
+      options.debug = true;
+      continue;
+    }
+
     if (argument === '--provision-google') {
       options.provisionGoogle = true;
       continue;
@@ -156,6 +163,7 @@ Options:
   --verify                           Run setup verification/doctor checks.
   --show-secrets                     Show generated secrets in the final summary.
   --advanced                         Ask for all setup config fields instead of beginner defaults.
+  --debug                            Show underlying setup command output.
   --provision-google                 Provision Google service-account resources with gcloud.
   --google-project <id>              Google Cloud project id for provisioning.
   --google-service-account <name>    Google service-account name for provisioning.
