@@ -94,6 +94,15 @@ export async function checkWranglerAuthPrereq(dependencies: SetupPrereqDependenc
   } satisfies SetupPrereqResult;
 }
 
+export function recordPrereqResult(results: SetupPrereqResult[], result: SetupPrereqResult) {
+  const existingIndex = results.findIndex((entry) => entry.name === result.name);
+  if (existingIndex >= 0) {
+    results[existingIndex] = result;
+    return;
+  }
+  results.push(result);
+}
+
 export async function checkSetupPrereqsWithOptions(
   options: SetupPrereqOptions = {},
   dependencies: SetupPrereqDependencies = {}

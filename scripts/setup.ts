@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setupConfigUsesDefaultGoogleCredential } from './lib/setup-config';
 import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
 import { confirmSheetShared, createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
-import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, type SetupPrereqResult } from './lib/setup-prereqs';
+import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, recordPrereqResult, type SetupPrereqResult } from './lib/setup-prereqs';
 import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './lib/setup-bootstrap';
 import {
   deployAdminPages,
@@ -331,7 +331,7 @@ async function main() {
       if (promptResult.provisionGoogle && !provisionGoogle) {
         provisionGoogle = true;
         const gcloudResult = await checkGcloudAuthPrereq({ debug: options.debug });
-        prereqResults.push(gcloudResult);
+        recordPrereqResult(prereqResults, gcloudResult);
         renderPrereqSummary([gcloudResult]);
         if (gcloudResult.status === 'blocked') {
           throw new ScriptError(gcloudResult.remediation);
@@ -358,6 +358,7 @@ async function main() {
     let wranglerResult = prereqResults.find((result) => result.name === 'Wrangler auth') ?? null;
     if (actionsRequireWranglerAuth(actions) && !wranglerResult) {
       wranglerResult = await checkWranglerAuthPrereq();
+      recordPrereqResult(prereqResults, wranglerResult);
       renderPrereqSummary([wranglerResult]);
     }
 
