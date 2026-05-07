@@ -37,7 +37,7 @@ import {
 } from './lib/setup-runtime';
 import { getSetupDoctorFailureMessage, runSetupDoctor } from './lib/setup-doctor';
 import { checkGcloudAuthPrereq, isPlaceholderGoogleClientEmail } from './lib/setup-google';
-import { formatBeginnerSetupNextSteps } from './lib/setup-next-steps';
+import { formatBeginnerSetupNextSteps, formatSheetShareInstruction } from './lib/setup-next-steps';
 import { verifyAdminPagesDeployment } from './lib/setup-verify';
 import { getCommandName, runCommand } from './lib/process';
 import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
@@ -86,6 +86,13 @@ async function promptForText(prompter: SetupPrompter, options: {
     message: options.message,
     ...(defaultValue ? { defaultValue } : {}),
     validate: (value) => value.trim().length > 0 ? null : `${options.message} must not be blank.`
+  });
+}
+
+async function waitForEnter(prompter: SetupPrompter, message: string) {
+  await prompter.text({
+    message,
+    defaultValue: 'ready'
   });
 }
 
@@ -379,7 +386,9 @@ async function main() {
           enabled: provisionGoogle,
           profile: config.profile,
           projectId: options.googleProjectId,
-          serviceAccountName: options.googleServiceAccountName
+          serviceAccountName: options.googleServiceAccountName,
+          allowInteractivePrompt: !beginnerSetupStarted,
+          promptForDetails: !beginnerSetupStarted
         }
       });
       adminBearerToken = setupSecrets.adminBearerToken;
@@ -416,6 +425,17 @@ async function main() {
           apiUrl,
           pagesProjectName,
         });
+      }
+    }
+
+    if (beginnerSetupStarted && (actions.bootstrapNow || actions.smokeNow)) {
+      const shareEmail = setupSecrets?.googleClientEmail
+        ?? localState?.googleClientEmail
+        ?? resolvedRuntimeState.googleClientEmail;
+      console.log('');
+      console.log(formatSheetShareInstruction(shareEmail));
+      if (prompter) {
+        await waitForEnter(prompter, 'Press Enter after the sheet is shared');
       }
     }
 

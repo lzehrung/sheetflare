@@ -4,15 +4,19 @@ export type BeginnerSetupNextStepsInput = {
   adminUrl: string | null;
 };
 
+export function formatSheetShareInstruction(googleClientEmail: string | null) {
+  if (googleClientEmail) {
+    return `Share your Google Sheet with ${googleClientEmail} as Editor before bootstrap or smoke validation.`;
+  }
+
+  return 'Add Google service-account credentials, then share your Google Sheet with that service-account email as Editor before bootstrap or smoke validation.';
+}
+
 export function formatBeginnerSetupNextSteps(input: BeginnerSetupNextStepsInput) {
   const lines = ['Beginner setup next steps:'];
   let stepNumber = 1;
 
-  if (input.googleClientEmail) {
-    lines.push(`${stepNumber}. Share your Google Sheet with ${input.googleClientEmail} as Editor.`);
-  } else {
-    lines.push(`${stepNumber}. Add Google service-account credentials, then share your Google Sheet with that service-account email as Editor.`);
-  }
+  lines.push(`${stepNumber}. ${formatSheetShareInstruction(input.googleClientEmail)}`);
   stepNumber += 1;
 
   if (input.apiUrl) {

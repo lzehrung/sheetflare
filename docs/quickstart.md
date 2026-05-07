@@ -62,10 +62,10 @@ Beginner setup then uses safe defaults:
 - public-read API: disabled
 - setup actions: apply secrets, deploy, bootstrap, smoke-test, verify
 
-When setup prints the service-account email, share your Google Sheet with that email as `Editor`. If setup pauses or fails before bootstrap because the sheet is not shared yet, share the sheet and rerun:
+When setup prints the service-account email, share your Google Sheet with that email as `Editor`. If setup pauses or fails before bootstrap because the sheet is not shared yet, share the sheet and rerun the credential, bootstrap, smoke, and verification steps together:
 
 ```powershell
-npm run setup -- --bootstrap --smoke --verify
+npm run setup -- --apply-secrets --bootstrap --smoke --verify
 ```
 
 ## 4. What Setup Creates

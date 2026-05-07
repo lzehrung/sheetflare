@@ -42,6 +42,8 @@ type GoogleProvisioningOptions = {
   profile: string;
   projectId?: string | null;
   serviceAccountName?: string | null;
+  allowInteractivePrompt?: boolean;
+  promptForDetails?: boolean;
 };
 
 function generateSecretToken(byteLength = 32) {
@@ -256,6 +258,9 @@ async function maybeProvisionGoogleCredentials(options: {
 
   let shouldProvision = provisioning.enabled;
   if (!shouldProvision) {
+    if (provisioning.allowInteractivePrompt === false) {
+      return null;
+    }
     shouldProvision = await options.prompter.confirm({
       message: 'Provision a Google Cloud project and service account with gcloud now',
       defaultValue: true
@@ -264,6 +269,14 @@ async function maybeProvisionGoogleCredentials(options: {
 
   if (!shouldProvision) {
     return null;
+  }
+
+  if (provisioning.promptForDetails === false) {
+    return googleProvisioner({
+      profile: provisioning.profile,
+      projectId: normalizeGoogleProjectId(provisioning.projectId ?? defaultProjectId),
+      serviceAccountName: normalizeGoogleServiceAccountName(provisioning.serviceAccountName ?? defaultServiceAccountName)
+    });
   }
 
   const googleProjectId = normalizeGoogleProjectId(await options.prompter.text({

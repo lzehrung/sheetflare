@@ -143,6 +143,91 @@ describe('setup secret command builders', () => {
     });
   });
 
+  it('can provision Google credentials from defaults without asking for project details', async () => {
+    const prompts: string[] = [];
+    const provisionGoogleServiceAccountSpy = vi.fn(async () => ({
+      googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+      googlePrivateKey: '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n',
+      projectId: 'sheetflare-prod',
+      serviceAccountEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+      createdProject: true,
+      createdServiceAccount: true
+    }));
+
+    const result = await collectSetupSecrets({
+      prompter: {
+        async text(options) {
+          prompts.push(options.message);
+          throw new Error(`Unexpected prompt: ${options.message}`);
+        },
+        async confirm(options) {
+          prompts.push(options.message);
+          throw new Error(`Unexpected prompt: ${options.message}`);
+        }
+      },
+      includeAdminUiSecrets: false,
+      googleProvisioning: {
+        enabled: true,
+        profile: 'production',
+        promptForDetails: false
+      },
+      googleProvisioner: provisionGoogleServiceAccountSpy,
+      gcloudAuthChecker: vi.fn(async () => ({
+        name: 'gcloud auth',
+        status: 'ready',
+        summary: 'Google Cloud authentication is available for setup provisioning.',
+        remediation: null
+      } as const))
+    });
+
+    expect(prompts).toEqual([]);
+    expect(result.googleClientEmail).toBe('sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com');
+    expect(provisionGoogleServiceAccountSpy).toHaveBeenCalledWith({
+      profile: 'production',
+      projectId: 'sheetflare-prod',
+      serviceAccountName: 'sheetflare-prod'
+    });
+  });
+
+  it('respects a prior decision not to offer interactive Google provisioning', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-secrets-'));
+    tempDirs.push(dir);
+    const credentialsPath = join(dir, 'service-account.json');
+    await writeFile(credentialsPath, JSON.stringify({
+      client_email: 'service-account@example.com',
+      private_key: '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n'
+    }), 'utf8');
+    const prompts: string[] = [];
+
+    const result = await collectSetupSecrets({
+      prompter: {
+        async text(options) {
+          prompts.push(options.message);
+          return credentialsPath;
+        },
+        async confirm(options) {
+          prompts.push(options.message);
+          throw new Error(`Unexpected prompt: ${options.message}`);
+        }
+      },
+      includeAdminUiSecrets: false,
+      googleProvisioning: {
+        enabled: false,
+        profile: 'production',
+        allowInteractivePrompt: false
+      },
+      gcloudAuthChecker: vi.fn(async () => ({
+        name: 'gcloud auth',
+        status: 'ready',
+        summary: 'Google Cloud authentication is available for setup provisioning.',
+        remediation: null
+      } as const))
+    });
+
+    expect(prompts).not.toContain('Provision a Google Cloud project and service account with gcloud now');
+    expect(result.googleClientEmail).toBe('service-account@example.com');
+  });
+
   it('collects admin site secrets noninteractively from existing values', async () => {
     process.env.ADMIN_UI_USERNAME = 'operator';
     process.env.ADMIN_UI_PASSWORD = 'secret-password';
