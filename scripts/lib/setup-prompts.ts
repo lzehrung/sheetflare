@@ -61,6 +61,18 @@ export type SetupPrompter = {
   close?: () => void;
 };
 
+export async function confirmSheetShared(prompter: SetupPrompter) {
+  const confirmed = await prompter.confirm({
+    message: 'Continue after sharing the sheet with the service account',
+    defaultValue: true
+  });
+  if (!confirmed) {
+    throw new ScriptError(
+      'Share the sheet with the service-account email as Editor, then rerun npm run setup -- --bootstrap --smoke --verify.'
+    );
+  }
+}
+
 function splitCommaSeparatedList(input: string) {
   return input
     .split(',')
@@ -263,7 +275,7 @@ async function promptForBeginnerSetup(
   const provisionGoogle = options.googleCredentialAvailable
     ? false
     : await prompter.confirm({
-        message: 'Provision Google Cloud credentials now',
+        message: 'Provision Google Cloud credentials now (choose no if you already have a service-account JSON file)',
         defaultValue: true
       });
 

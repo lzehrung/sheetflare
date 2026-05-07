@@ -2,7 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig } from './lib/setup-config';
 import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
-import { createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
+import { confirmSheetShared, createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, type SetupPrereqResult } from './lib/setup-prereqs';
 import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './lib/setup-bootstrap';
 import {
@@ -89,16 +89,17 @@ async function promptForText(prompter: SetupPrompter, options: {
   });
 }
 
-async function waitForEnter(prompter: SetupPrompter, message: string) {
-  await prompter.text({
-    message,
-    defaultValue: 'ready'
-  });
-}
-
 function printExecutionSummary(summary: SetupExecutionSummary) {
   console.log('\nSetup summary');
   console.log(JSON.stringify(summary, null, 2));
+}
+
+function formatWranglerAuthRequiredMessage(beginnerSetupStarted: boolean) {
+  if (beginnerSetupStarted) {
+    return 'Wrangler authentication is required before applying secrets or deploying. Run npx wrangler login, then rerun npm run setup -- --apply-secrets --deploy --bootstrap --smoke --verify.';
+  }
+
+  return 'Wrangler authentication is required before applying secrets or deploying. Run npx wrangler login, then rerun setup with the same flags.';
 }
 
 function assertRealGoogleClientEmail(value: string | null) {
@@ -361,7 +362,7 @@ async function main() {
     }
 
     if (actionsRequireWranglerAuth(actions) && wranglerResult?.status === 'blocked') {
-      throw new ScriptError('Wrangler authentication is required before applying secrets or deploying. Run npx wrangler login and rerun setup.');
+      throw new ScriptError(formatWranglerAuthRequiredMessage(beginnerSetupStarted));
     }
 
     const resolvedRuntimeState = resolveSetupRuntimeState(localState);
@@ -428,17 +429,6 @@ async function main() {
       }
     }
 
-    if (beginnerSetupStarted && (actions.bootstrapNow || actions.smokeNow)) {
-      const shareEmail = setupSecrets?.googleClientEmail
-        ?? localState?.googleClientEmail
-        ?? resolvedRuntimeState.googleClientEmail;
-      console.log('');
-      console.log(formatSheetShareInstruction(shareEmail));
-      if (prompter) {
-        await waitForEnter(prompter, 'Press Enter after the sheet is shared');
-      }
-    }
-
     if (actions.deployNow) {
       const googleClientEmail = assertRealGoogleClientEmail(setupSecrets?.googleClientEmail
         ?? localState?.googleClientEmail
@@ -496,6 +486,17 @@ async function main() {
         })
       });
       localStateWritten = true;
+    }
+
+    if (beginnerSetupStarted && (actions.bootstrapNow || actions.smokeNow)) {
+      const shareEmail = setupSecrets?.googleClientEmail
+        ?? localState?.googleClientEmail
+        ?? resolvedRuntimeState.googleClientEmail;
+      console.log('');
+      console.log(formatSheetShareInstruction(shareEmail));
+      if (prompter) {
+        await confirmSheetShared(prompter);
+      }
     }
 
     if (!apiUrl && (actions.bootstrapNow || actions.smokeNow)) {

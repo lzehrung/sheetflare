@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildBeginnerSetupConfigFromAnswers,
   buildSetupConfigFromAnswers,
+  confirmSheetShared,
   promptForSetup,
   type SetupPrompter
 } from './setup-prompts';
@@ -268,7 +269,7 @@ describe('promptForSetup', () => {
     ]);
     expect(confirmPrompts).toEqual([
       {
-        message: 'Provision Google Cloud credentials now',
+        message: 'Provision Google Cloud credentials now (choose no if you already have a service-account JSON file)',
         defaultValue: true
       }
     ]);
@@ -331,5 +332,33 @@ describe('promptForSetup', () => {
     });
     expect(result.provisionGoogle).toBe(false);
     expect(result.config.privateProject.slug).toBe('demo');
+  });
+});
+
+describe('confirmSheetShared', () => {
+  it('continues when the operator confirms sheet sharing', async () => {
+    const { prompter, confirmPrompts } = createFakePrompter({
+      textResponses: [],
+      confirmResponses: [true]
+    });
+
+    await expect(confirmSheetShared(prompter)).resolves.toBeUndefined();
+    expect(confirmPrompts).toEqual([
+      {
+        message: 'Continue after sharing the sheet with the service account',
+        defaultValue: true
+      }
+    ]);
+  });
+
+  it('stops with a rerun command when the sheet is not shared yet', async () => {
+    const { prompter } = createFakePrompter({
+      textResponses: [],
+      confirmResponses: [false]
+    });
+
+    await expect(confirmSheetShared(prompter)).rejects.toThrow(
+      'Share the sheet with the service-account email as Editor, then rerun npm run setup -- --bootstrap --smoke --verify.'
+    );
   });
 });

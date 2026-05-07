@@ -77,11 +77,11 @@ Recommended approach: **guided default setup with explicit advanced escape hatch
 
 ### Task 1: Add CLI Shape for Beginner and Advanced Modes
 
-- [ ] Add `advanced: boolean` to `SetupCliOptions`.
-- [ ] Parse `--advanced`.
-- [ ] Update help text so the first common flow is `npm run setup`, followed by `npm run setup -- --advanced`.
-- [ ] Keep every existing flag unchanged.
-- [ ] Add a regression test in `scripts/lib/setup-cli.test.ts`:
+- [x] Add `advanced: boolean` to `SetupCliOptions`.
+- [x] Parse `--advanced`.
+- [x] Update help text so the first common flow is `npm run setup`, followed by `npm run setup -- --advanced`.
+- [x] Keep every existing flag unchanged.
+- [x] Add a regression test in `scripts/lib/setup-cli.test.ts`:
 
 ```ts
 it('parses advanced setup mode', () => {
@@ -91,15 +91,15 @@ it('parses advanced setup mode', () => {
 });
 ```
 
-- [ ] Extend the help test to expect `--advanced` and text that says advanced mode asks for all config fields.
-- [ ] Run:
+- [x] Extend the help test to expect `--advanced` and text that says advanced mode asks for all config fields.
+- [x] Run:
 
 ```powershell
 npx vitest run --config vitest.config.ts scripts/lib/setup-cli.test.ts
 ```
 
-- [ ] Expected result: all setup CLI tests pass.
-- [ ] Commit:
+- [x] Expected result: all setup CLI tests pass.
+- [x] Commit:
 
 ```powershell
 git add scripts/lib/setup-cli.ts scripts/lib/setup-cli.test.ts
@@ -108,9 +108,9 @@ git commit -m "feat: add setup advanced mode flag"
 
 ### Task 2: Split Prompt Models
 
-- [ ] Rename the existing full prompt implementation to `promptForAdvancedSetup`.
-- [ ] Keep `buildSetupConfigFromAnswers` unchanged for the advanced path.
-- [ ] Add a new beginner answer type:
+- [x] Rename the existing full prompt implementation to `promptForAdvancedSetup`.
+- [x] Keep `buildSetupConfigFromAnswers` unchanged for the advanced path.
+- [x] Add a new beginner answer type:
 
 ```ts
 export type BeginnerSetupAnswers = {
@@ -121,15 +121,15 @@ export type BeginnerSetupAnswers = {
 };
 ```
 
-- [ ] Add `buildBeginnerSetupConfigFromAnswers(answers: BeginnerSetupAnswers): SetupConfig`.
-- [ ] Derive the table slug from `sheetTabName` with this behavior:
+- [x] Add `buildBeginnerSetupConfigFromAnswers(answers: BeginnerSetupAnswers): SetupConfig`.
+- [x] Derive the table slug from `sheetTabName` with this behavior:
   - trim whitespace
   - lowercase
   - replace runs of non-alphanumeric characters with `-`
   - trim leading/trailing hyphens
   - use `table` if the result is blank
   - validate with `normalizeTableSlug`
-- [ ] Use this beginner config shape:
+- [x] Use this beginner config shape:
 
 ```ts
 {
@@ -170,20 +170,20 @@ export type BeginnerSetupAnswers = {
 }
 ```
 
-- [ ] Reject blank smoke fields and `_id` smoke fields with the same messages as the advanced builder.
-- [ ] Add tests:
+- [x] Reject blank smoke fields and `_id` smoke fields with the same messages as the advanced builder.
+- [x] Add tests:
   - beginner config normalizes a tab name like `Contacts 2026` to table slug `contacts-2026`
   - beginner config falls back to `table` for a punctuation-only tab name
   - beginner config rejects blank smoke fields
   - beginner config rejects `_id` as the smoke field
-- [ ] Run:
+- [x] Run:
 
 ```powershell
 npx vitest run --config vitest.config.ts scripts/lib/setup-prompts.test.ts
 ```
 
-- [ ] Expected result: all setup prompt tests pass.
-- [ ] Commit:
+- [x] Expected result: all setup prompt tests pass.
+- [x] Commit:
 
 ```powershell
 git add scripts/lib/setup-prompts.ts scripts/lib/setup-prompts.test.ts
@@ -192,18 +192,18 @@ git commit -m "feat: derive beginner setup defaults"
 
 ### Task 3: Wire Beginner Mode Into `npm run setup`
 
-- [ ] Update `promptForSetup` so it accepts:
+- [x] Update `promptForSetup` so it accepts:
 
 ```ts
 export type SetupPromptMode = 'beginner' | 'advanced';
 ```
 
-- [ ] In beginner mode, ask only:
+- [x] In beginner mode, ask only:
   - `Google Sheet URL or spreadsheet ID`
   - `Existing Google Sheets tab name`
   - `Writable sheet column to use for setup validation`
   - `Provision Google Cloud credentials now` only when no usable Google credential is already visible from environment/local state
-- [ ] Beginner mode should return actions:
+- [x] Beginner mode should return actions:
 
 ```ts
 {
@@ -215,24 +215,24 @@ export type SetupPromptMode = 'beginner' | 'advanced';
 }
 ```
 
-- [ ] Preserve the existing prompt sequence in advanced mode.
-- [ ] Add `verifyNow: boolean` to `SetupPromptActions`.
-- [ ] Update `resolveSetupActions()` so explicit CLI reruns set `verifyNow: options.verify`.
-- [ ] In `scripts/setup.ts`, call `promptForSetup(prompter, { mode: options.advanced ? 'advanced' : 'beginner', googleCredentialAvailable })`.
-- [ ] Compute `googleCredentialAvailable` from local setup state and environment before prompting. Treat a non-placeholder `GOOGLE_CLIENT_EMAIL` or local `googleClientEmail` as available.
-- [ ] If the beginner prompt chooses Google provisioning, store that in a local `provisionGoogle` boolean and use it for secret collection.
-- [ ] If `provisionGoogle` becomes true after the prompt, run `checkGcloudAuthPrereq()` before collecting secrets and fail with its remediation if blocked.
-- [ ] Use `actions.verifyNow` instead of `options.verify` for the final `runSetupDoctor()` call.
-- [ ] Add tests with a fake prompter proving beginner mode asks only the beginner questions and returns all actions enabled.
-- [ ] Run:
+- [x] Preserve the existing prompt sequence in advanced mode.
+- [x] Add `verifyNow: boolean` to `SetupPromptActions`.
+- [x] Update `resolveSetupActions()` so explicit CLI reruns set `verifyNow: options.verify`.
+- [x] In `scripts/setup.ts`, call `promptForSetup(prompter, { mode: options.advanced ? 'advanced' : 'beginner', googleCredentialAvailable })`.
+- [x] Compute `googleCredentialAvailable` from local setup state and environment before prompting. Treat a non-placeholder `GOOGLE_CLIENT_EMAIL` or local `googleClientEmail` as available.
+- [x] If the beginner prompt chooses Google provisioning, store that in a local `provisionGoogle` boolean and use it for secret collection.
+- [x] If `provisionGoogle` becomes true after the prompt, run `checkGcloudAuthPrereq()` before collecting secrets and fail with its remediation if blocked.
+- [x] Use `actions.verifyNow` instead of `options.verify` for the final `runSetupDoctor()` call.
+- [x] Add tests with a fake prompter proving beginner mode asks only the beginner questions and returns all actions enabled.
+- [x] Run:
 
 ```powershell
 npx vitest run --config vitest.config.ts scripts/lib/setup-prompts.test.ts scripts/lib/setup-cli.test.ts
 npm run typecheck
 ```
 
-- [ ] Expected result: focused tests pass and TypeScript compiles.
-- [ ] Commit:
+- [x] Expected result: focused tests pass and TypeScript compiles.
+- [x] Commit:
 
 ```powershell
 git add scripts/setup.ts scripts/lib/setup-prompts.ts scripts/lib/setup-prompts.test.ts scripts/lib/setup-cli.ts scripts/lib/setup-cli.test.ts
@@ -250,23 +250,23 @@ git commit -m "feat: make setup default to guided beginner flow"
 
 ### Task 4: Print Beginner-Oriented Next Steps
 
-- [ ] After beginner setup writes config, print a short summary that names:
+- [x] After beginner setup writes config, print a short summary that names:
   - generated service-account email when known
   - exact spreadsheet sharing instruction
   - API URL when deployed
   - admin URL when deployed
   - `npm run doctor` as the next verification command
-- [ ] Do not print private keys, bootstrap admin tokens, or API keys unless `--show-secrets` is present.
-- [ ] When Google provisioning succeeds, print:
+- [x] Do not print private keys, bootstrap admin tokens, or API keys unless `--show-secrets` is present.
+- [x] When Google provisioning succeeds, print:
 
 ```text
 Share your Google Sheet with <service-account-email> as Editor, then continue.
 ```
 
-- [ ] When existing credentials are used, print the same instruction with `GOOGLE_CLIENT_EMAIL`.
-- [ ] Add a unit-testable formatter helper rather than asserting console output through the whole setup script.
-- [ ] Run the helper tests and `npm run typecheck`.
-- [ ] Commit:
+- [x] When existing credentials are used, print the same instruction with `GOOGLE_CLIENT_EMAIL`.
+- [x] Add a unit-testable formatter helper rather than asserting console output through the whole setup script.
+- [x] Run the helper tests and `npm run typecheck`.
+- [x] Commit:
 
 ```powershell
 git add scripts/setup.ts scripts/lib/setup-secrets.ts scripts/lib/setup-secrets.test.ts scripts/lib/setup-google.ts
@@ -275,18 +275,18 @@ git commit -m "feat: print clearer setup next steps"
 
 ### Task 5: Improve Common Failure Messages
 
-- [ ] Audit setup failures for first-run beginner flow:
+- [x] Audit setup failures for first-run beginner flow:
   - missing Wrangler auth
   - missing Google credentials without provisioning
   - gcloud auth missing when provisioning
   - sheet not shared with service account
   - missing `_id` column
   - smoke field not present
-- [ ] Convert messages that currently assume an expert operator into action-first messages.
-- [ ] Keep raw unknown exceptions out of public API responses; this task only touches local setup script errors.
-- [ ] Add regression tests for the helper or script-layer errors that change.
-- [ ] Run focused tests and `npm run typecheck`.
-- [ ] Commit:
+- [x] Convert messages that currently assume an expert operator into action-first messages.
+- [x] Keep raw unknown exceptions out of public API responses; this task only touches local setup script errors.
+- [x] Add regression tests for the helper or script-layer errors that change.
+- [x] Run focused tests and `npm run typecheck`.
+- [x] Commit:
 
 ```powershell
 git add scripts/lib/setup-*.ts scripts/lib/setup-*.test.ts
@@ -304,7 +304,7 @@ git commit -m "fix: clarify beginner setup failures"
 
 ### Task 6: Rewrite Quickstart Around One Happy Path
 
-- [ ] Make `docs/quickstart.md` start with the novice flow:
+- [x] Make `docs/quickstart.md` start with the novice flow:
 
 ```powershell
 npm install
@@ -313,11 +313,11 @@ gcloud auth login
 npm run setup
 ```
 
-- [ ] Say setup will create config, apply secrets, deploy, bootstrap, smoke-test, and verify by default.
-- [ ] Move advanced table options, public-read setup, manual smoke env vars, and raw bootstrap templates below an `Advanced Configuration` heading.
-- [ ] Keep links to service-account docs for operators who cannot or do not want to use `gcloud`.
-- [ ] Ensure the quickstart never implies setup can share the spreadsheet automatically.
-- [ ] Commit:
+- [x] Say setup will create config, apply secrets, deploy, bootstrap, smoke-test, and verify by default.
+- [x] Move advanced table options, public-read setup, manual smoke env vars, and raw bootstrap templates below an `Advanced Configuration` heading.
+- [x] Keep links to service-account docs for operators who cannot or do not want to use `gcloud`.
+- [x] Ensure the quickstart never implies setup can share the spreadsheet automatically.
+- [x] Commit:
 
 ```powershell
 git add README.md docs/quickstart.md docs/deploy.md docs/google-service-accounts.md
@@ -326,7 +326,7 @@ git commit -m "docs: simplify first-run setup guidance"
 
 ### Task 7: Document Customization Without Making It First-Run Work
 
-- [ ] Add a concise table of customization knobs:
+- [x] Add a concise table of customization knobs:
   - project/table slugs
   - indexed fields
   - read-only fields
@@ -335,9 +335,9 @@ git commit -m "docs: simplify first-run setup guidance"
   - public-read project
   - named Google credentials
   - separate deploy/bootstrap/smoke commands
-- [ ] For each knob, state where to configure it and whether it requires rerunning bootstrap, deploy, or smoke.
-- [ ] Keep examples short and practical.
-- [ ] Commit:
+- [x] For each knob, state where to configure it and whether it requires rerunning bootstrap, deploy, or smoke.
+- [x] Keep examples short and practical.
+- [x] Commit:
 
 ```powershell
 git add docs/quickstart.md docs/deploy.md
@@ -352,21 +352,21 @@ git commit -m "docs: keep setup customization discoverable"
 
 ### Task 8: Run Full Setup-Surface Verification
 
-- [ ] Run focused setup tests:
+- [x] Run focused setup tests:
 
 ```powershell
 npx vitest run --config vitest.config.ts scripts/lib/setup-cli.test.ts scripts/lib/setup-prompts.test.ts scripts/lib/setup-secrets.test.ts scripts/lib/setup-config.test.ts scripts/lib/setup-doctor.test.ts
 ```
 
-- [ ] Run the full repo gate:
+- [x] Run the full repo gate:
 
 ```powershell
 npm run check
 ```
 
-- [ ] If failures are related to the setup simplification, fix them with regression tests before continuing.
-- [ ] If failures are unrelated, document the exact failing command and error in the final handoff.
-- [ ] Commit any verification fixes:
+- [x] If failures are related to the setup simplification, fix them with regression tests before continuing.
+- [x] If failures are unrelated, document the exact failing command and error in the final handoff.
+- [x] Commit any verification fixes:
 
 ```powershell
 git add scripts/setup.ts scripts/lib/setup-cli.ts scripts/lib/setup-cli.test.ts scripts/lib/setup-prompts.ts scripts/lib/setup-prompts.test.ts README.md docs/quickstart.md docs/deploy.md docs/google-service-accounts.md
@@ -375,7 +375,7 @@ git commit -m "test: cover simplified setup flow"
 
 ### Task 9: Review the Final Diff for Capability Preservation
 
-- [ ] Confirm `sheetflare.setup.json` still supports:
+- [x] Confirm `sheetflare.setup.json` still supports:
   - private project customization
   - public-read project customization
   - indexed fields
@@ -383,7 +383,7 @@ git commit -m "test: cover simplified setup flow"
   - field rules
   - cache TTL
   - named `GOOGLE_CREDENTIALS_JSON` refs
-- [ ] Confirm action flags still work:
+- [x] Confirm action flags still work:
   - `--apply-secrets`
   - `--deploy`
   - `--bootstrap`
@@ -394,15 +394,15 @@ git commit -m "test: cover simplified setup flow"
   - `--provision-google`
   - `--google-project`
   - `--google-service-account`
-- [ ] Confirm advanced prompt mode still exposes the old custom questions.
-- [ ] Run:
+- [x] Confirm advanced prompt mode still exposes the old custom questions.
+- [x] Run:
 
 ```powershell
 git diff --check
 git status --short --branch
 ```
 
-- [ ] Final handoff must include:
+- [x] Final handoff must include:
   - branch name
   - commits created
   - verification commands and results

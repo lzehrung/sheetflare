@@ -168,7 +168,7 @@ export async function collectSetupSecrets(options: {
     } else {
       if (!options.prompter) {
         throw new ScriptError(
-          'Setup needs Google service-account credentials before it can deploy. Run npm run setup -- --provision-google to let setup create them with gcloud, set GOOGLE_APPLICATION_CREDENTIALS to a service-account JSON file, or set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY.'
+          'Setup needs Google service-account credentials before it can deploy. Run npm run setup -- --apply-secrets --provision-google to let setup create them with gcloud, set GOOGLE_APPLICATION_CREDENTIALS to a service-account JSON file, or set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY.'
         );
       }
 

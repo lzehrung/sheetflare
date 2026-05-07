@@ -77,7 +77,7 @@ The local state file `.sheetflare.setup.local.json` stays untracked, may contain
 - `npm run setup -- --verify`
 - `npm run doctor`
 
-Use `npm run setup -- --advanced` when you want setup to ask for project names, table slugs, indexed fields, cache TTL, public-read coverage, and per-step actions. You can also edit `sheetflare.setup.json` directly; advanced customization remains config-driven.
+Use `npm run setup -- --advanced` on a first run with no `sheetflare.setup.json` when you want setup to ask for project names, table slugs, indexed fields, cache TTL, public-read coverage, and per-step actions. You can also edit `sheetflare.setup.json` directly; advanced customization remains config-driven.
 
 `npm run setup -- --verify` and its shorter alias `npm run doctor` are the fastest post-deploy confidence checks. They verify the resolved Google credential source, Worker `/ready`, Cloudflare Pages project presence, protected admin root plus proxied `/docs`, and Drive watch coverage for the spreadsheets declared in `sheetflare.setup.json`. They exit non-zero on both warnings and blocking issues so a passing run means the full check set completed cleanly.
 

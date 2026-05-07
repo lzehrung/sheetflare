@@ -49,7 +49,7 @@ npm run setup -- --verify
 
 Rerun notes:
 
-- `npm run setup -- --advanced` uses the full prompt flow for project names, table slugs, indexed fields, cache TTL, public-read coverage, and per-step action choices.
+- `npm run setup -- --advanced` uses the full prompt flow for project names, table slugs, indexed fields, cache TTL, public-read coverage, and per-step action choices when no setup config exists yet.
 - `npm run setup -- --deploy` requires admin-site auth secrets for the admin Pages deploy. Setup reuses `.sheetflare.setup.local.json` when available, or falls back to `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD`. It also ensures the Pages project exists and applies `SHEETFLARE_API_BASE_URL` at the Pages project level before the deploy.
 - `npm run setup -- --smoke` accepts either a scoped admin API key or the bootstrap admin credential through `SHEETFLARE_ADMIN_CREDENTIAL` or an interactive prompt. It no longer reuses those credentials from local setup state.
 - `npm run setup -- --apply-secrets --provision-google` can create the Google project, enable Sheets and Drive APIs, create the service account, and mint a key JSON before applying Worker secrets. Use `--google-project` and `--google-service-account` when the default names derived from the setup profile are not what you want.

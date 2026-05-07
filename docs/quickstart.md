@@ -36,7 +36,7 @@ gcloud auth login
 
 `wrangler` deploys the Cloudflare Worker and admin Pages site. `gcloud` is only needed if you want setup to create the Google Cloud project and service account for you.
 
-If you already have a service-account JSON file, you can skip `gcloud auth login`. Setup will ask for the file path instead.
+If you already have a service-account JSON file, you can skip `gcloud auth login`. When setup asks whether to provision Google Cloud credentials, choose `No`; setup will then ask for the file path.
 
 ## 3. Run Setup
 
@@ -62,10 +62,10 @@ Beginner setup then uses safe defaults:
 - public-read API: disabled
 - setup actions: apply secrets, deploy, bootstrap, smoke-test, verify
 
-When setup prints the service-account email, share your Google Sheet with that email as `Editor`. If setup pauses or fails before bootstrap because the sheet is not shared yet, share the sheet and rerun the credential, bootstrap, smoke, and verification steps together:
+When setup prints the service-account email, share your Google Sheet with that email as `Editor`. If setup pauses or fails before bootstrap because the sheet is not shared yet, share the sheet and rerun bootstrap, smoke, and verification together:
 
 ```powershell
-npm run setup -- --apply-secrets --bootstrap --smoke --verify
+npm run setup -- --bootstrap --smoke --verify
 ```
 
 ## 4. What Setup Creates
@@ -112,7 +112,7 @@ npm run setup -- --verify
 
 ## Advanced Configuration
 
-Run the full prompt flow when you want setup to ask for all configurable fields:
+Run the full prompt flow on a first run with no `sheetflare.setup.json` when you want setup to ask for all configurable fields:
 
 ```powershell
 npm run setup -- --advanced
@@ -135,7 +135,7 @@ Customization stays in `sheetflare.setup.json` unless noted below.
 | Field rules | `privateProject.tables[].fieldRules` | `npm run setup -- --bootstrap --smoke --verify` |
 | Cache TTL | `privateProject.tables[].cacheTtlSeconds` | `npm run setup -- --bootstrap --verify` |
 | Public-read API | `publicReadProject` | `npm run setup -- --bootstrap --smoke --verify` |
-| Named Google credentials | Worker `GOOGLE_CREDENTIALS_JSON` plus `googleCredentialRef` | `npm run setup -- --apply-secrets --deploy --verify` |
+| Named Google credentials | Worker `GOOGLE_CREDENTIALS_JSON` plus `googleCredentialRef` | Apply `GOOGLE_CREDENTIALS_JSON` manually with Wrangler or CI, then `npm run setup -- --deploy --verify` |
 | Separate deploy/bootstrap/smoke steps | CLI flags | Run only the matching flag |
 
 ### Table Shape
