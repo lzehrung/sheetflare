@@ -1588,6 +1588,7 @@ describe('App', () => {
     fireEvent.click(screen.getByText('Save and load'));
 
     await screen.findByText('Demo');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Delete project' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Delete project' }));
 
     await screen.findByText('Deleting project demo complete.');
