@@ -1,6 +1,6 @@
 # Benchmarking And Validation
 
-This document defines how to generate the evidence bundle needed for broader production use.
+This document explains how to generate the evidence bundle needed before using Sheetflare for broader production traffic. The smoke harness validates functional correctness; the load harness measures latency, rate-limit behavior, and cache recovery under concurrent pressure.
 
 ## Smoke Report
 

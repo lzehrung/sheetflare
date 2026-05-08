@@ -1,8 +1,8 @@
 # Google Service Accounts
 
-This guide defines the recommended Google credential setup for Sheetflare.
+This guide covers the recommended Google credential setup for Sheetflare.
 
-The current runtime expects a Google service-account client email plus private key. It does not use a browser OAuth flow or Google-managed workload identity.
+Sheetflare uses a Google service account - a non-human Google identity - to access your spreadsheets. The Worker authenticates with a service-account email and private key. It does not use browser OAuth or Google-managed workload identity; your spreadsheets stay private and only the accounts you share them with can read or write data.
 
 Use this guide when you are:
 
@@ -10,7 +10,7 @@ Use this guide when you are:
 - deciding whether to use one shared credential or named per-project credentials
 - rotating Google credentials after initial deploy
 
-If you already have `gcloud` authenticated locally, the fastest path is usually the beginner setup flow:
+If you already have `gcloud` authenticated locally, the fastest path is the beginner setup flow:
 
 ```powershell
 gcloud auth login

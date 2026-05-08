@@ -2,273 +2,133 @@
 
 ![Sheetflare](./docs/assets/sheetflare.jpg)
 
-Sheetflare is a Cloudflare-first starter for exposing Google Sheets tabs through a small Hono API backed by Durable Objects.
-It is aimed at controlled self-hosted deployments and is not yet production-proven for broad external workloads.
+Sheetflare turns Google Sheets tabs into a REST API. It runs on Cloudflare Workers, caches rows in Durable Objects so reads don't hit Google's API on every request, and ships a lightweight admin UI for managing projects and API keys. It is suited for controlled self-hosted deployments and has not yet been validated for broad public-facing traffic.
 
-Start with [docs/quickstart.md](./docs/quickstart.md).
-Operational docs live in [docs/operator-runbook.md](./docs/operator-runbook.md) and [docs/deploy.md](./docs/deploy.md).
-Google credential setup guidance lives in [docs/google-service-accounts.md](./docs/google-service-accounts.md).
-Production evidence workflows live in [docs/benchmarking.md](./docs/benchmarking.md) and [docs/observability.md](./docs/observability.md).
-Project policies live in [LICENSE](./LICENSE), [SECURITY.md](./SECURITY.md), [CONTRIBUTING.md](./CONTRIBUTING.md), and [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).
+## Documentation
+
+| | |
+| --- | --- |
+| **[Quickstart](./docs/quickstart.md)** | First deployment - start here |
+| [Deploy Guide](./docs/deploy.md) | CI setup, Cloudflare token scopes, manual fallbacks |
+| [Operator Runbook](./docs/operator-runbook.md) | Day-2 ops: cache inspection, reindex, credentials, failure handling |
+| [Google Service Accounts](./docs/google-service-accounts.md) | Credential setup, secret layout, key rotation |
+| [Observability](./docs/observability.md) | Structured log events, alert plan |
+| [Benchmarking](./docs/benchmarking.md) | Load testing and production evidence |
+| [Contributing](./CONTRIBUTING.md) | Development workflow, repo standards |
+| [Contributor Staging](./docs/contributor-staging.md) | Shared staging environment (maintainers) |
+
+Project policies: [LICENSE](./LICENSE) · [SECURITY.md](./SECURITY.md) · [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
+
+## Get Started
+
+```powershell
+npm install
+npx wrangler login    # Cloudflare (Workers + Pages)
+gcloud auth login     # lets setup create Google credentials automatically; skip if you have a service-account JSON
+npm run setup
+```
+
+`npm run setup` prompts for your Sheet URL and tab name, deploys the Worker and admin UI, and bootstraps the first project and API keys. Full walkthrough: [docs/quickstart.md](./docs/quickstart.md).
+
+Run `npm run setup -- --help` for all setup flags and rerun patterns.
+
+## How It Works
+
+Each Google Sheet tab you connect becomes a **table** inside a **project**. Sheetflare syncs rows from the sheet into a local SQLite cache inside a Cloudflare Durable Object. Reads and queries serve from that cache; writes go to the sheet first and then update the cache immediately. Google Drive watches trigger automatic cache refreshes when the source sheet changes.
+
+The `setup` command manages the full first-run lifecycle: Google credential provisioning, Worker secrets, deploy, project bootstrap, and smoke validation. For reruns, use targeted flags: `--deploy`, `--bootstrap`, `--smoke`, `--verify`.
 
 ## Workspaces
 
-- `apps/api`: Cloudflare Worker API and Durable Object entrypoints
-- `apps/admin`: lightweight React admin UI
-- `packages/contracts`: shared request, response, RPC, and error contracts
-- `packages/domain`: pure row, pagination, and schema utilities
-- `packages/google-sheets`: Google Sheets service-account client
-- `packages/cloudflare`: Durable Object implementations and RPC helpers
+| Workspace | Role |
+| --- | --- |
+| `apps/api` | Cloudflare Worker, Durable Object entrypoints |
+| `apps/admin` | React admin UI (Cloudflare Pages) |
+| `packages/contracts` | Shared request/response/RPC/error types |
+| `packages/domain` | Row, pagination, and schema utilities |
+| `packages/google-sheets` | Google Sheets service-account client |
+| `packages/cloudflare` | Durable Object implementations |
 
 ## Commands
 
 ```powershell
-npm install
-npm run check
-npm run setup
-npm run dev:api
-npm run dev:admin
-npm run deploy
-npm run e2e:local
-npm run smoke
+npm install        # install all workspace dependencies
+npm run check      # lint + typecheck + test + build
+npm run setup      # guided first-time deploy and configuration
+npm run dev:api    # local API Worker dev server
+npm run dev:admin  # local admin UI dev server
+npm run deploy     # deploy API Worker and admin Pages
+npm run smoke      # smoke test against a live deployment
+npm run load       # load harness against a live deployment
+npm run e2e:local  # local end-to-end: API smoke + admin browser automation
 ```
 
 ## Operator Scripts
 
-- `npm run setup`
-- `npm run setup:verify`
-- `npm run doctor`
-- `npm run ops:create-admin-key`
-- `npm run ops:bootstrap`
-- `npm run ops:cache`
-- `npm run ops:cache:health`
-- `npm run ops:watch:drive`
-- `npm run ops:watch:drive:status`
-- `npm run ops:watch:drive:retry-advice`
-- `npm run ops:watch:drive:stop`
-- `npm run ops:reindex`
-- `npm run e2e:browser`
-- `npm run e2e:local`
-- `npm run deploy`
-- `npm run deploy:raw`
-- `npm run smoke`
-- `npm run load`
+These target a live deployment. Most require `SHEETFLARE_BASE_URL` and `SHEETFLARE_ADMIN_CREDENTIAL`.
 
-## Setup Path
-
-For the normal setup flow:
-
-1. Follow [docs/quickstart.md](./docs/quickstart.md).
-2. Run `npm run setup`.
-3. Share your sheet with the service-account email that setup prints.
-4. Use [docs/deploy.md](./docs/deploy.md) for CI deployment details, manual fallback commands, and Cloudflare token scopes.
-5. Use [docs/operator-runbook.md](./docs/operator-runbook.md) for day-2 operations and failure handling.
-
-Run `npm run setup -- --help` for the setup flags and common operator flows.
-
-On a first run, `npm run setup` uses a beginner flow that asks for the Sheet URL, tab name, and one writable smoke-test column. It then writes `sheetflare.setup.json`, applies secrets, deploys, bootstraps the first project and keys, registers Google Drive watches when possible, runs smoke validation, and runs setup verification.
-
-The local state file `.sheetflare.setup.local.json` stays untracked, may contain admin-site Basic Auth material, and should not be shared. For reruns from an existing config:
-
-- `npm run setup -- --apply-secrets`
-- `npm run setup -- --deploy`
-- `npm run setup -- --bootstrap`
-- `npm run setup -- --smoke`
-- `npm run setup -- --verify`
-- `npm run doctor`
-
-Use `npm run setup -- --advanced` on a first run with no `sheetflare.setup.json` when you want setup to ask for project names, table slugs, indexed fields, cache TTL, public-read coverage, and per-step actions. You can also edit `sheetflare.setup.json` directly; advanced customization remains config-driven.
-
-`npm run setup -- --verify` and its shorter alias `npm run doctor` are the fastest post-deploy confidence checks. They verify the resolved Google credential source, Worker `/ready`, Cloudflare Pages project presence, protected admin root plus proxied `/docs`, and Drive watch coverage for the spreadsheets declared in `sheetflare.setup.json`. They exit non-zero on both warnings and blocking issues so a passing run means the full check set completed cleanly.
-
-If you already have `wrangler` and `gcloud` authenticated, setup can provision the Google side instead of requiring a pre-existing service-account JSON:
+**Setup reruns**
 
 ```powershell
-gcloud auth login
-npx wrangler login
-npm run setup
+npm run setup -- --apply-secrets  # re-apply Worker secrets
+npm run setup -- --deploy         # redeploy Worker and admin UI
+npm run setup -- --bootstrap      # re-run project and key bootstrap
+npm run setup -- --smoke          # re-run smoke validation
+npm run setup -- --verify         # re-run post-deploy verification
+npm run doctor                    # alias for --verify; quickest health check
 ```
 
-`npx wrangler login` is fine for interactive local use. Expect to log back in periodically when using Wrangler's OAuth session. For unattended deploys or CI, prefer `CLOUDFLARE_API_TOKEN`.
+**Keys and bootstrap**
 
-Use `--google-project` and `--google-service-account` when you want explicit names. Interactive provisioning defaults the project prompt from your active `gcloud` project when available; noninteractive provisioning otherwise falls back to profile-derived names such as `sheetflare-prod` or `sheetflare-staging`.
-
-If you are maintaining this repository's own shared staging environment, use [docs/contributor-staging.md](./docs/contributor-staging.md).
-
-## API Docs
-
-When the API worker is running:
-
-- `GET /doc` returns the generated OpenAPI document.
-- `GET /docs` serves the interactive API reference UI.
-
-The docs reflect the actual HTTP surface, including auth requirements, path params, query params, and request/response bodies for the supported endpoints.
-Admin project and table POST routes create by default. Replacing an existing config requires an explicit `?upsert=true` and returns `200` instead of `201`.
-Admin project and table DELETE routes remove only Sheetflare configuration and cached local table state; they do not delete the upstream spreadsheet or tab.
-
-## Auth Model
-
-- Admin routes use either the bootstrap bearer token or an API key with the relevant admin scope.
-- Data routes use scoped API keys unless the project is configured with `defaultAuthMode: "public-read"`.
-- API keys are stored in the control-plane durable object with hashed secrets, revocation timestamps, and last-used timestamps.
-- Supported scopes are intentionally small and exact:
-  - `admin:projects`
-  - `admin:keys`
-  - `table:read`
-  - `table:create`
-  - `table:update`
-  - `table:delete`
-- Project-scoped API keys with `admin:keys` can create keys only for their own project and only with scopes the caller already has.
-
-Bootstrap and deployment steps are documented in [docs/quickstart.md](./docs/quickstart.md).
-
-## Browser Access
-
-The hosted admin UI calls the API through its same-origin Pages proxy, so routine admin use does not require CORS.
-
-If you intentionally call the Worker API directly from another browser origin, set `SHEETFLARE_ALLOWED_ORIGINS` to a comma-separated allowlist such as:
-
-```text
-https://admin.example.com,https://internal.example.com
+```powershell
+npm run ops:create-admin-key  # create a scoped admin API key
+npm run ops:bootstrap         # bootstrap projects/tables/keys from JSON config
 ```
 
-When unset, the Worker does not emit browser CORS headers. Preflight requests from unlisted origins are rejected.
+**Cache and reindex**
 
-## Row Identity
+```powershell
+npm run ops:cache              # inspect cache status for one table
+npm run ops:cache:health       # batch health check (exits non-zero if unhealthy)
+npm run ops:reindex            # force full reindex on a table
+```
 
-- Managed tables require a stable ID column.
-- Header rows must not contain duplicate non-empty column names.
-- Table config can mark specific columns as read-only with `readOnlyFields`.
-- Table config can also define write-time `fieldRules` such as `required`, `unique`, `enum`, `normalize`, and `type`.
-- The gateway treats row numbers as a cache only.
-- Row creation rejects duplicate managed IDs.
-- Updates and deletes re-resolve rows by ID before mutating the sheet, which keeps the system correct when rows are re-ordered manually in Google Sheets.
-- Mutation lookup uses a narrow scan of the managed ID column plus targeted row reads instead of rescanning full row payloads, which reduces write-path cost on larger sheets while preserving correctness.
-- Read-only columns are never targeted by API writes, which lets a sheet expose formula-derived or operator-managed values without API updates flattening them.
-- `fieldRules` are enforced on API writes. They do not prevent direct Google Sheets edits from introducing invalid or duplicate values later.
-- Normal sheet reads stay string-first. Sheetflare does not infer numbers or booleans from raw cell text; use explicit `fieldRules.type` when a field needs deterministic typed validation or indexed numeric/boolean query behavior.
-- Cache status now includes `validation`, which summarizes field-rule drift found during the last full sync without blocking normal reads.
-- `validation.validatedAt` tells you when that validation snapshot was last recomputed. API writes can make the cache fresh again without recomputing validation drift immediately.
+**Drive watches**
 
-## Cache And Sync
+```powershell
+npm run ops:watch:drive               # register or renew all spreadsheet Drive watches
+npm run ops:watch:drive:status        # current watch state
+npm run ops:watch:drive:retry-advice  # timing guidance for re-registration
+npm run ops:watch:drive:stop          # stop known watches
+```
 
-- Each table durable object maintains a materialized row cache in Durable Object SQLite.
-- Normal reads (`list`, `get`, `schema`) use cached rows instead of rescanning Google Sheets.
-- Cache freshness is controlled by `cacheTtlSeconds` on the table config.
-- Table layout must be explicit and valid: `dataStartRow` must be greater than `headerRow`.
-- When the cache is cold or stale, the table durable object performs a sync from Google Sheets and refreshes:
-  - cached rows
-  - row ID to row number index
-  - cached headers
-  - sync metadata
-- Writes update the cache immediately after successful upstream mutation.
-- If a create fails after the initial row append, the API attempts to delete that partial upstream row before returning the failure.
-- Deletes normally repair cached row numbers locally after successful API deletes. If the live header layout has drifted or the cache is already stale, the table falls back to a full sync for safety.
-- Table config changes that affect cache shape, indexing, or sheet layout automatically mark the cache stale and force a resync on the next read or write.
-- Full syncs now bound Google Sheets reads to the declared header width instead of reading the entire tab width.
+## Concepts
 
-Operational procedures for reindex, cache inspection, and failure handling live in [docs/operator-runbook.md](./docs/operator-runbook.md).
+**Auth** - Every project is private by default. Admin routes accept the bootstrap bearer token or a scoped admin API key. Data routes accept scoped API keys unless the project is configured as `public-read`. Available scopes: `admin:projects`, `admin:keys`, `table:read`, `table:create`, `table:update`, `table:delete`. Use the bootstrap token as break-glass only - create a scoped admin key after first deploy and use that for routine work. Project-scoped keys with `admin:keys` can create keys only for their own project and only with scopes the creator already holds.
 
-## Initial Envelope
+**Row identity** - Every table requires a stable ID column (default: `_id`). Row numbers in the sheet are cache metadata, not identity - Sheetflare re-resolves rows by ID before every write, so manually reordering rows in the sheet is safe. All managed IDs must be unique and non-blank; duplicate or missing IDs block syncs.
 
-These are conservative starting constraints, not benchmark-proven public limits:
+**Caching** - Reads (`list`, `get`, `schema`) serve from the local cache. Freshness is controlled by `cacheTtlSeconds`. Full syncs are bounded to the declared header width. Config changes that affect cache shape automatically trigger a resync on the next read or write.
 
-- one `TableDO` owns one table, so each hot table is effectively single-threaded at the Durable Object boundary
-- `TABLE_MAX_FULL_SCAN_ROWS` defaults to `10000`
-- scan-heavy operators like `contains` should stay off the hot path for public workloads
-- keep `cacheTtlSeconds` in the `15` to `60` second range until staging data proves a better setting
-- keep indexed fields lean even though the hard limit is `32` including the managed ID column
+**Field rules** - Declare `readOnlyFields` to prevent API writes from touching formula-derived or operator-managed columns. Declare `fieldRules` to enforce required fields, unique values, enum constraints, normalization (trim/lowercase), and explicit type coercion (number, boolean, date) on writes. Sheet reads are string-first by default; use `fieldRules.type` when a field needs typed indexed filtering.
 
-Use [docs/benchmarking.md](./docs/benchmarking.md) to replace these starting assumptions with measured limits from your own staging deployment.
+**Queries** - Filters are AND-only. Sort is single-field with keyset pagination cursors. Indexed fields (declared in `indexedFields`) use fast cache lookups. The `contains` operator is scan-heavy and is blocked above `TABLE_MAX_FULL_SCAN_ROWS`. Passing a filter or sort on a non-indexed field is rejected rather than silently doing a full scan. The interactive API reference at `/docs` documents all filter operators and query parameters.
 
-## Query Semantics
+**CORS** - The admin UI calls the API through its same-origin Pages proxy, so no CORS setup is needed for normal admin use. If you intentionally call the Worker API from another browser origin, set `SHEETFLARE_ALLOWED_ORIGINS` to a comma-separated list of allowed origins.
 
-- Filters are AND-only across fields.
-- Sort supports one field at a time, plus stable keyset pagination cursors.
-- Efficient queries are expected to use indexed fields.
-- Every table automatically indexes its ID column.
-- Additional indexed fields are declared in table config with `indexedFields`.
+**Starting envelope** - Conservative defaults before you have staging data: `TABLE_MAX_FULL_SCAN_ROWS` defaults to 10,000; keep `cacheTtlSeconds` between 15–60 seconds; keep `indexedFields` lean (hard limit: 32 including the ID column). Replace these with measured limits from [docs/benchmarking.md](./docs/benchmarking.md).
 
-Supported filter operators:
+## API Reference
 
-- `eq`
-- `neq`
-- `gt`
-- `gte`
-- `lt`
-- `lte`
-- `in`
-- `startsWith`
-- `contains`
-- `isNull`
+With the Worker running:
 
-HTTP note:
+- `GET /docs` - interactive OpenAPI UI
+- `GET /doc` - raw OpenAPI document
 
-- `GET /v1/projects/:project/tables/:table/rows` accepts `filter` as a JSON-encoded query parameter.
-- Example:
-  `?filter={"status":{"eq":"active"},"score":{"gte":80}}`
-
-Performance notes:
-
-- Equality, range, `in`, and indexed sort retrieval use SQLite-backed cached cell indexes.
-- `contains` is supported, but it is scan-heavy. For safety, scan-heavy queries are rejected once a cached table grows beyond the configured full-scan threshold.
-- If a filter or sort targets a non-indexed field, the API rejects it instead of silently doing an expensive query on large caches.
-- Mutation note: the write path is optimized separately from list/query execution. Update/delete/create-duplicate checks resolve IDs through the managed ID column, not through the cached query indexes.
-- The Worker env var `TABLE_MAX_FULL_SCAN_ROWS` controls that threshold and defaults to `10000`.
+The docs reflect the full HTTP surface: auth requirements, path and query parameters, request/response shapes. Admin POST routes create by default; add `?upsert=true` to replace an existing config. Admin DELETE routes remove Sheetflare configuration and clear cached state - they do not delete the upstream spreadsheet or tab.
 
 ## Admin UI
 
-- The admin UI now supports the minimum real control-plane loop:
-  - create projects
-  - create tables
-  - create scoped API keys
-  - list global and project-scoped keys
-  - revoke keys with visible active/revoked state
-  - validate project/table/key drafts before submit
-  - refresh project and key views explicitly
-  - inspect cache status
-  - force reindex
-  - delete tables and projects with confirmation
-- Deleting a table clears its local cache before removing table metadata. Deleting a project clears configured table caches, revokes that project's scoped API keys, and stops Drive watches that no remaining project uses. Delete requests are idempotent, so retrying an already-completed delete returns success.
-- Table creation now supports `readOnlyFields` for columns that should stay sheet-managed.
-- Table creation also supports optional `fieldRules` for required, unique, enum, normalize, and type validation.
-- Admin credentials are not stored in the browser. Paste a scoped admin API key or bootstrap token when you need control-plane access.
-- Paste either the bootstrap admin token or a scoped admin API key into the auth panel, but prefer scoped keys for routine admin use.
+The admin UI covers the full control-plane: create and delete projects and tables, create and revoke API keys, inspect cache status, and trigger reindex. Drafts are validated before submitting. Credentials are not stored in the browser - paste a scoped admin key or bootstrap token when you need access. Prefer scoped keys for routine use.
 
-## Notes
-
-- Project listing and API keys are handled by a dedicated `ControlPlaneDO`.
-- The Google Sheets adapter uses service-account JWT exchange and the Sheets REST API directly, so the worker does not depend on Node-only Google SDKs.
-- Google Sheets read paths use bounded retry/backoff for transient upstream failures, while mutation paths avoid automatic replay to reduce duplicate-write risk.
-- Non-timeout transport failures are reported distinctly from actual request timeouts.
-- Rate limits are bucketed by route family and operation key, for example `admin.projects.list`, `rows.list`, and `admin.cache.reindex`, so hot endpoints do not starve unrelated calls from the same principal.
-- Rate-limit principals are derived only from verified credentials; unverified API-key-shaped strings fall back to the anonymous/IP bucket.
-- Request logs now include the applied rate-limit principal, route family, operation key, and limit/remaining/reset fields so `429` analysis lines up with the actual bucket selection.
-- `table.sync.complete` logs include validation status and issue counts from the same sync pass.
-- `npm run check` now runs lint, typecheck, test, and build from the repo root.
-
-## Local End-To-End Checks
-
-Once you have live Google Sheets credentials and the smoke-test projects/tables configured:
-
-Required smoke env vars:
-
-- `SHEETFLARE_ADMIN_CREDENTIAL`
-- `SHEETFLARE_PRIVATE_PROJECT`
-- `SHEETFLARE_PRIVATE_TABLE`
-- `SHEETFLARE_PRIVATE_READ_KEY`
-- `SHEETFLARE_MUTATION_KEY`
-- `SHEETFLARE_SMOKE_CREATE_VALUES_JSON`
-- `SHEETFLARE_SMOKE_UPDATE_VALUES_JSON`
-
-Optional for anonymous `public-read` coverage:
-
-- `SHEETFLARE_PUBLIC_PROJECT`
-- `SHEETFLARE_PUBLIC_TABLE`
-
-```powershell
-npx playwright install chromium
-npm run e2e:local
-```
-
-`npm run e2e:local` starts the local API and admin UI, runs the API smoke checks against the local Worker, then runs browser automation against the admin UI.
+Deleting a table clears its local cache before removing table metadata. Deleting a project clears table caches, revokes that project's API keys, and stops Drive watches for spreadsheets no remaining project uses. Delete operations are idempotent.

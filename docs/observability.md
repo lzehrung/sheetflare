@@ -1,6 +1,6 @@
 # Observability And Alerts
 
-Sheetflare already emits structured JSON logs from the Worker and `TableDO`. This document defines the minimum alert plan for production-like operation.
+Sheetflare emits structured JSON log events from the Worker and table cache layer. This document lists the event schemas, defines the minimum alert conditions for production-like operation, and provides copy-paste query predicates for common log platforms.
 
 ## Structured Events
 
