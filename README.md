@@ -14,7 +14,6 @@ Sheetflare turns Google Sheets tabs into a REST API. It runs on Cloudflare Worke
 | [Google Service Accounts](./docs/google-service-accounts.md) | Credential setup, secret layout, key rotation |
 | [Observability](./docs/observability.md) | Structured log events, alert plan |
 | [Benchmarking](./docs/benchmarking.md) | Load testing and production evidence |
-| [Contributor Staging](./docs/contributor-staging.md) | Shared staging environment (maintainers) |
 
 Project policies: [LICENSE](./LICENSE)
 
