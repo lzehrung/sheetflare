@@ -114,6 +114,24 @@ describe('resolveSetupActions', () => {
     });
   });
 
+  it('preserves explicit CLI action flags when prompt actions are provided', () => {
+    const options = parseSetupArgs(['--verify', '--smoke']);
+
+    expect(resolveSetupActions(options, {
+      applySecretsNow: false,
+      deployNow: false,
+      bootstrapNow: false,
+      smokeNow: false,
+      verifyNow: false
+    })).toEqual({
+      applySecretsNow: false,
+      deployNow: false,
+      bootstrapNow: false,
+      smokeNow: true,
+      verifyNow: true
+    });
+  });
+
   it('maps explicit verify flags into setup actions', () => {
     const options = parseSetupArgs(['--verify']);
 
@@ -124,7 +142,7 @@ describe('resolveSetupActions', () => {
 });
 
 describe('actionsRequireWranglerAuth', () => {
-  it('requires wrangler auth for deploy or secrets actions only', () => {
+  it('requires wrangler auth for deploy or secrets actions', () => {
     expect(actionsRequireWranglerAuth({
       applySecretsNow: false,
       deployNow: false,
@@ -140,5 +158,23 @@ describe('actionsRequireWranglerAuth', () => {
       smokeNow: false,
       verifyNow: false
     })).toBe(true);
+  });
+
+  it('requires wrangler auth for admin deployment verification', () => {
+    expect(actionsRequireWranglerAuth({
+      applySecretsNow: false,
+      deployNow: false,
+      bootstrapNow: false,
+      smokeNow: false,
+      verifyNow: true
+    }, { verifiesAdminPagesProject: true })).toBe(true);
+
+    expect(actionsRequireWranglerAuth({
+      applySecretsNow: false,
+      deployNow: false,
+      bootstrapNow: false,
+      smokeNow: false,
+      verifyNow: true
+    }, { verifiesAdminPagesProject: false })).toBe(false);
   });
 });

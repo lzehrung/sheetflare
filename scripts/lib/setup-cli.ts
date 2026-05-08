@@ -175,7 +175,13 @@ export function resolveSetupActions(
   promptActions: SetupPromptActions | null
 ): SetupPromptActions {
   if (promptActions) {
-    return promptActions;
+    return {
+      applySecretsNow: promptActions.applySecretsNow || options.applySecrets,
+      deployNow: promptActions.deployNow || options.deploy,
+      bootstrapNow: promptActions.bootstrapNow || options.bootstrap,
+      smokeNow: promptActions.smokeNow || options.smoke,
+      verifyNow: promptActions.verifyNow || options.verify
+    };
   }
 
   return {
@@ -187,6 +193,11 @@ export function resolveSetupActions(
   };
 }
 
-export function actionsRequireWranglerAuth(actions: SetupPromptActions) {
-  return actions.applySecretsNow || actions.deployNow;
+export function actionsRequireWranglerAuth(
+  actions: SetupPromptActions,
+  options: { verifiesAdminPagesProject?: boolean } = {}
+) {
+  return actions.applySecretsNow
+    || actions.deployNow
+    || Boolean(actions.verifyNow && options.verifiesAdminPagesProject);
 }

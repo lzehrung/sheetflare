@@ -356,14 +356,17 @@ async function main() {
       return;
     }
 
+    const wranglerAuthRequired = actionsRequireWranglerAuth(actions, {
+      verifiesAdminPagesProject: config.deploy.admin
+    });
     let wranglerResult = prereqResults.find((result) => result.name === 'Wrangler auth') ?? null;
-    if (actionsRequireWranglerAuth(actions) && !wranglerResult) {
+    if (wranglerAuthRequired && !wranglerResult) {
       wranglerResult = await checkWranglerAuthPrereq();
       recordPrereqResult(prereqResults, wranglerResult);
       renderPrereqSummary([wranglerResult]);
     }
 
-    if (actionsRequireWranglerAuth(actions) && wranglerResult?.status === 'blocked') {
+    if (wranglerAuthRequired && wranglerResult?.status === 'blocked') {
       throw new ScriptError(formatWranglerAuthRequiredMessage(beginnerSetupStarted));
     }
 
