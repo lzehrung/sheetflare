@@ -2,7 +2,9 @@
 
 This is the shortest safe path from one Google Sheet tab to a deployed API.
 
-Use this document if you want Sheetflare to make the setup decisions for you. If you need CI deploy details, manual fallback commands, or deeper operations, use [deploy.md](./deploy.md), [operator-runbook.md](./operator-runbook.md), and [google-service-accounts.md](./google-service-accounts.md).
+By the end of this guide, you will have a live Cloudflare Worker API serving rows from your sheet, an admin UI for managing projects and API keys, and a smoke-tested deployment.
+
+Use this guide when you want Sheetflare to make the setup decisions for you. For CI deploy details, manual fallback commands, or deeper operations, see [deploy.md](./deploy.md), [operator-runbook.md](./operator-runbook.md), and [google-service-accounts.md](./google-service-accounts.md).
 
 ## 1. Prepare One Sheet
 
@@ -228,11 +230,15 @@ npm run e2e:local
 
 Check these first:
 
-- `npx wrangler whoami` succeeds.
-- `gcloud auth list` shows an active account when you chose Google provisioning.
+- `npx wrangler whoami` succeeds and shows the right account.
+- `gcloud auth list` shows an active account (only needed if you chose Google provisioning).
 - The spreadsheet is shared with the service-account email as `Editor`.
-- The configured tab exists.
-- `_id` exists, is unique, and has no blanks.
-- The smoke-test column exists and is writable.
+- The configured tab exists and matches the name you gave setup exactly.
+- `_id` column exists, every value is unique, and no cell is blank.
+- The smoke-test column exists and is writable (not formula-derived).
 
-For deeper troubleshooting, use [operator-runbook.md](./operator-runbook.md).
+For deeper troubleshooting, see [operator-runbook.md](./operator-runbook.md). To re-run only the failed steps after fixing an issue:
+
+```powershell
+npm run setup -- --bootstrap --smoke --verify
+```

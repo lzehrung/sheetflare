@@ -10,10 +10,10 @@ It assumes:
 
 ## Core Concepts
 
-- Google Sheets is the upstream source of truth.
-- `TableDO` SQLite is the normal read surface.
-- Row numbers are cache state, not stable identity.
-- Managed row IDs are required and must stay unique and non-blank.
+- **Google Sheets is the source of truth.** Sheetflare syncs from it; data is never migrated away from the sheet.
+- **Reads go to a local cache, not directly to Google.** Each table's Durable Object maintains a SQLite row cache. API reads and queries serve from that cache, which keeps read latency independent of Google API response times.
+- **Row numbers change; row IDs do not.** When someone reorders the sheet, row numbers shift. Sheetflare always re-resolves rows by the managed ID column before writing, so reordering is safe.
+- **Every managed ID must be unique and non-blank.** Duplicate or missing IDs in the ID column block syncs and must be fixed in the sheet before reindexing will succeed.
 
 ## Bootstrap Setup
 

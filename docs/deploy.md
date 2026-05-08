@@ -1,14 +1,16 @@
 # Deploy Guide
 
-This guide defines the expected deployment and verification flow for Sheetflare.
+This guide covers the full deployment reference: CI token scopes, manual fallback commands, post-deploy verification, and rollback. It assumes you have already completed a first deployment.
+
+If this is your first deployment, start with [quickstart.md](./quickstart.md) instead - it walks through the full first-run flow.
 
 Use [google-service-accounts.md](./google-service-accounts.md) for the exact recommended Google credential model, secret layout, and rotation workflow.
 
 If you are maintaining this repository's shared staging workflows, use [contributor-staging.md](./contributor-staging.md) for the exact GitHub secret names and project-specific staging asset names.
 
-## Preferred Path
+## Setup Flow
 
-For a normal first deployment, start with:
+For any deployment, start with:
 
 ```powershell
 npm install
@@ -37,6 +39,8 @@ The setup command can:
 - bootstrap the first project and keys
 - run smoke validation
 
+Use `npm run setup -- --advanced` on a first run with no `sheetflare.setup.json` to get the full prompt flow for project names, table slugs, indexed fields, cache TTL, public-read coverage, and per-step action choices.
+
 For reruns from an existing setup config:
 
 ```powershell
@@ -49,7 +53,6 @@ npm run setup -- --verify
 
 Rerun notes:
 
-- `npm run setup -- --advanced` uses the full prompt flow for project names, table slugs, indexed fields, cache TTL, public-read coverage, and per-step action choices when no setup config exists yet.
 - `npm run setup -- --deploy` requires admin-site auth secrets for the admin Pages deploy. Setup reuses `.sheetflare.setup.local.json` when available, or falls back to `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD`. It also ensures the Pages project exists and applies `SHEETFLARE_API_BASE_URL` at the Pages project level before the deploy.
 - `npm run setup -- --smoke` accepts either a scoped admin API key or the bootstrap admin credential through `SHEETFLARE_ADMIN_CREDENTIAL` or an interactive prompt. It no longer reuses those credentials from local setup state.
 - `npm run setup -- --apply-secrets --provision-google` can create the Google project, enable Sheets and Drive APIs, create the service account, and mint a key JSON before applying Worker secrets. Use `--google-project` and `--google-service-account` when the default names derived from the setup profile are not what you want.
