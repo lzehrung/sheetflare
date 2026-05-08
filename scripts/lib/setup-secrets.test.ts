@@ -115,6 +115,23 @@ describe('setup secret command builders', () => {
     expect(await hasDefaultGoogleCredentialEnvironment()).toBe(false);
   });
 
+  it('does not detect placeholder GOOGLE_APPLICATION_CREDENTIALS as usable for beginner setup', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-secrets-'));
+    tempDirs.push(dir);
+    const credentialsPath = join(dir, 'service-account.json');
+    await writeFile(credentialsPath, JSON.stringify({
+      client_email: 'service-account@your-gcp-project.iam.gserviceaccount.com',
+      private_key: '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n'
+    }), 'utf8');
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
+
+    expect(await hasDefaultGoogleCredentialEnvironment()).toBe(false);
+    await expect(collectSetupSecrets({
+      prompter: null,
+      includeAdminUiSecrets: false
+    })).rejects.toThrow('must include a real service-account client_email');
+  });
+
   it('does not treat the checked-in placeholder client email as a usable credential', async () => {
     process.env.GOOGLE_CLIENT_EMAIL = 'service-account@your-gcp-project.iam.gserviceaccount.com';
     process.env.GOOGLE_PRIVATE_KEY = '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n';

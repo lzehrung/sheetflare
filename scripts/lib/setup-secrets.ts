@@ -106,6 +106,10 @@ async function readServiceAccountFile(path: string) {
     throw new ScriptError(`Service-account JSON file ${path} must include non-empty client_email and private_key fields.`);
   }
 
+  if (isPlaceholderGoogleClientEmail(parsed.client_email)) {
+    throw new ScriptError(`Service-account JSON file ${path} must include a real service-account client_email, not the checked-in placeholder.`);
+  }
+
   return {
     client_email: parsed.client_email,
     private_key: parsed.private_key
