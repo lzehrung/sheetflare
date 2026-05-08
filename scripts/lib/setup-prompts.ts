@@ -28,16 +28,32 @@ export type SetupAnswers = {
   publicReadProjectName: string | null;
 };
 
+export type BeginnerSetupAnswers = {
+  spreadsheetIdOrUrl: string;
+  sheetTabName: string;
+  smokeFieldName: string;
+};
+
 export type SetupPromptActions = {
   applySecretsNow: boolean;
   deployNow: boolean;
   bootstrapNow: boolean;
   smokeNow: boolean;
+  verifyNow: boolean;
 };
+
+export type SetupPromptMode = 'beginner' | 'advanced';
 
 export type SetupPromptResult = {
   config: SetupConfig;
   actions: SetupPromptActions;
+  provisionGoogle: boolean;
+};
+
+export type SetupPromptOptions = {
+  mode: SetupPromptMode;
+  googleCredentialAvailable: boolean;
+  provisionGoogleRequested?: boolean;
 };
 
 export type SetupPrompter = {
@@ -45,6 +61,18 @@ export type SetupPrompter = {
   confirm: (options: { message: string; defaultValue: boolean }) => Promise<boolean>;
   close?: () => void;
 };
+
+export async function confirmSheetShared(prompter: SetupPrompter) {
+  const confirmed = await prompter.confirm({
+    message: 'Continue after sharing the sheet with the service account',
+    defaultValue: true
+  });
+  if (!confirmed) {
+    throw new ScriptError(
+      'Share the sheet with the service-account email as Editor, then rerun npm run setup -- --bootstrap --smoke --verify.'
+    );
+  }
+}
 
 function splitCommaSeparatedList(input: string) {
   return input
@@ -76,17 +104,82 @@ function selectDefaultSmokeField(options: {
   return options.indexedFields.find((fieldName) => fieldName.trim() !== '' && fieldName.trim() !== options.idColumn.trim());
 }
 
+function assertSmokeFieldNameIsWritable(smokeFieldName: string, idColumn: string) {
+  const trimmed = smokeFieldName.trim();
+  if (trimmed.length === 0) {
+    throw new ScriptError('Smoke field name must not be blank.');
+  }
+  if (trimmed === idColumn.trim()) {
+    throw new ScriptError('Smoke field name must not use the managed ID column.');
+  }
+
+  return trimmed;
+}
+
+function deriveTableSlugFromTabName(sheetTabName: string) {
+  const derived = sheetTabName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return normalizeTableSlug(derived.length > 0 ? derived : 'table');
+}
+
+export function buildBeginnerSetupConfigFromAnswers(answers: BeginnerSetupAnswers): SetupConfig {
+  const spreadsheetId = normalizeSpreadsheetId(answers.spreadsheetIdOrUrl);
+  const sheetTabName = answers.sheetTabName.trim();
+  if (sheetTabName.length === 0) {
+    throw new ScriptError('Sheet tab name must not be blank.');
+  }
+
+  const tableSlug = deriveTableSlugFromTabName(sheetTabName);
+  const idColumn = '_id';
+  const smokeFieldName = assertSmokeFieldNameIsWritable(answers.smokeFieldName, idColumn);
+
+  return parseSetupConfig({
+    profile: 'production',
+    deploy: {
+      api: true,
+      admin: true
+    },
+    privateProject: {
+      slug: 'main',
+      name: 'Main',
+      spreadsheetId,
+      googleCredentialRef: 'default',
+      tables: [
+        {
+          tableSlug,
+          sheetTabName,
+          idColumn,
+          cacheTtlSeconds: 60
+        }
+      ]
+    },
+    publicReadProject: null,
+    smoke: {
+      enabled: true,
+      privateTableSlug: tableSlug,
+      publicTableSlug: null,
+      adminKeyName: 'main-admin',
+      privateReadKeyName: 'main-read',
+      mutationKeyName: 'main-mutation',
+      createValues: {
+        [smokeFieldName]: 'Sheetflare smoke row'
+      },
+      updateValues: {
+        [smokeFieldName]: 'Sheetflare smoke row updated'
+      }
+    }
+  });
+}
+
 export function buildSetupConfigFromAnswers(answers: SetupAnswers): SetupConfig {
   const privateProjectSlug = normalizeProjectSlug(answers.privateProjectSlug);
   const privateTableSlug = normalizeTableSlug(answers.privateTableSlug);
   const idColumn = answers.idColumn.trim();
-  const smokeFieldName = answers.smokeFieldName.trim();
-  if (smokeFieldName.length === 0) {
-    throw new ScriptError('Smoke field name must not be blank.');
-  }
-  if (smokeFieldName === idColumn) {
-    throw new ScriptError('Smoke field name must not use the managed ID column.');
-  }
+  const smokeFieldName = assertSmokeFieldNameIsWritable(answers.smokeFieldName, idColumn);
 
   const spreadsheetId = normalizeSpreadsheetId(answers.spreadsheetIdOrUrl);
   const indexedFields = Array.from(new Set(splitCommaSeparatedList(answers.indexedFields.join(','))));
@@ -147,7 +240,67 @@ export function buildSetupConfigFromAnswers(answers: SetupAnswers): SetupConfig 
   });
 }
 
-export async function promptForSetup(prompter: SetupPrompter): Promise<SetupPromptResult> {
+async function promptForBeginnerSetup(
+  prompter: SetupPrompter,
+  options: Pick<SetupPromptOptions, 'googleCredentialAvailable' | 'provisionGoogleRequested'>
+): Promise<SetupPromptResult> {
+  const spreadsheetIdOrUrl = await prompter.text({
+    message: 'Google Sheet URL or spreadsheet ID',
+    validate: (value) => {
+      try {
+        normalizeSpreadsheetId(value);
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }
+  });
+  const sheetTabName = await prompter.text({
+    message: 'Existing Google Sheets tab name',
+    defaultValue: 'Sheet1',
+    validate: (value) => value.trim().length > 0 ? null : 'Sheet tab name must not be blank.'
+  });
+  const smokeFieldName = await prompter.text({
+    message: 'Writable sheet column to use for setup validation',
+    validate: (value) => {
+      const trimmed = value.trim();
+      if (trimmed.length === 0) {
+        return 'Smoke field name must not be blank.';
+      }
+      if (trimmed === '_id') {
+        return 'Smoke field name must not use the managed ID column.';
+      }
+      return null;
+    }
+  });
+  let provisionGoogle = false;
+  if (!options.googleCredentialAvailable && options.provisionGoogleRequested) {
+    provisionGoogle = true;
+  } else if (!options.googleCredentialAvailable) {
+    provisionGoogle = await prompter.confirm({
+        message: 'Set up Google credentials automatically with gcloud',
+        defaultValue: true
+      });
+  }
+
+  return {
+    config: buildBeginnerSetupConfigFromAnswers({
+      spreadsheetIdOrUrl,
+      sheetTabName,
+      smokeFieldName
+    }),
+    actions: {
+      applySecretsNow: true,
+      deployNow: true,
+      bootstrapNow: true,
+      smokeNow: true,
+      verifyNow: true
+    },
+    provisionGoogle
+  };
+}
+
+export async function promptForAdvancedSetup(prompter: SetupPrompter): Promise<SetupPromptResult> {
   const profile = await prompter.text({
     message: 'Setup profile',
     defaultValue: 'local',
@@ -318,9 +471,22 @@ export async function promptForSetup(prompter: SetupPrompter): Promise<SetupProm
       applySecretsNow,
       deployNow,
       bootstrapNow,
-      smokeNow
-    }
+      smokeNow,
+      verifyNow: false
+    },
+    provisionGoogle: false
   };
+}
+
+export async function promptForSetup(
+  prompter: SetupPrompter,
+  options: SetupPromptOptions = { mode: 'advanced', googleCredentialAvailable: false }
+): Promise<SetupPromptResult> {
+  if (options.mode === 'beginner') {
+    return promptForBeginnerSetup(prompter, options);
+  }
+
+  return promptForAdvancedSetup(prompter);
 }
 
 export function createConsolePrompter(): SetupPrompter {

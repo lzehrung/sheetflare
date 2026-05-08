@@ -4,7 +4,8 @@ import {
   createBootstrapConfigFromSetup,
   createBootstrapEnv,
   findCreatedKey,
-  parseBootstrapOutput
+  parseBootstrapOutput,
+  redactBootstrapResultMarker
 } from './setup-bootstrap';
 import type { SetupConfig } from './setup-config';
 
@@ -125,6 +126,17 @@ describe('bootstrap output parsing', () => {
     const output = parseBootstrapOutput(`noise\n__SHEETFLARE_BOOTSTRAP_RESULT__={"projects":[],"apiKeys":[{"apiKey":"sfk_value.secret","record":{"id":"key-1","name":"demo-read","projectSlug":"demo","scopes":["table:read"]}}]}\n`);
 
     expect(findCreatedKey(output, 'demo-read')).toBe('sfk_value.secret');
+  });
+
+  it('redacts bootstrap result marker lines before echoing captured output', () => {
+    expect(redactBootstrapResultMarker([
+      'before',
+      '__SHEETFLARE_BOOTSTRAP_RESULT__={"projects":[],"apiKeys":[{"apiKey":"sfk_value.secret","record":{"id":"key-1","name":"demo-read","projectSlug":"demo","scopes":["table:read"]}}]}',
+      'after'
+    ].join('\n'))).toBe([
+      'before',
+      'after'
+    ].join('\n'));
   });
 
   it('adds the full-result mode flag for setup-driven bootstrap runs', () => {

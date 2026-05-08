@@ -1,5 +1,5 @@
 import { getEnv } from './runtime';
-import { createSetupLocalState, redactSetupLocalState, type SetupLocalState } from './setup-state';
+import { createSetupLocalState, mergeSetupLocalState, redactSetupLocalState, type SetupLocalState } from './setup-state';
 import { getNamedGoogleCredentialsStatus, type GoogleCredentialSourceStatus } from './setup-google';
 
 export type ResolvedSetupRuntimeState = {
@@ -43,6 +43,24 @@ export function resolveSetupRuntimeState(localState: SetupLocalState | null): Re
   };
 }
 
+export function mergeSetupRuntimeState(
+  base: ResolvedSetupRuntimeState,
+  updates: Partial<Omit<ResolvedSetupRuntimeState, 'namedGoogleCredentials'>>
+): ResolvedSetupRuntimeState {
+  return {
+    ...base,
+    googleClientEmail: resolveValue(updates.googleClientEmail, base.googleClientEmail),
+    apiUrl: resolveValue(updates.apiUrl, base.apiUrl),
+    adminUrl: resolveValue(updates.adminUrl, base.adminUrl),
+    adminBearerToken: resolveValue(updates.adminBearerToken, base.adminBearerToken),
+    adminUiUsername: resolveValue(updates.adminUiUsername, base.adminUiUsername),
+    adminUiPassword: resolveValue(updates.adminUiPassword, base.adminUiPassword),
+    adminApiKey: resolveValue(updates.adminApiKey, base.adminApiKey),
+    privateReadKey: resolveValue(updates.privateReadKey, base.privateReadKey),
+    mutationKey: resolveValue(updates.mutationKey, base.mutationKey)
+  };
+}
+
 export function resolvePreferredAdminCredential(state: Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'>) {
   return resolveValue(state.adminApiKey, state.adminBearerToken);
 }
@@ -79,10 +97,13 @@ export function summarizeSetupSecrets(options: {
     };
   }
 
-  const redactedLocalState = redactSetupLocalState(createSetupLocalState({
-    adminUiUsername: options.adminUiUsername,
-    adminUiPassword: options.adminUiPassword
-  }));
+  const redactedLocalState = redactSetupLocalState(mergeSetupLocalState(
+    null,
+    createSetupLocalState({
+      adminUiUsername: options.adminUiUsername,
+      adminUiPassword: options.adminUiPassword
+    })
+  ));
 
   return {
     adminUiUsername: redactedLocalState.adminUiUsername,

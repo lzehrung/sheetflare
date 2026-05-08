@@ -11,6 +11,8 @@ export type SetupCliOptions = {
   smoke: boolean;
   verify: boolean;
   showSecrets: boolean;
+  advanced: boolean;
+  debug: boolean;
   provisionGoogle: boolean;
   googleProjectId: string | null;
   googleServiceAccountName: string | null;
@@ -27,6 +29,8 @@ export function createDefaultSetupCliOptions(): SetupCliOptions {
     smoke: false,
     verify: false,
     showSecrets: false,
+    advanced: false,
+    debug: false,
     provisionGoogle: false,
     googleProjectId: null,
     googleServiceAccountName: null
@@ -88,6 +92,16 @@ export function parseSetupArgs(argv: string[]): SetupCliOptions {
       continue;
     }
 
+    if (argument === '--advanced') {
+      options.advanced = true;
+      continue;
+    }
+
+    if (argument === '--debug') {
+      options.debug = true;
+      continue;
+    }
+
     if (argument === '--provision-google') {
       options.provisionGoogle = true;
       continue;
@@ -123,13 +137,15 @@ export function renderSetupHelp() {
   return `
 Usage: npm run setup -- [options]
 
-Runs the Sheetflare operator setup flow. With no options, setup prompts for a
-configuration and writes sheetflare.setup.json. Add action flags to apply
-secrets, deploy, bootstrap projects and keys, smoke-test, or verify an existing
-deployment.
+Runs the Sheetflare operator setup flow. With no options and no existing
+configuration, setup asks beginner questions, writes sheetflare.setup.json,
+applies secrets, deploys, bootstraps projects and keys, smoke-tests, and
+verifies the deployment. Add action flags to rerun one step from an existing
+configuration.
 
 Common flows:
   npm run setup
+  npm run setup -- --advanced
   npm run setup -- --apply-secrets
   npm run setup -- --apply-secrets --provision-google
   npm run setup -- --deploy --bootstrap --smoke --verify
@@ -146,6 +162,8 @@ Options:
   --smoke                            Run smoke validation after setup/bootstrap.
   --verify                           Run setup verification/doctor checks.
   --show-secrets                     Show generated secrets in the final summary.
+  --advanced                         Ask for all setup config fields instead of beginner defaults.
+  --debug                            Show underlying setup command output.
   --provision-google                 Provision Google service-account resources with gcloud.
   --google-project <id>              Google Cloud project id for provisioning.
   --google-service-account <name>    Google service-account name for provisioning.
@@ -157,17 +175,29 @@ export function resolveSetupActions(
   promptActions: SetupPromptActions | null
 ): SetupPromptActions {
   if (promptActions) {
-    return promptActions;
+    return {
+      applySecretsNow: promptActions.applySecretsNow || options.applySecrets,
+      deployNow: promptActions.deployNow || options.deploy,
+      bootstrapNow: promptActions.bootstrapNow || options.bootstrap,
+      smokeNow: promptActions.smokeNow || options.smoke,
+      verifyNow: promptActions.verifyNow || options.verify
+    };
   }
 
   return {
     applySecretsNow: options.applySecrets,
     deployNow: options.deploy,
     bootstrapNow: options.bootstrap,
-    smokeNow: options.smoke
+    smokeNow: options.smoke,
+    verifyNow: options.verify
   };
 }
 
-export function actionsRequireWranglerAuth(actions: SetupPromptActions) {
-  return actions.applySecretsNow || actions.deployNow;
+export function actionsRequireWranglerAuth(
+  actions: SetupPromptActions,
+  options: { verifiesAdminPagesProject?: boolean } = {}
+) {
+  return actions.applySecretsNow
+    || actions.deployNow
+    || Boolean(actions.verifyNow && options.verifiesAdminPagesProject);
 }

@@ -26,10 +26,24 @@ describe('parseSetupArgs', () => {
         smoke: true,
         verify: true,
         showSecrets: false,
+        advanced: false,
+        debug: false,
         provisionGoogle: true,
         googleProjectId: 'sheetflare-prod',
         googleServiceAccountName: 'sheetflare-prod'
       });
+  });
+
+  it('parses advanced setup mode', () => {
+    expect(parseSetupArgs(['--advanced'])).toMatchObject({
+      advanced: true
+    });
+  });
+
+  it('parses debug setup output mode', () => {
+    expect(parseSetupArgs(['--debug'])).toMatchObject({
+      debug: true
+    });
   });
 
   it('parses help flags without treating them as unknown arguments', () => {
@@ -58,9 +72,12 @@ describe('renderSetupHelp', () => {
     const help = renderSetupHelp();
 
     expect(help).toContain('Usage: npm run setup -- [options]');
+    expect(help).toContain('beginner questions');
+    expect(help).toContain('npm run setup -- --advanced');
     expect(help).toContain('npm run setup -- --apply-secrets --provision-google');
     expect(help).toContain('npm run setup -- --deploy --bootstrap --smoke --verify');
     expect(help).toContain('npm run doctor');
+    expect(help).toContain('--advanced');
     expect(help).toContain('--google-project <id>');
     expect(help).toContain('--google-service-account <name>');
   });
@@ -74,7 +91,8 @@ describe('resolveSetupActions', () => {
       applySecretsNow: true,
       deployNow: false,
       bootstrapNow: true,
-      smokeNow: false
+      smokeNow: false,
+      verifyNow: false
     });
   });
 
@@ -85,30 +103,78 @@ describe('resolveSetupActions', () => {
       applySecretsNow: false,
       deployNow: true,
       bootstrapNow: true,
-      smokeNow: true
+      smokeNow: true,
+      verifyNow: true
     })).toEqual({
       applySecretsNow: false,
       deployNow: true,
       bootstrapNow: true,
-      smokeNow: true
+      smokeNow: true,
+      verifyNow: true
+    });
+  });
+
+  it('preserves explicit CLI action flags when prompt actions are provided', () => {
+    const options = parseSetupArgs(['--verify', '--smoke']);
+
+    expect(resolveSetupActions(options, {
+      applySecretsNow: false,
+      deployNow: false,
+      bootstrapNow: false,
+      smokeNow: false,
+      verifyNow: false
+    })).toEqual({
+      applySecretsNow: false,
+      deployNow: false,
+      bootstrapNow: false,
+      smokeNow: true,
+      verifyNow: true
+    });
+  });
+
+  it('maps explicit verify flags into setup actions', () => {
+    const options = parseSetupArgs(['--verify']);
+
+    expect(resolveSetupActions(options, null)).toMatchObject({
+      verifyNow: true
     });
   });
 });
 
 describe('actionsRequireWranglerAuth', () => {
-  it('requires wrangler auth for deploy or secrets actions only', () => {
+  it('requires wrangler auth for deploy or secrets actions', () => {
     expect(actionsRequireWranglerAuth({
       applySecretsNow: false,
       deployNow: false,
       bootstrapNow: true,
-      smokeNow: true
+      smokeNow: true,
+      verifyNow: true
     })).toBe(false);
 
     expect(actionsRequireWranglerAuth({
       applySecretsNow: true,
       deployNow: false,
       bootstrapNow: false,
-      smokeNow: false
+      smokeNow: false,
+      verifyNow: false
     })).toBe(true);
+  });
+
+  it('requires wrangler auth for admin deployment verification', () => {
+    expect(actionsRequireWranglerAuth({
+      applySecretsNow: false,
+      deployNow: false,
+      bootstrapNow: false,
+      smokeNow: false,
+      verifyNow: true
+    }, { verifiesAdminPagesProject: true })).toBe(true);
+
+    expect(actionsRequireWranglerAuth({
+      applySecretsNow: false,
+      deployNow: false,
+      bootstrapNow: false,
+      smokeNow: false,
+      verifyNow: true
+    }, { verifiesAdminPagesProject: false })).toBe(false);
   });
 });

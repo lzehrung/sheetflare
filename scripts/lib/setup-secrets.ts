@@ -2,8 +2,10 @@ import { readFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import {
   checkGcloudAuthPrereq,
+  getActiveGcloudProjectId,
   getDefaultGoogleProjectId,
   getDefaultGoogleServiceAccountName,
+  isPlaceholderGoogleClientEmail,
   normalizeGoogleProjectId,
   normalizeGoogleServiceAccountName,
   provisionGoogleServiceAccount,
@@ -42,6 +44,9 @@ type GoogleProvisioningOptions = {
   profile: string;
   projectId?: string | null;
   serviceAccountName?: string | null;
+  allowInteractivePrompt?: boolean;
+  promptForDetails?: boolean;
+  debug?: boolean;
 };
 
 function generateSecretToken(byteLength = 32) {
@@ -51,6 +56,33 @@ function generateSecretToken(byteLength = 32) {
 function readEnvValue(name: string) {
   const value = process.env[name]?.trim();
   return value && value.length > 0 ? value : null;
+}
+
+export async function hasDefaultGoogleCredentialEnvironment() {
+  const googleClientEmail = readEnvValue('GOOGLE_CLIENT_EMAIL');
+  const googlePrivateKey = process.env.GOOGLE_PRIVATE_KEY;
+  const hasEmailAndKey = Boolean(
+    googleClientEmail
+      && !isPlaceholderGoogleClientEmail(googleClientEmail)
+      && googlePrivateKey
+      && googlePrivateKey.trim().length > 0
+  );
+
+  if (hasEmailAndKey) {
+    return true;
+  }
+
+  const credentialsPath = readEnvValue('GOOGLE_APPLICATION_CREDENTIALS');
+  if (!credentialsPath) {
+    return false;
+  }
+
+  try {
+    await readServiceAccountFile(credentialsPath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function readServiceAccountFile(path: string) {
@@ -74,7 +106,14 @@ async function readServiceAccountFile(path: string) {
     throw new ScriptError(`Service-account JSON file ${path} must include non-empty client_email and private_key fields.`);
   }
 
-  return parsed as ServiceAccountCredentials;
+  if (isPlaceholderGoogleClientEmail(parsed.client_email)) {
+    throw new ScriptError(`Service-account JSON file ${path} must include a real service-account client_email, not the checked-in placeholder.`);
+  }
+
+  return {
+    client_email: parsed.client_email,
+    private_key: parsed.private_key
+  };
 }
 
 export async function collectAdminSiteSecrets(options: {
@@ -144,6 +183,7 @@ export async function collectSetupSecrets(options: {
   googleProvisioning?: GoogleProvisioningOptions;
   googleProvisioner?: typeof provisionGoogleServiceAccount;
   gcloudAuthChecker?: typeof checkGcloudAuthPrereq;
+  googleProjectIdResolver?: typeof getActiveGcloudProjectId;
 }) : Promise<SetupSecrets> {
   const envGoogleClientEmail = readEnvValue('GOOGLE_CLIENT_EMAIL');
   const envGooglePrivateKey = process.env.GOOGLE_PRIVATE_KEY;
@@ -166,7 +206,7 @@ export async function collectSetupSecrets(options: {
     } else {
       if (!options.prompter) {
         throw new ScriptError(
-          'Applying secrets without a TTY requires GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY, GOOGLE_APPLICATION_CREDENTIALS, or --provision-google with a working gcloud login.'
+          'Setup needs Google service-account credentials before it can deploy. Run npm run setup -- --apply-secrets --provision-google to let setup create them with gcloud, set GOOGLE_APPLICATION_CREDENTIALS to a service-account JSON file, or set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY.'
         );
       }
 
@@ -223,15 +263,21 @@ async function maybeProvisionGoogleCredentials(options: {
   googleProvisioning?: GoogleProvisioningOptions;
   googleProvisioner?: typeof provisionGoogleServiceAccount;
   gcloudAuthChecker?: typeof checkGcloudAuthPrereq;
+  googleProjectIdResolver?: typeof getActiveGcloudProjectId;
 }): Promise<ProvisionGoogleServiceAccountResult | null> {
   const provisioning = options.googleProvisioning;
   if (!provisioning) {
     return null;
   }
 
+  if (!provisioning.enabled && provisioning.allowInteractivePrompt === false) {
+    return null;
+  }
+
   const gcloudAuthChecker = options.gcloudAuthChecker ?? checkGcloudAuthPrereq;
   const googleProvisioner = options.googleProvisioner ?? provisionGoogleServiceAccount;
-  const gcloudAuthResult = await gcloudAuthChecker();
+  const debug = Boolean(provisioning.debug);
+  const gcloudAuthResult = await gcloudAuthChecker({ debug });
   if (gcloudAuthResult.status !== 'ready') {
     if (provisioning.enabled) {
       throw new ScriptError(gcloudAuthResult.remediation ?? 'Google Cloud authentication is required before provisioning Google resources.');
@@ -239,7 +285,9 @@ async function maybeProvisionGoogleCredentials(options: {
     return null;
   }
 
-  const defaultProjectId = getDefaultGoogleProjectId(provisioning.profile);
+  const googleProjectIdResolver = options.googleProjectIdResolver ?? getActiveGcloudProjectId;
+  const activeProjectId = provisioning.projectId ? null : await googleProjectIdResolver();
+  const defaultProjectId = activeProjectId ?? getDefaultGoogleProjectId(provisioning.profile);
   const defaultServiceAccountName = getDefaultGoogleServiceAccountName(provisioning.profile);
 
   if (!options.prompter) {
@@ -247,15 +295,21 @@ async function maybeProvisionGoogleCredentials(options: {
       return null;
     }
 
-    return googleProvisioner({
-      profile: provisioning.profile,
-      projectId: normalizeGoogleProjectId(provisioning.projectId ?? defaultProjectId),
-      serviceAccountName: normalizeGoogleServiceAccountName(provisioning.serviceAccountName ?? defaultServiceAccountName)
-    });
+    return googleProvisioner(
+      {
+        profile: provisioning.profile,
+        projectId: normalizeGoogleProjectId(provisioning.projectId ?? defaultProjectId),
+        serviceAccountName: normalizeGoogleServiceAccountName(provisioning.serviceAccountName ?? defaultServiceAccountName)
+      },
+      { debug }
+    );
   }
 
   let shouldProvision = provisioning.enabled;
   if (!shouldProvision) {
+    if (provisioning.allowInteractivePrompt === false) {
+      return null;
+    }
     shouldProvision = await options.prompter.confirm({
       message: 'Provision a Google Cloud project and service account with gcloud now',
       defaultValue: true
@@ -264,6 +318,31 @@ async function maybeProvisionGoogleCredentials(options: {
 
   if (!shouldProvision) {
     return null;
+  }
+
+  if (provisioning.promptForDetails === false) {
+    const projectId = provisioning.projectId
+      ?? await options.prompter.text({
+        message: 'Google Cloud project ID (must be globally unique)',
+        defaultValue: defaultProjectId,
+        validate: (value) => {
+          try {
+            normalizeGoogleProjectId(value);
+            return null;
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        }
+      });
+
+    return googleProvisioner(
+      {
+        profile: provisioning.profile,
+        projectId: normalizeGoogleProjectId(projectId),
+        serviceAccountName: normalizeGoogleServiceAccountName(provisioning.serviceAccountName ?? defaultServiceAccountName)
+      },
+      { debug }
+    );
   }
 
   const googleProjectId = normalizeGoogleProjectId(await options.prompter.text({
@@ -291,15 +370,19 @@ async function maybeProvisionGoogleCredentials(options: {
     }
   }));
 
-  return googleProvisioner({
-    profile: provisioning.profile,
-    projectId: googleProjectId,
-    serviceAccountName: googleServiceAccountName
-  });
+  return googleProvisioner(
+    {
+      profile: provisioning.profile,
+      projectId: googleProjectId,
+      serviceAccountName: googleServiceAccountName
+    },
+    { debug }
+  );
 }
 
 export async function applyApiSecrets(options: {
   apiWranglerConfigPath: string;
+  debug?: boolean;
   googlePrivateKey: string;
   driveWebhookSecret: string;
   adminBearerToken: string;
@@ -310,6 +393,8 @@ export async function applyApiSecrets(options: {
     wrangler,
     commands.googlePrivateKey,
     {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug),
       input: `${options.googlePrivateKey}\n`
     }
   );
@@ -321,6 +406,8 @@ export async function applyApiSecrets(options: {
     wrangler,
     commands.googleDriveWebhookSecret,
     {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug),
       input: `${options.driveWebhookSecret}\n`
     }
   );
@@ -332,6 +419,8 @@ export async function applyApiSecrets(options: {
     wrangler,
     commands.adminBearerToken,
     {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug),
       input: `${options.adminBearerToken}\n`
     }
   );
@@ -341,6 +430,7 @@ export async function applyApiSecrets(options: {
 }
 
 export async function applyAdminSecrets(options: {
+  debug?: boolean;
   pagesProjectName: string;
   username: string;
   password: string;
@@ -351,6 +441,8 @@ export async function applyAdminSecrets(options: {
     wrangler,
     commands.username,
     {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug),
       input: `${options.username}\n`
     }
   );
@@ -362,6 +454,8 @@ export async function applyAdminSecrets(options: {
     wrangler,
     commands.password,
     {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug),
       input: `${options.password}\n`
     }
   );
@@ -372,6 +466,7 @@ export async function applyAdminSecrets(options: {
 
 export async function applyAdminApiBaseUrl(options: {
   apiBaseUrl: string;
+  debug?: boolean;
   pagesProjectName: string;
 }) {
   const wrangler = getCommandName('npx');
@@ -380,6 +475,8 @@ export async function applyAdminApiBaseUrl(options: {
     wrangler,
     command,
     {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug),
       input: `${options.apiBaseUrl}\n`
     }
   );

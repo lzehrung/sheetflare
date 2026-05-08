@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   createDefaultSetupConfig,
+  getSetupConfigGoogleCredentialRefs,
   normalizeSpreadsheetId,
   parseSetupConfig,
-  serializeSetupConfig
+  serializeSetupConfig,
+  setupConfigUsesDefaultGoogleCredential
 } from './setup-config';
 
 describe('parseSetupConfig', () => {
@@ -376,6 +378,98 @@ describe('parseSetupConfig', () => {
         }
       }
     })).toThrow('smoke.createValues is invalid: metadata');
+  });
+});
+
+describe('setup credential refs', () => {
+  it('detects default and named Google credential refs from configured projects', () => {
+    const config = parseSetupConfig({
+      profile: 'local',
+      deploy: {
+        api: true,
+        admin: false
+      },
+      privateProject: {
+        slug: 'demo-private',
+        name: 'Demo Private',
+        spreadsheetId: 'sheet-1',
+        googleCredentialRef: 'prod',
+        tables: [
+          {
+            tableSlug: 'users',
+            sheetTabName: 'Users'
+          }
+        ]
+      },
+      publicReadProject: {
+        slug: 'demo-public',
+        name: 'Demo Public',
+        spreadsheetId: 'sheet-1',
+        tables: [
+          {
+            tableSlug: 'public-users',
+            sheetTabName: 'Users'
+          }
+        ]
+      },
+      smoke: {
+        enabled: true,
+        privateTableSlug: 'users',
+        publicTableSlug: 'public-users',
+        adminKeyName: 'demo-admin',
+        privateReadKeyName: 'demo-read',
+        mutationKeyName: 'demo-mutation',
+        createValues: {
+          name: 'Smoke'
+        },
+        updateValues: {
+          status: 'active'
+        }
+      }
+    });
+
+    expect([...getSetupConfigGoogleCredentialRefs(config)].sort()).toEqual(['default', 'prod']);
+    expect(setupConfigUsesDefaultGoogleCredential(config)).toBe(true);
+  });
+
+  it('detects named-only Google credential configs', () => {
+    const config = parseSetupConfig({
+      profile: 'local',
+      deploy: {
+        api: true,
+        admin: false
+      },
+      privateProject: {
+        slug: 'demo',
+        name: 'Demo',
+        spreadsheetId: 'sheet-1',
+        googleCredentialRef: 'prod',
+        tables: [
+          {
+            tableSlug: 'users',
+            sheetTabName: 'Users'
+          }
+        ]
+      },
+      publicReadProject: null,
+      smoke: {
+        enabled: true,
+        privateTableSlug: 'users',
+        publicTableSlug: null,
+        adminKeyName: 'demo-admin',
+        privateReadKeyName: 'demo-read',
+        mutationKeyName: 'demo-mutation',
+        createValues: {
+          name: 'Smoke'
+        },
+        updateValues: {
+          status: 'active'
+        }
+      }
+    });
+
+    expect([...getSetupConfigGoogleCredentialRefs(config)]).toEqual(['prod']);
+    expect(setupConfigUsesDefaultGoogleCredential(config)).toBe(false);
   });
 });
 

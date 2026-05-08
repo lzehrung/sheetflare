@@ -1,4 +1,4 @@
-import type { SetupConfig } from './setup-config';
+import { getSetupConfigGoogleCredentialRefs, type SetupConfig } from './setup-config';
 import type { SetupPrereqResult } from './setup-prereqs';
 import type { ResolvedSetupRuntimeState } from './setup-runtime';
 import { listDriveWatchRetryAdvice, listDriveWatches } from './setup-drive-watches';
@@ -115,15 +115,6 @@ function getRetryAdviceBySpreadsheetId(
   return new Map(retryAdvice.map((entry) => [entry.spreadsheetId, entry] as const));
 }
 
-function getConfiguredGoogleCredentialRefs(config: SetupConfig) {
-  const refs = new Set<string>([config.privateProject.googleCredentialRef ?? 'default']);
-  if (config.publicReadProject) {
-    refs.add(config.publicReadProject.googleCredentialRef ?? 'default');
-  }
-
-  return refs;
-}
-
 function describeReadyCredentialSummary(ready: ReadyResponse['checks']) {
   if (ready.defaultGoogleCredential === 'configured' && ready.namedGoogleCredentials === 'configured') {
     return 'default and named Google credentials';
@@ -152,17 +143,24 @@ export async function runSetupDoctor(options: {
 
   const googleClientEmail = options.runtimeState.googleClientEmail;
   const namedGoogleCredentials = options.runtimeState.namedGoogleCredentials;
-  const configuredRefs = getConfiguredGoogleCredentialRefs(options.config);
+  const configuredRefs = getSetupConfigGoogleCredentialRefs(options.config);
   const usesDefaultGoogleCredential = configuredRefs.has('default');
   const usesNamedGoogleCredential = [...configuredRefs].some((ref) => ref !== 'default');
   const hasDefaultGoogleCredential = Boolean(googleClientEmail) && !isPlaceholderGoogleClientEmail(googleClientEmail);
 
-  if (usesDefaultGoogleCredential && !googleClientEmail) {
+  if (usesDefaultGoogleCredential && !googleClientEmail && !options.runtimeState.apiUrl) {
     results.push(createResult(
       'Google credential',
       'blocked',
       'A configured project uses the default Google credential, but no default Google service-account email is available from local setup state or the environment.',
       'Run npm run setup -- --apply-secrets --provision-google, or set a real GOOGLE_CLIENT_EMAIL before deploy/bootstrap.'
+    ));
+  } else if (usesDefaultGoogleCredential && !googleClientEmail) {
+    results.push(createResult(
+      'Google credential',
+      'ready',
+      'A configured project uses the default Google credential; deployed Worker readiness will verify that credential because the local service-account email is not available.',
+      null
     ));
   } else if (usesDefaultGoogleCredential && googleClientEmail && isPlaceholderGoogleClientEmail(googleClientEmail)) {
     results.push(createResult(

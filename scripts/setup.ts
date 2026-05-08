@@ -1,10 +1,10 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig } from './lib/setup-config';
+import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setupConfigUsesDefaultGoogleCredential } from './lib/setup-config';
 import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
-import { createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
-import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, type SetupPrereqResult } from './lib/setup-prereqs';
-import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput } from './lib/setup-bootstrap';
+import { confirmSheetShared, createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
+import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, recordPrereqResult, type SetupPrereqResult } from './lib/setup-prereqs';
+import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput, redactBootstrapResultMarker } from './lib/setup-bootstrap';
 import {
   deployAdminPages,
   deployApiWorker,
@@ -19,27 +19,32 @@ import {
   applyApiSecrets,
   collectAdminSiteSecrets,
   collectSetupSecrets,
+  hasDefaultGoogleCredentialEnvironment,
   requireAdminSiteSecrets
 } from './lib/setup-secrets';
 import { createSmokeEnv } from './lib/setup-smoke';
 import {
   createSetupLocalState,
   getSetupLocalStatePath,
+  mergeSetupLocalState,
   readSetupLocalState,
   type SetupLocalState,
+  type SetupLocalStateUpdate,
   writeSetupLocalState
 } from './lib/setup-state';
 import {
   resolvePreferredAdminCredential,
   resolveSetupRuntimeState,
+  mergeSetupRuntimeState,
   summarizeSetupSecrets,
   type SetupSecretsSummary
 } from './lib/setup-runtime';
 import { getSetupDoctorFailureMessage, runSetupDoctor } from './lib/setup-doctor';
-import { isPlaceholderGoogleClientEmail } from './lib/setup-google';
+import { checkGcloudAuthPrereq, isPlaceholderGoogleClientEmail } from './lib/setup-google';
+import { formatBeginnerSetupNextSteps, formatSheetShareInstruction } from './lib/setup-next-steps';
 import { verifyAdminPagesDeployment } from './lib/setup-verify';
 import { getCommandName, runCommand } from './lib/process';
-import { ScriptError, getEnv, logSuccess, logStep } from './lib/runtime';
+import { ScriptError, getEnv, logSetupStep as logStep, logSetupSuccess as logSuccess } from './lib/runtime';
 
 type SetupExecutionSummary = {
   configPath: string;
@@ -63,11 +68,11 @@ function isMissingFileError(error: unknown) {
 
 function renderPrereqSummary(results: SetupPrereqResult[]) {
   for (const result of results) {
-    let prefix = '[blocked]';
+    let prefix = 'Needs attention';
     if (result.status === 'ready') {
-      prefix = '[ok]';
+      prefix = 'Ready';
     } else if (result.status === 'warning') {
-      prefix = '[warn]';
+      prefix = 'Note';
     }
     console.log(`${prefix} ${result.name}: ${result.summary}`);
     if (result.remediation) {
@@ -93,18 +98,39 @@ function printExecutionSummary(summary: SetupExecutionSummary) {
   console.log(JSON.stringify(summary, null, 2));
 }
 
+function formatWranglerAuthRequiredMessage(beginnerSetupStarted: boolean) {
+  if (beginnerSetupStarted) {
+    return 'Wrangler authentication is required before applying secrets or deploying. Run npx wrangler login, then rerun npm run setup -- --apply-secrets --deploy --bootstrap --smoke --verify.';
+  }
+
+  return 'Wrangler authentication is required before applying secrets or deploying. Run npx wrangler login, then rerun setup with the same flags.';
+}
+
 function assertRealGoogleClientEmail(value: string | null) {
   if (!value) {
-    throw new ScriptError('Deploy requires GOOGLE_CLIENT_EMAIL from setup secrets, local setup state, or the environment.');
+    throw new ScriptError(
+      'Deploy needs a real Google service-account email. Run npm run setup -- --apply-secrets --provision-google before deploying, or set GOOGLE_CLIENT_EMAIL to the real service-account email.'
+    );
   }
 
   if (isPlaceholderGoogleClientEmail(value)) {
     throw new ScriptError(
-      `Deploy cannot use the checked-in placeholder GOOGLE_CLIENT_EMAIL (${value}). Run npm run setup -- --apply-secrets --provision-google, or provide a real GOOGLE_CLIENT_EMAIL before deploying.`
+      `Deploy cannot use the checked-in placeholder GOOGLE_CLIENT_EMAIL (${value}). Run npm run setup -- --apply-secrets --provision-google, or set GOOGLE_CLIENT_EMAIL to the real service-account email before deploying.`
     );
   }
 
   return value;
+}
+
+function hasUsableGoogleClientEmail(value: string | null | undefined) {
+  return typeof value === 'string'
+    && value.trim().length > 0
+    && !isPlaceholderGoogleClientEmail(value);
+}
+
+async function hasSetupGoogleCredential(localState: SetupLocalState | null) {
+  return hasUsableGoogleClientEmail(localState?.googleClientEmail)
+    || await hasDefaultGoogleCredentialEnvironment();
 }
 
 async function runBootstrap(env: NodeJS.ProcessEnv) {
@@ -117,10 +143,16 @@ async function runBootstrap(env: NodeJS.ProcessEnv) {
     }
   );
   if (result.code !== 0) {
+    const safeStdout = redactBootstrapResultMarker(result.stdout);
+    if (safeStdout.trim().length > 0) {
+      process.stdout.write(safeStdout);
+    }
     if (result.stderr.trim().length > 0) {
       process.stderr.write(result.stderr);
     }
-    throw new ScriptError('Bootstrap failed.');
+    throw new ScriptError(
+      'Bootstrap failed. Confirm the spreadsheet is shared with the Google service-account email as Editor, the configured tab exists, the _id header exists, and existing _id values are unique and non-blank.'
+    );
   }
 
   return parseBootstrapOutput(result.stdout);
@@ -136,15 +168,20 @@ async function runSmoke(env: NodeJS.ProcessEnv) {
     }
   );
   if (result.code !== 0) {
-    throw new ScriptError('Smoke validation failed.');
+    if (result.stdout.trim().length > 0) {
+      process.stdout.write(result.stdout);
+    }
+    if (result.stderr.trim().length > 0) {
+      process.stderr.write(result.stderr);
+    }
+    throw new ScriptError(
+      'Smoke validation failed. Confirm the configured smoke column exists in the sheet, is not the _id column, and can be written by the API.'
+    );
   }
 }
 
-async function persistLocalState(configPath: string, currentState: SetupLocalState | null, updates: SetupLocalState) {
-  const nextState = {
-    ...(currentState ?? {}),
-    ...updates
-  };
+async function persistLocalState(configPath: string, currentState: SetupLocalState | null, updates: SetupLocalStateUpdate) {
+  const nextState = mergeSetupLocalState(currentState, updates);
   await writeSetupLocalState(configPath, nextState);
   return nextState;
 }
@@ -196,9 +233,9 @@ async function registerDriveWatchesIfPossible(options: {
   }
 }
 
-async function ensureAdminPagesProjectReady(profile: string) {
+async function ensureAdminPagesProjectReady(profile: string, options: { debug?: boolean } = {}) {
   const pagesProjectName = getAdminPagesProjectName(profile);
-  const result = await ensurePagesProjectExists(pagesProjectName);
+  const result = await ensurePagesProjectExists(pagesProjectName, options);
   if (result.created) {
     logSuccess(`Created Cloudflare Pages project ${pagesProjectName}`);
   }
@@ -210,26 +247,29 @@ async function applyAdminPagesConfiguration(options: {
   adminUiPassword: string;
   adminUiUsername: string;
   apiUrl?: string | null;
+  debug?: boolean;
   pagesProjectName: string;
 }) {
-  logStep('Applying admin Pages site secrets');
+  logStep('Saving admin site sign-in secrets');
   await applyAdminSecrets({
+    debug: Boolean(options.debug),
     pagesProjectName: options.pagesProjectName,
     username: options.adminUiUsername,
     password: options.adminUiPassword
   });
-  logSuccess('Admin site secrets applied');
+  logSuccess('Admin site sign-in secrets saved');
 
   if (!options.apiUrl) {
     return;
   }
 
-  logStep('Applying admin Pages API base URL');
+  logStep('Connecting the admin site to the API');
   await applyAdminApiBaseUrl({
     apiBaseUrl: options.apiUrl,
+    debug: Boolean(options.debug),
     pagesProjectName: options.pagesProjectName
   });
-  logSuccess('Admin Pages API base URL applied');
+  logSuccess('Admin site API URL saved');
 }
 
 async function main() {
@@ -243,16 +283,19 @@ async function main() {
   const localStatePath = getSetupLocalStatePath(resolvedConfigPath);
 
   if (options.writeDefaultConfig) {
-    logStep(`Writing starter setup config to ${resolvedConfigPath}`);
+    logStep(`Writing starter setup file to ${resolvedConfigPath}`);
     await writeFile(resolvedConfigPath, createDefaultSetupConfig(), 'utf8');
-    logSuccess(`Starter config written to ${resolvedConfigPath}`);
+    logSuccess(`Starter setup file written to ${resolvedConfigPath}`);
     return;
   }
 
-  logStep('Checking setup prerequisites');
+  let provisionGoogle = options.provisionGoogle;
+
+  logStep('Checking your computer');
   const prereqResults = await checkSetupPrereqsWithOptions({
     includeWranglerAuth: options.applySecrets || options.deploy || options.verify,
-    includeGcloudAuth: options.provisionGoogle
+    includeGcloudAuth: provisionGoogle,
+    debug: options.debug
   });
   renderPrereqSummary(prereqResults);
 
@@ -263,10 +306,11 @@ async function main() {
   let localStateWritten = false;
   let configInput: unknown;
   let promptActions: SetupPromptActions | null = null;
+  let beginnerSetupStarted = false;
 
   try {
     try {
-      logStep(`Loading setup config ${resolvedConfigPath}`);
+      logStep(`Looking for setup config at ${resolvedConfigPath}`);
       configInput = await readConfigFile(resolvedConfigPath);
     } catch (error) {
       if (!isMissingFileError(error)) {
@@ -277,40 +321,53 @@ async function main() {
         throw new ScriptError(`Setup config ${resolvedConfigPath} does not exist, and interactive setup requires a TTY. Use --write-default-config to create a starter config.`);
       }
 
-      logStep(`No setup config found at ${resolvedConfigPath}; starting interactive setup`);
-      const promptResult = await promptForSetup(prompter);
+      logStep(`No setup config found at ${resolvedConfigPath}; we will create one together`);
+      const promptMode = options.advanced ? 'advanced' : 'beginner';
+      beginnerSetupStarted = promptMode === 'beginner';
+      const promptResult = await promptForSetup(prompter, {
+        mode: promptMode,
+        googleCredentialAvailable: await hasSetupGoogleCredential(localState),
+        provisionGoogleRequested: provisionGoogle
+      });
+      if (promptResult.provisionGoogle && !provisionGoogle) {
+        provisionGoogle = true;
+        const gcloudResult = await checkGcloudAuthPrereq({ debug: options.debug });
+        recordPrereqResult(prereqResults, gcloudResult);
+        renderPrereqSummary([gcloudResult]);
+        if (gcloudResult.status === 'blocked') {
+          throw new ScriptError(gcloudResult.remediation);
+        }
+      }
       promptActions = promptResult.actions;
       configInput = promptResult.config;
-      logStep(`Writing setup config ${resolvedConfigPath}`);
+      logStep(`Saving setup choices to ${resolvedConfigPath}`);
       await writeFile(resolvedConfigPath, serializeSetupConfig(promptResult.config), 'utf8');
-      logSuccess(`Setup config written to ${resolvedConfigPath}`);
+      logSuccess(`Setup choices saved to ${resolvedConfigPath}`);
     }
 
-    logStep(`Validating setup config ${resolvedConfigPath}`);
+    logStep('Checking setup choices');
     const config = parseSetupConfig(configInput);
-    logSuccess(`Validated setup config for profile ${config.profile} with private project ${config.privateProject.slug}.`);
-    console.log(JSON.stringify({
-      profile: config.profile,
-      privateProject: config.privateProject.slug,
-      publicReadProject: config.publicReadProject?.slug ?? null,
-      privateTables: config.privateProject.tables.map((table) => table.tableSlug),
-      publicReadTables: config.publicReadProject?.tables.map((table) => table.tableSlug) ?? []
-    }, null, 2));
+    const tableCount = config.privateProject.tables.length + (config.publicReadProject?.tables.length ?? 0);
+    logSuccess(`Setup choices look valid for project ${config.privateProject.slug} with ${tableCount} table${tableCount === 1 ? '' : 's'}.`);
 
     const actions = resolveSetupActions(options, promptActions);
 
-    if (!actions.applySecretsNow && !actions.deployNow && !actions.bootstrapNow && !actions.smokeNow && !options.verify) {
+    if (!actions.applySecretsNow && !actions.deployNow && !actions.bootstrapNow && !actions.smokeNow && !actions.verifyNow) {
       return;
     }
 
+    const wranglerAuthRequired = actionsRequireWranglerAuth(actions, {
+      verifiesAdminPagesProject: config.deploy.admin
+    });
     let wranglerResult = prereqResults.find((result) => result.name === 'Wrangler auth') ?? null;
-    if (actionsRequireWranglerAuth(actions) && !wranglerResult) {
+    if (wranglerAuthRequired && !wranglerResult) {
       wranglerResult = await checkWranglerAuthPrereq();
+      recordPrereqResult(prereqResults, wranglerResult);
       renderPrereqSummary([wranglerResult]);
     }
 
-    if (actionsRequireWranglerAuth(actions) && wranglerResult?.status === 'blocked') {
-      throw new ScriptError('Wrangler authentication is required before applying secrets or deploying. Run npx wrangler login and rerun setup.');
+    if (wranglerAuthRequired && wranglerResult?.status === 'blocked') {
+      throw new ScriptError(formatWranglerAuthRequiredMessage(beginnerSetupStarted));
     }
 
     const resolvedRuntimeState = resolveSetupRuntimeState(localState);
@@ -325,31 +382,35 @@ async function main() {
 
     let setupSecrets: Awaited<ReturnType<typeof collectSetupSecrets>> | null = null;
     if (actions.applySecretsNow) {
-      logStep('Collecting setup secrets');
+      logStep('Preparing credentials');
       setupSecrets = await collectSetupSecrets({
         prompter,
         includeAdminUiSecrets: config.deploy.admin,
         defaultAdminUiUsername: adminUiUsername,
         defaultAdminUiPassword: adminUiPassword,
         googleProvisioning: {
-          enabled: options.provisionGoogle,
+          enabled: provisionGoogle,
           profile: config.profile,
           projectId: options.googleProjectId,
-          serviceAccountName: options.googleServiceAccountName
+          serviceAccountName: options.googleServiceAccountName,
+          allowInteractivePrompt: !beginnerSetupStarted,
+          promptForDetails: !beginnerSetupStarted,
+          debug: options.debug
         }
       });
       adminBearerToken = setupSecrets.adminBearerToken;
       adminUiUsername = setupSecrets.adminUiUsername;
       adminUiPassword = setupSecrets.adminUiPassword;
 
-      logStep('Applying Worker secrets');
+      logStep('Saving API secrets to Cloudflare');
       await applyApiSecrets({
         apiWranglerConfigPath: getApiWranglerConfigPath(config.profile),
+        debug: options.debug,
         googlePrivateKey: setupSecrets.googlePrivateKey,
         driveWebhookSecret: setupSecrets.driveWebhookSecret,
         adminBearerToken: setupSecrets.adminBearerToken
       });
-      logSuccess('Worker secrets applied');
+      logSuccess('API secrets saved');
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
@@ -365,28 +426,31 @@ async function main() {
           adminUiUsername,
           adminUiPassword
         });
-        const pagesProjectName = await ensureAdminPagesProjectReady(config.profile);
+        const pagesProjectName = await ensureAdminPagesProjectReady(config.profile, { debug: options.debug });
         await applyAdminPagesConfiguration({
           adminUiPassword: adminSiteSecrets.adminUiPassword,
           adminUiUsername: adminSiteSecrets.adminUiUsername,
           apiUrl,
+          debug: options.debug,
           pagesProjectName,
         });
       }
     }
 
     if (actions.deployNow) {
-      const googleClientEmail = assertRealGoogleClientEmail(setupSecrets?.googleClientEmail
-        ?? localState?.googleClientEmail
-        ?? resolvedRuntimeState.googleClientEmail);
+      const googleClientEmail = setupConfigUsesDefaultGoogleCredential(config)
+        ? assertRealGoogleClientEmail(setupSecrets?.googleClientEmail
+          ?? localState?.googleClientEmail
+          ?? resolvedRuntimeState.googleClientEmail)
+        : null;
 
-      logStep('Deploying API Worker');
-      const apiDeploy = await deployApiWorker(config.profile, googleClientEmail);
+      logStep('Deploying the API');
+      const apiDeploy = await deployApiWorker(config.profile, googleClientEmail, { debug: options.debug });
       apiUrl = apiDeploy.url;
-      logSuccess(`API deployed at ${apiUrl}`);
+      logSuccess(`API is live at ${apiUrl}`);
 
       if (config.deploy.admin) {
-        const pagesProjectName = await ensureAdminPagesProjectReady(config.profile);
+        const pagesProjectName = await ensureAdminPagesProjectReady(config.profile, { debug: options.debug });
         if (!adminUiUsername || !adminUiPassword) {
           const adminSiteSecrets = await collectAdminSiteSecrets({
             prompter,
@@ -405,26 +469,27 @@ async function main() {
           adminUiPassword: adminSiteSecrets.adminUiPassword,
           adminUiUsername: adminSiteSecrets.adminUiUsername,
           apiUrl,
+          debug: options.debug,
           pagesProjectName,
         });
 
-        logStep('Deploying admin Pages site');
-        const adminDeploy = await deployAdminPages(config.profile);
+        logStep('Deploying the admin site');
+        const adminDeploy = await deployAdminPages(config.profile, { debug: options.debug });
         adminUrl = adminDeploy.siteUrl;
-        logSuccess(`Admin deployed at ${adminUrl}`);
+        logSuccess(`Admin site is live at ${adminUrl}`);
 
-        logStep('Verifying admin Pages site');
+        logStep('Checking the admin site');
         await verifyAdminPagesDeployment({
           password: adminSiteSecrets.adminUiPassword,
           siteUrl: adminDeploy.siteUrl,
           username: adminSiteSecrets.adminUiUsername
         });
-        logSuccess('Admin Pages site verified');
+        logSuccess('Admin site is reachable');
       }
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
-          googleClientEmail,
+          googleClientEmail: googleClientEmail ?? null,
           apiUrl,
           adminUrl,
           adminUiUsername,
@@ -434,9 +499,20 @@ async function main() {
       localStateWritten = true;
     }
 
+    if (beginnerSetupStarted && (actions.bootstrapNow || actions.smokeNow)) {
+      const shareEmail = setupSecrets?.googleClientEmail
+        ?? localState?.googleClientEmail
+        ?? resolvedRuntimeState.googleClientEmail;
+      console.log('');
+      console.log(formatSheetShareInstruction(shareEmail));
+      if (prompter) {
+        await confirmSheetShared(prompter);
+      }
+    }
+
     if (!apiUrl && (actions.bootstrapNow || actions.smokeNow)) {
       if (!prompter) {
-        throw new ScriptError('Bootstrap or smoke requires SHEETFLARE_BASE_URL or a prior local setup state file when no fresh deploy was run.');
+        throw new ScriptError('Bootstrap or smoke needs the deployed API URL. Rerun setup after deploy, or set SHEETFLARE_BASE_URL to the Worker URL.');
       }
       apiUrl = (await promptForText(prompter, {
         message: 'Deployed API base URL',
@@ -451,7 +527,7 @@ async function main() {
 
       if (!adminBearerToken) {
         if (!prompter) {
-          throw new ScriptError('Bootstrap requires an admin credential from the environment or an interactive prompt.');
+          throw new ScriptError('Bootstrap needs an admin credential. Set SHEETFLARE_ADMIN_CREDENTIAL to the bootstrap admin token or run setup interactively.');
         }
         adminBearerToken = (await promptForText(prompter, {
           message: 'Admin bootstrap credential',
@@ -459,14 +535,14 @@ async function main() {
         })).trim();
       }
 
-      logStep('Bootstrapping projects and API keys');
+      logStep('Creating projects and API keys');
       const bootstrapOutput = await runBootstrap(createBootstrapEnv(config, apiUrl, adminBearerToken));
       if (config.smoke.enabled) {
         adminApiKey = findCreatedKey(bootstrapOutput, config.smoke.adminKeyName);
         privateReadKey = findCreatedKey(bootstrapOutput, config.smoke.privateReadKeyName);
         mutationKey = findCreatedKey(bootstrapOutput, config.smoke.mutationKeyName);
       }
-      logSuccess('Bootstrap completed');
+      logSuccess('Projects and API keys are ready');
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
@@ -500,7 +576,7 @@ async function main() {
       });
       if (!smokeAdminCredential) {
         if (!prompter) {
-          throw new ScriptError('Smoke requires an admin API key or bootstrap credential from the environment or an interactive prompt.');
+          throw new ScriptError('Smoke validation needs an admin credential. Set SHEETFLARE_ADMIN_CREDENTIAL to an admin API key or the bootstrap admin token.');
         }
         adminApiKey = (await promptForText(prompter, {
           message: 'Admin API key for smoke',
@@ -510,7 +586,7 @@ async function main() {
       }
       if (!privateReadKey) {
         if (!prompter) {
-          throw new ScriptError('Smoke requires a private read key from the environment or an interactive prompt.');
+          throw new ScriptError('Smoke validation needs a private read API key. Set SHEETFLARE_PRIVATE_READ_KEY or run setup interactively after bootstrap.');
         }
         privateReadKey = (await promptForText(prompter, {
           message: 'Private read API key for smoke'
@@ -518,14 +594,14 @@ async function main() {
       }
       if (!mutationKey) {
         if (!prompter) {
-          throw new ScriptError('Smoke requires a mutation API key from the environment or an interactive prompt.');
+          throw new ScriptError('Smoke validation needs a mutation API key. Set SHEETFLARE_MUTATION_KEY or run setup interactively after bootstrap.');
         }
         mutationKey = (await promptForText(prompter, {
           message: 'Mutation API key for smoke'
         })).trim();
       }
 
-      logStep('Running smoke validation');
+      logStep('Testing the API with your sheet');
       await runSmoke(createSmokeEnv({
         config,
         baseUrl: apiUrl,
@@ -533,7 +609,7 @@ async function main() {
         privateReadKey,
         mutationKey
       }));
-      logSuccess('Smoke validation completed');
+      logSuccess('Sheet read/write test passed');
     }
 
     printExecutionSummary({
@@ -552,11 +628,24 @@ async function main() {
       })
     });
 
-    if (options.verify) {
-      logStep('Verifying setup-managed environment');
+    if (actions.verifyNow) {
+      logStep('Checking the finished setup');
+      const verificationRuntimeState = mergeSetupRuntimeState(resolveSetupRuntimeState(localState), {
+        googleClientEmail: setupSecrets?.googleClientEmail
+          ?? localState?.googleClientEmail
+          ?? resolvedRuntimeState.googleClientEmail,
+        apiUrl,
+        adminUrl,
+        adminBearerToken,
+        adminUiUsername,
+        adminUiPassword,
+        adminApiKey,
+        privateReadKey,
+        mutationKey
+      });
       const verificationResults = await runSetupDoctor({
         config,
-        runtimeState: resolveSetupRuntimeState(localState),
+        runtimeState: verificationRuntimeState,
         prereqResults
       });
       renderPrereqSummary(verificationResults);
@@ -566,7 +655,20 @@ async function main() {
         throw new ScriptError(verificationFailureMessage);
       }
 
-      logSuccess('Setup verification completed without warnings or blocking issues');
+      logSuccess('Setup checks passed');
+    }
+
+    if (beginnerSetupStarted) {
+      console.log('');
+      for (const line of formatBeginnerSetupNextSteps({
+        googleClientEmail: setupSecrets?.googleClientEmail
+          ?? localState?.googleClientEmail
+          ?? resolvedRuntimeState.googleClientEmail,
+        apiUrl,
+        adminUrl
+      })) {
+        console.log(line);
+      }
     }
   } finally {
     prompter?.close?.();

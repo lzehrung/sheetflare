@@ -81,6 +81,10 @@ function formatRequestLabel(options: { method?: HttpMethod; path: string }) {
   return `${options.method ?? 'GET'} ${options.path}`;
 }
 
+function formatExpectedStatus(expectedStatus: number | number[]) {
+  return Array.isArray(expectedStatus) ? expectedStatus.join(' or ') : String(expectedStatus);
+}
+
 export async function requestJson<T>(options: {
   baseUrl: string;
   path: string;
@@ -88,7 +92,7 @@ export async function requestJson<T>(options: {
   bearer?: string | null;
   headers?: Record<string, string>;
   body?: unknown;
-  expectedStatus?: number;
+  expectedStatus?: number | number[];
 }) {
   const init: RequestInit = {
     method: options.method ?? 'GET',
@@ -106,12 +110,18 @@ export async function requestJson<T>(options: {
 
   const text = await response.text();
 
-  if (options.expectedStatus !== undefined && response.status !== options.expectedStatus) {
+  let expectedStatuses: number[] | null = null;
+  if (options.expectedStatus !== undefined) {
+    expectedStatuses = Array.isArray(options.expectedStatus)
+      ? options.expectedStatus
+      : [options.expectedStatus];
+  }
+  if (expectedStatuses && !expectedStatuses.includes(response.status)) {
     const requestId = response.headers.get('x-request-id');
     const bodySummary = text.trim().length > 0 ? summarizeBody(text) : null;
     throw new ScriptError(
       [
-        `Expected ${formatRequestLabel(options)} to return ${options.expectedStatus}, received ${response.status}.`,
+        `Expected ${formatRequestLabel(options)} to return ${formatExpectedStatus(expectedStatuses)}, received ${response.status}.`,
         requestId ? `requestId=${requestId}` : null,
         bodySummary ? `body=${bodySummary}` : null
       ].filter(Boolean).join(' ')
@@ -158,4 +168,12 @@ export function logStep(message: string) {
 
 export function logSuccess(message: string) {
   console.log(`[ok] ${message}`);
+}
+
+export function logSetupStep(message: string) {
+  console.log(`\nSetup: ${message}`);
+}
+
+export function logSetupSuccess(message: string) {
+  console.log(`Done: ${message}`);
 }

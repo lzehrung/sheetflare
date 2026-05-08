@@ -48,7 +48,7 @@ async function main() {
       path: '/v1/admin/projects?upsert=true',
       method: 'POST',
       bearer,
-      expectedStatus: 201,
+      expectedStatus: [200, 201],
       body: {
         slug: project.slug,
         name: project.name,
@@ -66,7 +66,7 @@ async function main() {
         path: `/v1/admin/projects/${encodeURIComponent(project.slug)}/tables?upsert=true`,
         method: 'POST',
         bearer,
-        expectedStatus: 201,
+        expectedStatus: [200, 201],
         body: table
       });
       const tableData = assertPresent(tableResponse.data, 'Table creation returned an empty response body.');

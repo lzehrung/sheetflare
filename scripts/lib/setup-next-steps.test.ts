@@ -1,0 +1,70 @@
+import { describe, expect, it } from 'vitest';
+import { formatBeginnerSetupNextSteps, formatSheetShareInstruction } from './setup-next-steps';
+
+describe('formatSheetShareInstruction', () => {
+  it('prints the exact service-account sharing instruction when known', () => {
+    expect(formatSheetShareInstruction('service-account@example.com'))
+      .toBe('Share your Google Sheet with service-account@example.com as Editor before bootstrap or smoke validation.');
+  });
+
+  it('prints a credential-first instruction when the email is unknown', () => {
+    expect(formatSheetShareInstruction(null))
+      .toBe('Add Google service-account credentials, then share your Google Sheet with that service-account email as Editor before bootstrap or smoke validation.');
+  });
+
+  it('prints a credential-first instruction for the checked-in placeholder email', () => {
+    expect(formatSheetShareInstruction('service-account@your-gcp-project.iam.gserviceaccount.com'))
+      .toBe('Add Google service-account credentials, then share your Google Sheet with that service-account email as Editor before bootstrap or smoke validation.');
+  });
+});
+
+describe('formatBeginnerSetupNextSteps', () => {
+  it('prints deployment URLs and verification guidance without secret values', () => {
+    expect(formatBeginnerSetupNextSteps({
+      googleClientEmail: 'service-account@example.com',
+      apiUrl: 'https://sheetflare-api.example.workers.dev',
+      adminUrl: 'https://sheetflare-admin.pages.dev'
+    })).toEqual([
+      'Beginner setup complete.',
+      '1. Share your Google Sheet with service-account@example.com as Editor.',
+      '2. API URL: https://sheetflare-api.example.workers.dev',
+      '3. Admin URL: https://sheetflare-admin.pages.dev',
+      '4. Run npm run doctor any time you want to re-check this deployment.'
+    ]);
+  });
+
+  it('omits unavailable deployment URLs and keeps the doctor step numbered correctly', () => {
+    expect(formatBeginnerSetupNextSteps({
+      googleClientEmail: 'service-account@example.com',
+      apiUrl: null,
+      adminUrl: null
+    })).toEqual([
+      'Beginner setup complete.',
+      '1. Share your Google Sheet with service-account@example.com as Editor.',
+      '2. Run npm run doctor any time you want to re-check this deployment.'
+    ]);
+  });
+
+  it('omits the sharing step when the service-account email is unavailable', () => {
+    expect(formatBeginnerSetupNextSteps({
+      googleClientEmail: null,
+      apiUrl: null,
+      adminUrl: null
+    })).toEqual([
+      'Beginner setup complete.',
+      '1. Run npm run doctor any time you want to re-check this deployment.'
+    ]);
+  });
+
+  it('omits the sharing step when the service-account email is the checked-in placeholder', () => {
+    expect(formatBeginnerSetupNextSteps({
+      googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
+      apiUrl: 'https://sheetflare-api.example.workers.dev',
+      adminUrl: null
+    })).toEqual([
+      'Beginner setup complete.',
+      '1. API URL: https://sheetflare-api.example.workers.dev',
+      '2. Run npm run doctor any time you want to re-check this deployment.'
+    ]);
+  });
+});

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ScriptError, getFirstEnv, redactSecret, requestJson, requireAdminCredential, requireEnv, shouldShowSecrets } from './runtime';
+import { ScriptError, getFirstEnv, logStep, redactSecret, requestJson, requireAdminCredential, requireEnv, shouldShowSecrets } from './runtime';
 
 describe('requestJson', () => {
   afterEach(() => {
@@ -22,6 +22,38 @@ describe('requestJson', () => {
       })
     ).rejects.toThrow(
       'Expected GET /ready to return 200, received 503. requestId=req-123 body=upstream unavailable'
+    );
+  });
+
+  it('accepts any configured expected status', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ok: true }, {
+      status: 200
+    })));
+
+    await expect(requestJson({
+      baseUrl: 'https://example.com',
+      path: '/v1/admin/projects?upsert=true',
+      method: 'POST',
+      expectedStatus: [200, 201]
+    })).resolves.toMatchObject({
+      data: {
+        ok: true
+      }
+    });
+  });
+
+  it('formats multiple expected statuses in error messages', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('conflict', {
+      status: 409
+    })));
+
+    await expect(requestJson({
+      baseUrl: 'https://example.com',
+      path: '/v1/admin/projects?upsert=true',
+      method: 'POST',
+      expectedStatus: [200, 201]
+    })).rejects.toThrow(
+      'Expected POST /v1/admin/projects?upsert=true to return 200 or 201, received 409. body=conflict'
     );
   });
 
@@ -115,5 +147,19 @@ describe('secret helpers', () => {
     process.env.SHEETFLARE_SHOW_SECRETS = 'true';
 
     expect(shouldShowSecrets()).toBe(true);
+  });
+});
+
+describe('terminal log helpers', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('uses neutral labels outside the setup script', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    logStep('Checking cache');
+
+    expect(log).toHaveBeenCalledWith('\n[step] Checking cache');
   });
 });

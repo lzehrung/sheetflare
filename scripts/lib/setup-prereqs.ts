@@ -34,6 +34,7 @@ type SetupPrereqDependencies = {
 type SetupPrereqOptions = {
   includeWranglerAuth?: boolean;
   includeGcloudAuth?: boolean;
+  debug?: boolean;
 };
 
 export async function runPrereqCommand(command: string, args: string[]) {
@@ -93,6 +94,15 @@ export async function checkWranglerAuthPrereq(dependencies: SetupPrereqDependenc
   } satisfies SetupPrereqResult;
 }
 
+export function recordPrereqResult(results: SetupPrereqResult[], result: SetupPrereqResult) {
+  const existingIndex = results.findIndex((entry) => entry.name === result.name);
+  if (existingIndex >= 0) {
+    results[existingIndex] = result;
+    return;
+  }
+  results.push(result);
+}
+
 export async function checkSetupPrereqsWithOptions(
   options: SetupPrereqOptions = {},
   dependencies: SetupPrereqDependencies = {}
@@ -137,7 +147,8 @@ export async function checkSetupPrereqsWithOptions(
 
   if (options.includeGcloudAuth) {
     results.push(await checkGcloudAuthPrereq({
-      commandRunner
+      commandRunner,
+      debug: Boolean(options.debug)
     }));
   }
 

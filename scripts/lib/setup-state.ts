@@ -11,6 +11,7 @@ export type SetupLocalState = {
 };
 
 type SetupLocalStateInputValue = SetupLocalState[keyof SetupLocalState] | null | undefined;
+export type SetupLocalStateUpdate = Partial<Record<keyof SetupLocalState, SetupLocalStateInputValue>>;
 const allowedSetupLocalStateKeys = new Set<keyof SetupLocalState>([
   'googleClientEmail',
   'apiUrl',
@@ -77,14 +78,30 @@ export async function writeSetupLocalState(configPath: string, state: SetupLocal
   return path;
 }
 
-export function createSetupLocalState(entries: Partial<Record<keyof SetupLocalState, SetupLocalStateInputValue>>) {
-  const state: SetupLocalState = {};
+export function createSetupLocalState(entries: SetupLocalStateUpdate) {
+  const state: SetupLocalStateUpdate = {};
   for (const [key, value] of Object.entries(entries) as Array<[keyof SetupLocalState, SetupLocalStateInputValue]>) {
-    if (typeof value === 'string' && value.trim().length > 0) {
+    if (value === null) {
+      state[key] = null;
+    } else if (typeof value === 'string' && value.trim().length > 0) {
       state[key] = value;
     }
   }
   return state;
+}
+
+export function mergeSetupLocalState(currentState: SetupLocalState | null, updates: SetupLocalStateUpdate) {
+  const nextState: SetupLocalState = {
+    ...(currentState ?? {})
+  };
+  for (const [key, value] of Object.entries(updates) as Array<[keyof SetupLocalState, SetupLocalStateInputValue]>) {
+    if (value === null) {
+      delete nextState[key];
+    } else if (typeof value === 'string' && value.trim().length > 0) {
+      nextState[key] = value;
+    }
+  }
+  return nextState;
 }
 
 function redactValue(value: string | undefined) {
