@@ -168,12 +168,12 @@ flowchart LR
 
 ## Phase 8 - Optional Docs Cache
 
-- [ ] Decide whether `/doc` and `/docs` are worth caching.
-- [ ] If yes, serve them through a separate cached entrypoint or add explicit cache headers only after the default-entrypoint cache hazard is resolved.
-- [ ] Use a short or moderate TTL for `/doc` and `/docs`.
-- [ ] Rely on default Worker-version cache keying so deploys naturally cold-start docs responses.
-- [ ] Do not let docs caching change auth, readiness, or data-route caching behavior.
-- [ ] Do not enable cache lookup on the default gateway just to cache docs; Cloudflare documents this as extra latency when most responses are `no-store`.
+- [x] Decide `/doc` and `/docs` are not worth caching in this rollout.
+- [x] Keep docs on the default entrypoint with `cache-control: no-store`.
+- [x] Do not add a docs TTL until a separate explicit admin/docs cache policy is designed.
+- [x] Rely on Worker deploys and default no-store behavior instead of cross-version docs cache reuse.
+- [x] Keep docs behavior isolated from auth, readiness, and data-route caching behavior.
+- [x] Do not enable cache lookup on the default gateway just to cache docs; Cloudflare documents this as extra latency when most responses are `no-store`.
 
 ## Phase 9 - Tests
 
