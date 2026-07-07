@@ -136,22 +136,23 @@ flowchart LR
 
 ## Phase 6 - Purge Contract
 
-- [ ] Add `CachedTableReads.invalidateTable(projectSlug, tableSlug)`.
-- [ ] Add `CachedTableReads.invalidateRow(projectSlug, tableSlug, rowId)` only as an optimization; table-level purge remains required for mutations.
-- [ ] Purge table cache after successful row create.
-- [ ] Purge table cache after successful row update.
-- [ ] Purge table cache after successful row delete.
-- [ ] Purge table cache after successful admin reindex.
-- [ ] Purge table cache after admin refresh when it actually refreshes stale table state.
-- [ ] Purge table cache before or after table deletion so stale reads cannot survive table removal.
-- [ ] Purge every table cache affected by project deletion.
-- [ ] Purge table cache after table config create/upsert when replacing an existing table.
-- [ ] Purge table caches after project config changes that can affect auth mode, credential resolution, spreadsheet identity, or table resolution.
-- [ ] Purge or cap TTL for affected table cache when Google Drive notification records an external change.
-- [ ] Purge affected table cache after automatic reindex/sync completes for an external change.
-- [ ] Treat purge failures as operationally visible errors; do not silently continue as if cached reads are invalidated.
-- [ ] Check Cloudflare purge rate limits before introducing per-mutation purge calls on potentially high-write deployments.
-- [ ] If write volume can exceed purge limits, prefer table-level short TTL, coalesced purges, or a documented degraded mode rather than silent best-effort invalidation.
+- [x] Add `CachedTableReads.invalidateProject(projectSlug)` for project-wide config/external-change invalidation.
+- [x] Add `CachedTableReads.invalidateTable(projectSlug, tableSlug)`.
+- [x] Add `CachedTableReads.invalidateRow(projectSlug, tableSlug, rowId)` only as an optimization; table-level purge remains required for mutations.
+- [x] Purge table cache after successful row create.
+- [x] Purge table cache after successful row update.
+- [x] Purge table cache after successful row delete.
+- [x] Purge table cache after successful admin reindex.
+- [x] Purge table cache after admin refresh when the pre-refresh table state is stale or not ready.
+- [x] Purge table cache after table deletion so stale reads cannot survive table removal.
+- [x] Purge the project tag after project deletion so every table cache in that project is invalidated.
+- [x] Purge table cache after table config create/upsert when replacing an existing table.
+- [x] Purge project cache after project config changes that can affect auth mode, credential resolution, spreadsheet identity, or table resolution.
+- [x] Purge affected project cache and cap TTL for affected table cache when Google Drive notification records an external change.
+- [x] For automatic external-change reindex/sync, rely on notification-time project purge plus debounce-capped TTL so interim cached entries expire at the debounce deadline.
+- [x] Treat purge failures as operationally visible errors; do not silently continue as if cached reads are invalidated.
+- [x] Check Cloudflare purge semantics before introducing per-mutation purge calls; use coarse project/table tags, not per-cell/per-query purges.
+- [x] If write volume can exceed purge limits, prefer table-level short TTL, coalesced purges, or a documented degraded mode rather than silent best-effort invalidation.
 
 ## Phase 7 - Admin and System No-cache Policy
 

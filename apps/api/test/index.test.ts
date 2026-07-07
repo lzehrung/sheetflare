@@ -118,6 +118,7 @@ function createEnv(options?: {
   googleCredentialsJson?: string;
   adminBearerToken?: string;
   allowedOrigins?: string;
+  cachedReadPurgeShouldFail?: boolean;
 }): Env {
   const rateLimitRequests: Array<{ name: string; key: string }> = [];
   const projectRequests: string[] = [];
@@ -125,6 +126,7 @@ function createEnv(options?: {
   const controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> = [];
   const durableObjectRequests: string[] = [];
   const cachedReadRequests: CachedReadRequestRecord[] = [];
+  const cachedReadPurgeCalls: CachePurgeCall[] = [];
   let verifyApiKeyCallCount = 0;
   let apiKeyTouchCallCount = 0;
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
@@ -683,6 +685,38 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'table.reindex') {
+      return Response.json({
+        type: 'table.reindex.result',
+        result: {
+          ok: true,
+          rowCount: 3,
+          cache: {
+            status: 'ready',
+            cacheTtlSeconds: 15,
+            stale: false,
+            staleReason: 'fresh',
+            rowCount: 3,
+            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
+            lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
+            lastSyncError: null,
+            validation: {
+              status: 'ok',
+              issueCount: 0,
+              issues: [],
+              validatedAt: '2026-04-26T00:00:03.000Z'
+            },
+            externalChange: {
+              pending: false,
+              lastChangedAt: null,
+              debounceUntil: null,
+              lastAutoReindexAt: null
+            }
+          }
+        }
+      });
+    }
+
     if (body.type === 'table.cache.clear') {
       if (options?.tableCacheClearStatus === 503) {
         return Response.json({
@@ -777,7 +811,31 @@ function createEnv(options?: {
       authorization: request.headers.get('authorization'),
       cacheKey: init?.cf?.cacheKey ?? null
     });
-    return createCachedTableReadsHarness(env).entrypoint.fetch(request);
+    return createCachedTableReadsHarness(env, {
+      purgeCalls: cachedReadPurgeCalls,
+      purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
+    }).entrypoint.fetch(request);
+  };
+
+  workerExports.CachedTableReads.invalidateProject = async (projectSlug) => {
+    await createCachedTableReadsHarness(env, {
+      purgeCalls: cachedReadPurgeCalls,
+      purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
+    }).entrypoint.invalidateProject(projectSlug);
+  };
+
+  workerExports.CachedTableReads.invalidateTable = async (projectSlug, tableSlug) => {
+    await createCachedTableReadsHarness(env, {
+      purgeCalls: cachedReadPurgeCalls,
+      purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
+    }).entrypoint.invalidateTable(projectSlug, tableSlug);
+  };
+
+  workerExports.CachedTableReads.invalidateRow = async (projectSlug, tableSlug, rowId) => {
+    await createCachedTableReadsHarness(env, {
+      purgeCalls: cachedReadPurgeCalls,
+      purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
+    }).entrypoint.invalidateRow(projectSlug, tableSlug, rowId);
   };
 
   Object.defineProperty(env, '__rateLimitRequests', {
@@ -802,6 +860,10 @@ function createEnv(options?: {
   });
   Object.defineProperty(env, '__cachedReadRequests', {
     value: cachedReadRequests,
+    enumerable: false
+  });
+  Object.defineProperty(env, '__cachedReadPurgeCalls', {
+    value: cachedReadPurgeCalls,
     enumerable: false
   });
   Object.defineProperty(env, '__verifyApiKeyCallCount', {
@@ -848,8 +910,11 @@ function createTracing(): Tracing {
   };
 }
 
-function createCachedTableReadsHarness(env: Env = createEnv()): { entrypoint: CachedTableReads; purgeCalls: CachePurgeCall[] } {
-  const purgeCalls: CachePurgeCall[] = [];
+function createCachedTableReadsHarness(
+  env: Env = createEnv(),
+  options?: { purgeCalls?: CachePurgeCall[]; purgeShouldFail?: boolean }
+): { entrypoint: CachedTableReads; purgeCalls: CachePurgeCall[] } {
+  const purgeCalls = options?.purgeCalls ?? [];
   const ctx: ExecutionContext = {
     waitUntil(promise: Promise<unknown>) {
       void promise;
@@ -857,8 +922,11 @@ function createCachedTableReadsHarness(env: Env = createEnv()): { entrypoint: Ca
     passThroughOnException() {},
     props: {},
     cache: {
-      async purge(options) {
-        purgeCalls.push(options);
+      async purge(purgeOptions) {
+        purgeCalls.push(purgeOptions);
+        if (options?.purgeShouldFail === true) {
+          throw new Error('Workers Cache purge failed for test.');
+        }
         return {
           success: true,
           errors: []
@@ -899,6 +967,17 @@ function readCacheTagHeader(response: Response) {
     throw new Error('Expected Cache-Tag header.');
   }
   return value.split(',').map((tag) => tag.trim()).filter((tag) => tag.length > 0);
+}
+
+function expectCachedReadPurgeCalls(
+  env: { __cachedReadPurgeCalls: CachePurgeCall[] },
+  expectedTags: string[][]
+) {
+  expect(env.__cachedReadPurgeCalls).toEqual(
+    expectedTags.map((tags) => ({
+      tags
+    }))
+  );
 }
 
 function expectSuccessfulCachedReadHeaders(
@@ -1113,6 +1192,18 @@ describe('CachedTableReads', () => {
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.text()).toBe('');
     expect(env.__tableRequests).toEqual([]);
+  });
+
+  it('purges the project tag when invalidating a project', async () => {
+    const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
+
+    await entrypoint.invalidateProject('demo');
+
+    expect(purgeCalls).toEqual([
+      {
+        tags: ['project:demo']
+      }
+    ]);
   });
 
   it('purges the table tag when invalidating a table', async () => {
@@ -1399,11 +1490,12 @@ describe('api routes', () => {
     expect(env.__controlPlaneRequests.at(-1)?.type).toBe('control.spreadsheet-watches.retry-advice.list');
   });
 
-  it('accepts verified Google Drive webhook notifications without edge rate limiting', async () => {
+  it('accepts verified Google Drive webhook notifications, records the external-change debounce, and purges project tags', async () => {
     const app = createApp();
     const env = createEnv() as Env & {
       __controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }>;
       __rateLimitRequests: Array<{ name: string; key: string }>;
+      __cachedReadPurgeCalls: CachePurgeCall[];
     };
     const response = await app.request(
       '/v1/system/google/drive/notifications',
@@ -1422,14 +1514,20 @@ describe('api routes', () => {
 
     expect(response.status).toBe(204);
     expect(env.__rateLimitRequests).toEqual([]);
-    expect(env.__controlPlaneRequests.at(-1)).toMatchObject({
+    expect(env.__controlPlaneRequests).toContainEqual(expect.objectContaining({
       type: 'control.spreadsheet-watch.notify',
-      body: {
+      body: expect.objectContaining({
         channelId: 'channel-1',
         resourceId: 'resource-1',
         resourceState: 'update'
-      }
-    });
+      })
+    }));
+    expect(env.__controlPlaneRequests).toContainEqual(expect.objectContaining({
+      type: 'control.projects.list'
+    }));
+    expectCachedReadPurgeCalls(env, [
+      ['project:demo']
+    ]);
   });
 
   it('rejects Google Drive webhook notifications with the wrong verification token', async () => {
@@ -1473,8 +1571,9 @@ describe('api routes', () => {
     expect(response.status).toBe(409);
   });
 
-  it('allows explicit project upserts for idempotent automation', async () => {
+  it('allows explicit project upserts for idempotent automation and purges replaced project tags', async () => {
     const app = createApp();
+    const env = createEnv() as Env & { __cachedReadPurgeCalls: CachePurgeCall[] };
     const response = await app.request(
       '/v1/admin/projects?upsert=true',
       {
@@ -1489,10 +1588,13 @@ describe('api routes', () => {
           spreadsheetId: 'sheet-1'
         })
       },
-      createEnv()
+      env
     );
 
     expect(response.status).toBe(200);
+    expectCachedReadPurgeCalls(env, [
+      ['project:demo']
+    ]);
   });
 
   it('treats upsert=false as a real false value instead of enabling replacement', async () => {
@@ -1539,8 +1641,9 @@ describe('api routes', () => {
     expect(response.status).toBe(400);
   });
 
-  it('returns 200 for explicit table upserts that replace existing config', async () => {
+  it('returns 200 for explicit table upserts that replace existing config and purges replaced table tags', async () => {
     const app = createApp();
+    const env = createEnv() as Env & { __cachedReadPurgeCalls: CachePurgeCall[] };
     const response = await app.request(
       '/v1/admin/projects/demo/tables?upsert=true',
       {
@@ -1554,7 +1657,7 @@ describe('api routes', () => {
           sheetTabName: 'Users'
         })
       },
-      createEnv()
+      env
     );
 
     expect(response.status).toBe(200);
@@ -1564,6 +1667,9 @@ describe('api routes', () => {
         tableSlug: 'users'
       })
     });
+    expectCachedReadPurgeCalls(env, [
+      ['table:demo:users']
+    ]);
   });
 
   it('treats table upsert=false as a real false value instead of replacing config', async () => {
@@ -1611,12 +1717,13 @@ describe('api routes', () => {
     });
   });
 
-  it('deletes a configured table and clears its cached table state', async () => {
+  it('deletes a configured table, clears cached table state, and purges table tags', async () => {
     const app = createApp();
     const env = createEnv() as Env & {
       __projectRequests: string[];
       __tableRequests: Array<{ type: string }>;
       __durableObjectRequests: string[];
+      __cachedReadPurgeCalls: CachePurgeCall[];
     };
     const response = await app.request(
       '/v1/admin/projects/demo/tables/users',
@@ -1639,6 +1746,9 @@ describe('api routes', () => {
     expect(env.__durableObjectRequests.indexOf('table.cache.clear')).toBeLessThan(
       env.__durableObjectRequests.indexOf('project.table.delete')
     );
+    expectCachedReadPurgeCalls(env, [
+      ['table:demo:users']
+    ]);
   });
 
   it('does not delete table metadata when its cached table state cannot be cleared first', async () => {
@@ -1663,12 +1773,13 @@ describe('api routes', () => {
     expect(env.__projectRequests).not.toContain('project.table.delete');
   });
 
-  it('deletes a configured project and clears caches for its tables', async () => {
+  it('deletes a configured project, clears caches for its tables, and purges project tags', async () => {
     const app = createApp();
     const env = createEnv() as Env & {
       __projectRequests: string[];
       __tableRequests: Array<{ type: string }>;
       __durableObjectRequests: string[];
+      __cachedReadPurgeCalls: CachePurgeCall[];
     };
     const response = await app.request(
       '/v1/admin/projects/demo',
@@ -1692,6 +1803,9 @@ describe('api routes', () => {
     expect(env.__durableObjectRequests.indexOf('table.cache.clear')).toBeLessThan(
       env.__durableObjectRequests.indexOf('project.delete')
     );
+    expectCachedReadPurgeCalls(env, [
+      ['project:demo']
+    ]);
   });
 
   it('does not delete project metadata when one of its table caches cannot be cleared first', async () => {
@@ -1985,11 +2099,12 @@ describe('api routes', () => {
     expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitPrincipal":"api-key:project-key"'));
   });
 
-  it('keeps row mutations on the default route instead of the cached entrypoint', async () => {
+  it('keeps row mutations on the default route and purges exact cache tags', async () => {
     const app = createApp();
     const env = createEnv() as Env & {
       __tableRequests: Array<{ type: string; requestContext?: Record<string, unknown> }>;
       __cachedReadRequests: CachedReadRequestRecord[];
+      __cachedReadPurgeCalls: CachePurgeCall[];
     };
 
     const createResponse = await app.request(
@@ -2073,6 +2188,54 @@ describe('api routes', () => {
       'rows.update',
       'rows.delete'
     ]);
+    expectCachedReadPurgeCalls(env, [
+      ['table:demo:users'],
+      ['table:demo:users', 'row:demo:users:row-1'],
+      ['table:demo:users', 'row:demo:users:row-1']
+    ]);
+  });
+
+  it('surfaces row mutation purge failures instead of returning a silent success', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const app = createApp();
+    const env = createEnv({ cachedReadPurgeShouldFail: true }) as Env & {
+      __tableRequests: Array<{ type: string }>;
+      __cachedReadPurgeCalls: CachePurgeCall[];
+    };
+
+    try {
+      const response = await app.request(
+        '/v1/projects/demo/tables/users/rows',
+        {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer secret',
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify({
+            values: {
+              name: 'Ada'
+            }
+          })
+        },
+        env
+      );
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: 'Internal server error.',
+          details: null
+        }
+      });
+      expect(env.__tableRequests.map((request) => request.type)).toContain('table.row.create');
+      expectCachedReadPurgeCalls(env, [
+        ['table:demo:users']
+      ]);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('rejects protected row creation without credentials', async () => {
@@ -2528,6 +2691,89 @@ describe('api routes', () => {
         principal: 'bootstrap-admin'
       }
     });
+  });
+
+  it('purges table tags after refreshing stale or not-ready admin caches', async () => {
+    const app = createApp();
+    const cases = [
+      {
+        name: 'stale cache',
+        envOptions: { tableCacheStatus: 'ready' as const, tableCacheStale: true, tableCacheStaleReason: 'ttl-expired' as const }
+      },
+      {
+        name: 'not-ready cache',
+        envOptions: { tableCacheStatus: 'idle' as const, tableCacheStale: true, tableCacheStaleReason: 'never-synced' as const }
+      }
+    ];
+
+    for (const { name, envOptions } of cases) {
+      const env = createEnv(envOptions) as Env & {
+        __tableRequests: Array<{ type: string; requestContext?: Record<string, unknown> }>;
+        __cachedReadPurgeCalls: CachePurgeCall[];
+      };
+      const response = await app.request(
+        `/v1/admin/projects/demo/tables/users/refresh?case=${encodeURIComponent(name)}`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer secret'
+          }
+        },
+        env
+      );
+
+      expect(response.status).toBe(200);
+      expect(env.__tableRequests.map((request) => request.type)).toContain('table.cache.refresh');
+      expect(env.__tableRequests.at(-1)).toMatchObject({
+        type: 'table.cache.refresh',
+        requestContext: {
+          route: 'admin.cache.refresh',
+          principal: 'bootstrap-admin'
+        }
+      });
+      expectCachedReadPurgeCalls(env, [
+        ['table:demo:users']
+      ]);
+    }
+  });
+
+  it('purges table tags after a successful admin table reindex', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __tableRequests: Array<{ type: string; requestContext?: Record<string, unknown> }>;
+      __cachedReadPurgeCalls: CachePurgeCall[];
+    };
+    const response = await app.request(
+      '/v1/admin/projects/demo/tables/users/reindex',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      rowCount: 3,
+      cache: expect.objectContaining({
+        status: 'ready',
+        stale: false,
+        rowCount: 3
+      })
+    });
+    expect(env.__tableRequests.at(-1)).toMatchObject({
+      type: 'table.reindex',
+      requestContext: {
+        route: 'admin.cache.reindex',
+        principal: 'bootstrap-admin'
+      }
+    });
+    expectCachedReadPurgeCalls(env, [
+      ['table:demo:users']
+    ]);
   });
 
   it('parses filter queries for row listing', async () => {

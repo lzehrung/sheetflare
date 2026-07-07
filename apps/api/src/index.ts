@@ -965,6 +965,41 @@ async function clearTableCacheState(c: AppContext, projectSlug: string, tableSlu
   });
 }
 
+async function getTableCacheStatusData(c: AppContext, projectSlug: string, tableSlug: string) {
+  const response = await doRpc<TableDoResponse>(getTableStub(c.env, projectSlug, tableSlug), {
+    type: 'table.cache.get',
+    projectSlug,
+    tableSlug
+  });
+
+  return (response as { type: 'table.cache.get.result'; result: GetTableCacheStatusResult }).result.data;
+}
+
+async function invalidateCachedProject(projectSlug: string) {
+  await workerExports.CachedTableReads.invalidateProject(projectSlug);
+}
+
+async function invalidateCachedTable(projectSlug: string, tableSlug: string) {
+  await workerExports.CachedTableReads.invalidateTable(projectSlug, tableSlug);
+}
+
+async function invalidateCachedRow(projectSlug: string, tableSlug: string, rowId: string) {
+  await workerExports.CachedTableReads.invalidateRow(projectSlug, tableSlug, rowId);
+}
+
+async function invalidateCachedProjectsForSpreadsheet(c: { env: Env }, spreadsheetId: string) {
+  const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+    type: 'control.projects.list'
+  });
+  const result = (response as { type: 'control.projects.list.result'; result: AdminListProjectsResult }).result;
+
+  for (const project of result.data) {
+    if (project.spreadsheetId === spreadsheetId) {
+      await invalidateCachedProject(project.slug);
+    }
+  }
+}
+
 async function getApiKeyRecord(c: { env: Env }, apiKeyId: string) {
   const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
     type: 'control.api-key.get',
@@ -1959,6 +1994,10 @@ export class CachedTableReads extends WorkerEntrypoint<Env> {
     await workerCache.purge({ tags });
   }
 
+  async invalidateProject(projectSlug: string): Promise<void> {
+    await this.purgeTags([getProjectCacheTag(projectSlug)]);
+  }
+
   async invalidateTable(projectSlug: string, tableSlug: string): Promise<void> {
     await this.purgeTags([getTableCacheTag(projectSlug, tableSlug)]);
   }
@@ -2185,6 +2224,9 @@ function createApp() {
       type: 'project.create.result';
       result: { data: AdminGetProjectResult; created: boolean };
     }).result;
+    if (!result.created) {
+      await invalidateCachedProject(result.data.project.slug);
+    }
     return c.json(result.data, result.created ? 201 : 200);
   });
 
@@ -2205,6 +2247,7 @@ function createApp() {
       type: 'project.delete.result';
       result: DeleteProjectResult;
     }).result;
+    await invalidateCachedProject(project);
 
     return c.json(result);
   });
@@ -2275,6 +2318,9 @@ function createApp() {
       type: 'project.table.create.result';
       result: { data: UpsertTableResult['data']; created: boolean };
     }).result;
+    if (!result.created) {
+      await invalidateCachedTable(project, result.data.tableSlug);
+    }
     return c.json(
       { data: result.data },
       result.created ? 201 : 200
@@ -2295,6 +2341,7 @@ function createApp() {
       type: 'project.table.delete.result';
       result: DeleteTableResult;
     }).result;
+    await invalidateCachedTable(project, table);
 
     return c.json(result);
   });
@@ -2342,19 +2389,16 @@ function createApp() {
     const auth = await authenticateRequest(c);
     const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
     assertProjectScope(auth, 'admin:projects', project);
-    const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
-      type: 'table.cache.get',
-      projectSlug: project,
-      tableSlug: table
+    return c.json({
+      data: await getTableCacheStatusData(c, project, table)
     });
-
-    return c.json((response as { type: 'table.cache.get.result'; result: GetTableCacheStatusResult }).result);
   });
 
   app.openapi(refreshTableCacheRoute, async (c) => {
     const auth = await authenticateRequest(c);
     const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
     assertProjectScope(auth, 'admin:projects', project);
+    const cacheStatusBeforeRefresh = await getTableCacheStatusData(c, project, table);
     const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
       type: 'table.cache.refresh',
       projectSlug: project,
@@ -2362,7 +2406,11 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'admin.cache.refresh')
     });
 
-    return c.json((response as { type: 'table.cache.refresh.result'; result: RefreshTableCacheResult }).result);
+    const result = (response as { type: 'table.cache.refresh.result'; result: RefreshTableCacheResult }).result;
+    if (cacheStatusBeforeRefresh.status !== 'ready' || cacheStatusBeforeRefresh.stale) {
+      await invalidateCachedTable(project, table);
+    }
+    return c.json(result);
   });
 
   app.openapi(reindexTableRoute, async (c) => {
@@ -2376,7 +2424,9 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'admin.cache.reindex')
     });
 
-    return c.json((response as { type: 'table.reindex.result'; result: ReindexTableResult }).result);
+    const result = (response as { type: 'table.reindex.result'; result: ReindexTableResult }).result;
+    await invalidateCachedTable(project, table);
+    return c.json(result);
   });
 
   app.openapi(registerSpreadsheetWatchesRoute, async (c) => {
@@ -2474,7 +2524,7 @@ function createApp() {
     }
 
     c.set('authPrincipal', 'system:google-drive');
-    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+    const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
       type: 'control.spreadsheet-watch.notify',
       channelId,
       resourceId,
@@ -2483,6 +2533,13 @@ function createApp() {
       changedAt: new Date().toISOString(),
       channelExpiration: c.req.header('x-goog-channel-expiration')?.trim() ?? null
     });
+    const result = (response as {
+      type: 'control.spreadsheet-watch.notify.result';
+      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
+    }).result;
+    if (result.accepted && result.spreadsheetId && result.debounceUntil) {
+      await invalidateCachedProjectsForSpreadsheet(c, result.spreadsheetId);
+    }
 
     return new Response(null, { status: 204 });
   });
@@ -2519,7 +2576,9 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'rows.create')
     });
 
-    return c.json((response as { type: 'table.row.create.result'; result: CreateRowResult }).result, 201);
+    const result = (response as { type: 'table.row.create.result'; result: CreateRowResult }).result;
+    await invalidateCachedTable(project, table);
+    return c.json(result, 201);
   });
 
   app.openapi(updateRowRoute, async (c) => {
@@ -2536,7 +2595,9 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'rows.update')
     });
 
-    return c.json((response as { type: 'table.row.update.result'; result: UpdateRowResult }).result);
+    const result = (response as { type: 'table.row.update.result'; result: UpdateRowResult }).result;
+    await invalidateCachedRow(project, table, id);
+    return c.json(result);
   });
 
   app.openapi(deleteRowRoute, async (c) => {
@@ -2551,12 +2612,12 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'rows.delete')
     });
 
-    return c.json(
-      (response as {
-        type: 'table.row.delete.result';
-        result: { ok: true; deletedId: string };
-      }).result
-    );
+    const result = (response as {
+      type: 'table.row.delete.result';
+      result: { ok: true; deletedId: string };
+    }).result;
+    await invalidateCachedRow(project, table, id);
+    return c.json(result);
   });
 
   app.openapi(listApiKeysRoute, async (c) => {

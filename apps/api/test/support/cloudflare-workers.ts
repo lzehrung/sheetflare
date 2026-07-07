@@ -19,6 +19,9 @@ export type CachedWorkerEntrypointFetchInit = RequestInit & {
 
 export type CachedWorkerEntrypoint = {
   fetch(request: Request, init?: CachedWorkerEntrypointFetchInit): Promise<Response>;
+  invalidateProject(projectSlug: string): Promise<void>;
+  invalidateTable(projectSlug: string, tableSlug: string): Promise<void>;
+  invalidateRow(projectSlug: string, tableSlug: string, rowId: string): Promise<void>;
 };
 
 export const exports: {
@@ -36,6 +39,15 @@ export const exports: {
         },
         { status: 503 }
       );
+    },
+    async invalidateProject() {
+      throw new Error('Cached table read test entrypoint is not configured.');
+    },
+    async invalidateTable() {
+      throw new Error('Cached table read test entrypoint is not configured.');
+    },
+    async invalidateRow() {
+      throw new Error('Cached table read test entrypoint is not configured.');
     }
   }
 };
