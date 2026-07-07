@@ -1657,6 +1657,88 @@ async function runCachedTableRead(env: Env, operation: CachedTableReadOperation)
   return response.result;
 }
 
+async function getCachedTableReadCacheStatus(env: Env, operation: CachedTableReadOperation) {
+  const response = await doRpc<TableDoResponse>(getTableStub(env, operation.projectSlug, operation.tableSlug), {
+    type: 'table.cache.get',
+    projectSlug: operation.projectSlug,
+    tableSlug: operation.tableSlug
+  });
+  if (response.type !== 'table.cache.get.result') {
+    throw new ServiceUnavailableError('Unexpected table cache status response.');
+  }
+
+  return response.result.data;
+}
+
+function getExternalChangeDebounceSeconds(cacheStatus: GetTableCacheStatusResult['data']) {
+  if (!cacheStatus.externalChange.pending || !cacheStatus.externalChange.debounceUntil) {
+    return null;
+  }
+
+  const debounceUntilMs = Date.parse(cacheStatus.externalChange.debounceUntil);
+  if (!Number.isFinite(debounceUntilMs)) {
+    return null;
+  }
+
+  return Math.max(0, Math.ceil((debounceUntilMs - Date.now()) / 1000));
+}
+
+function getCachedTableReadEdgeTtlSeconds(cacheStatus: GetTableCacheStatusResult['data']) {
+  if (cacheStatus.cacheTtlSeconds <= 0 || cacheStatus.status !== 'ready' || cacheStatus.stale) {
+    return 0;
+  }
+
+  const debounceSeconds = getExternalChangeDebounceSeconds(cacheStatus);
+  if (debounceSeconds === null) {
+    return cacheStatus.cacheTtlSeconds;
+  }
+
+  return Math.min(cacheStatus.cacheTtlSeconds, debounceSeconds);
+}
+
+function getCachedTableReadTags(operation: CachedTableReadOperation) {
+  const projectTag = getProjectCacheTag(operation.projectSlug);
+  const tableTag = getTableCacheTag(operation.projectSlug, operation.tableSlug);
+  if (operation.kind !== 'getRow') {
+    return [projectTag, tableTag];
+  }
+
+  return [
+    projectTag,
+    tableTag,
+    getRowCacheTag(operation.projectSlug, operation.tableSlug, operation.rowId)
+  ];
+}
+
+function cachedTableReadSuccessHeaders(operation: CachedTableReadOperation, cacheStatus: GetTableCacheStatusResult['data']) {
+  const edgeTtlSeconds = getCachedTableReadEdgeTtlSeconds(cacheStatus);
+  const cacheTags = serializeCacheTags(getCachedTableReadTags(operation));
+  const headers = new Headers({
+    'cache-control': 'private, no-store'
+  });
+
+  if (cacheTags !== null) {
+    headers.set('cache-tag', cacheTags);
+  }
+
+  headers.set(
+    'cloudflare-cdn-cache-control',
+    edgeTtlSeconds > 0 && cacheTags !== null
+      ? `public, max-age=${edgeTtlSeconds}, stale-if-error=0`
+      : 'no-store'
+  );
+
+  return headers;
+}
+
+async function cachedTableReadSuccessResponse(env: Env, operation: CachedTableReadOperation) {
+  const result = await runCachedTableRead(env, operation);
+  const cacheStatus = await getCachedTableReadCacheStatus(env, operation);
+  return Response.json(result, {
+    headers: cachedTableReadSuccessHeaders(operation, cacheStatus)
+  });
+}
+
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map((entry) => stableJson(entry)).join(',')}]`;
@@ -1785,8 +1867,47 @@ async function fetchCachedTableReadJson<TSchema extends z.ZodType>(
   return parseCachedTableReadResponse(c, await fetchCachedTableRead(c, pathname, options), schema);
 }
 
+const maxPurgeCacheTagLength = 1024;
+const maxCacheTagHeaderLength = 16 * 1024;
+
 function encodeCacheTagPart(value: string) {
   return encodeURIComponent(value);
+}
+
+function isPrintableAsciiCacheTag(value: string) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.charCodeAt(index);
+    if (codePoint < 0x21 || codePoint > 0x7e) {
+      return false;
+    }
+  }
+
+  return value.length > 0;
+}
+
+function serializeCacheTags(tags: string[]) {
+  let headerLength = 0;
+  let first = true;
+  for (const tag of tags) {
+    if (tag.length > maxPurgeCacheTagLength || !isPrintableAsciiCacheTag(tag)) {
+      return null;
+    }
+
+    headerLength += tag.length;
+    if (!first) {
+      headerLength += 1;
+    }
+    first = false;
+    if (headerLength > maxCacheTagHeaderLength) {
+      return null;
+    }
+  }
+
+  return tags.join(',');
+}
+
+function getProjectCacheTag(projectSlug: string) {
+  return `project:${encodeCacheTagPart(projectSlug)}`;
 }
 
 function getTableCacheTag(projectSlug: string, tableSlug: string) {
@@ -1823,7 +1944,7 @@ export class CachedTableReads extends WorkerEntrypoint<Env> {
     }
 
     try {
-      return noStoreJsonResponse(await runCachedTableRead(this.env, parseCachedTableReadRequest(request)));
+      return cachedTableReadSuccessResponse(this.env, parseCachedTableReadRequest(request));
     } catch (error) {
       return noStoreErrorResponse(error);
     }

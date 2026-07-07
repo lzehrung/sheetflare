@@ -109,6 +109,10 @@ function createEnv(options?: {
   projectAccessStatus?: 200 | 404 | 500;
   tableCacheClearStatus?: 200 | 503;
   tableCacheTtlSeconds?: number;
+  tableCacheStatus?: 'idle' | 'syncing' | 'ready' | 'error';
+  tableCacheStale?: boolean;
+  tableCacheStaleReason?: 'fresh' | 'never-synced' | 'ttl-expired' | 'config-changed' | 'external-change' | 'error';
+  tableExternalChangeDebounceUntil?: string | null;
   googleClientEmail?: string;
   googlePrivateKey?: string;
   googleCredentialsJson?: string;
@@ -617,14 +621,15 @@ function createEnv(options?: {
     }
 
     if (body.type === 'table.cache.get') {
+      const stale = options?.tableCacheStale ?? false;
       return Response.json({
         type: 'table.cache.get.result',
         result: {
           data: {
-            status: 'ready',
-            cacheTtlSeconds: 15,
-            stale: false,
-            staleReason: 'fresh',
+            status: options?.tableCacheStatus ?? 'ready',
+            cacheTtlSeconds: options?.tableCacheTtlSeconds ?? 15,
+            stale,
+            staleReason: options?.tableCacheStaleReason ?? (stale ? 'ttl-expired' : 'fresh'),
             rowCount: 2,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
@@ -636,9 +641,9 @@ function createEnv(options?: {
               validatedAt: '2026-04-26T00:00:02.000Z'
             },
             externalChange: {
-              pending: false,
-              lastChangedAt: null,
-              debounceUntil: null,
+              pending: options?.tableExternalChangeDebounceUntil !== undefined,
+              lastChangedAt: options?.tableExternalChangeDebounceUntil === undefined ? null : '2026-04-26T00:00:00.000Z',
+              debounceUntil: options?.tableExternalChangeDebounceUntil ?? null,
               lastAutoReindexAt: null
             }
           }
@@ -886,6 +891,24 @@ function requireCacheKey(record: CachedReadRequestRecord) {
   return record.cacheKey;
 }
 
+
+function readCacheTagHeader(response: Response) {
+  const value = response.headers.get('cache-tag');
+  expect(value).toEqual(expect.any(String));
+  if (value === null) {
+    throw new Error('Expected Cache-Tag header.');
+  }
+  return value.split(',').map((tag) => tag.trim()).filter((tag) => tag.length > 0);
+}
+
+function expectSuccessfulCachedReadHeaders(
+  response: Response,
+  options: { edgeCacheControl: string; tags: string[] }
+) {
+  expect(response.headers.get('cache-control')).toBe('private, no-store');
+  expect(response.headers.get('cloudflare-cdn-cache-control')).toBe(options.edgeCacheControl);
+  expect(readCacheTagHeader(response)).toEqual(options.tags);
+}
 function expectNoCredentialMaterial(value: string) {
   const lowerValue = value.toLowerCase();
   expect(lowerValue).not.toContain('authorization');
@@ -896,15 +919,18 @@ function expectNoCredentialMaterial(value: string) {
 }
 
 describe('CachedTableReads', () => {
-  it('serves list rows through the internal cached-read fetch route without edge caching yet', async () => {
-    const { entrypoint } = createCachedTableReadsHarness();
+  it('sets client-safe and Workers Cache headers for list rows', async () => {
+    const { entrypoint } = createCachedTableReadsHarness(createEnv({ tableCacheTtlSeconds: 42 }));
 
     const response = await entrypoint.fetch(
       new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10')
     );
 
     expect(response.status).toBe(200);
-    expect(response.headers.get('cache-control')).toBe('no-store');
+    expectSuccessfulCachedReadHeaders(response, {
+      edgeCacheControl: 'public, max-age=42, stale-if-error=0',
+      tags: ['project:demo', 'table:demo:users']
+    });
     expect(await response.json()).toEqual({
       data: [
         {
@@ -917,6 +943,139 @@ describe('CachedTableReads', () => {
       ],
       nextCursor: null
     });
+  });
+
+  it('sets project and table Cache-Tag values for schema reads', async () => {
+    const { entrypoint } = createCachedTableReadsHarness(createEnv({ tableCacheTtlSeconds: 36 }));
+
+    const response = await entrypoint.fetch(
+      new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/schema')
+    );
+
+    expect(response.status).toBe(200);
+    expectSuccessfulCachedReadHeaders(response, {
+      edgeCacheControl: 'public, max-age=36, stale-if-error=0',
+      tags: ['project:demo', 'table:demo:users']
+    });
+    expect(await response.json()).toEqual({
+      data: {
+        fields: [
+          {
+            name: '_id',
+            inferredType: 'string',
+            nullable: false
+          }
+        ],
+        inferredAt: '2026-04-26T00:00:00.000Z'
+      }
+    });
+  });
+
+  it('sets project, table, and row Cache-Tag values for row reads', async () => {
+    const { entrypoint } = createCachedTableReadsHarness(createEnv({ tableCacheTtlSeconds: 24 }));
+
+    const response = await entrypoint.fetch(
+      new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows/row-1')
+    );
+
+    expect(response.status).toBe(200);
+    expectSuccessfulCachedReadHeaders(response, {
+      edgeCacheControl: 'public, max-age=24, stale-if-error=0',
+      tags: ['project:demo', 'table:demo:users', 'row:demo:users:row-1']
+    });
+    expect(await response.json()).toEqual({
+      data: {
+        id: 'row-1',
+        rowNumber: 2,
+        values: {}
+      }
+    });
+  });
+
+  it('bypasses Workers Cache when required Cache-Tag values exceed purge limits', async () => {
+    const longRowId = 'x'.repeat(1100);
+    const { entrypoint } = createCachedTableReadsHarness(createEnv({ tableCacheTtlSeconds: 24 }));
+
+    const response = await entrypoint.fetch(
+      new Request(`https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows/${longRowId}`)
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(response.headers.get('cloudflare-cdn-cache-control')).toBe('no-store');
+    expect(response.headers.get('cache-tag')).toBeNull();
+    expect(await response.json()).toEqual({
+      data: {
+        id: 'row-1',
+        rowNumber: 2,
+        values: {}
+      }
+    });
+  });
+
+  it('sets Workers Cache no-store when table cache TTL is disabled', async () => {
+    const { entrypoint } = createCachedTableReadsHarness(createEnv({ tableCacheTtlSeconds: 0 }));
+
+    const response = await entrypoint.fetch(
+      new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10')
+    );
+
+    expect(response.status).toBe(200);
+    expectSuccessfulCachedReadHeaders(response, {
+      edgeCacheControl: 'no-store',
+      tags: ['project:demo', 'table:demo:users']
+    });
+  });
+
+  it('caps Workers Cache max-age to the external-change debounce window', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-26T00:00:00.000Z'));
+
+    try {
+      const { entrypoint } = createCachedTableReadsHarness(createEnv({
+        tableCacheTtlSeconds: 60,
+        tableExternalChangeDebounceUntil: '2026-04-26T00:00:08.000Z'
+      }));
+
+      const response = await entrypoint.fetch(
+        new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10')
+      );
+
+      expect(response.status).toBe(200);
+      expectSuccessfulCachedReadHeaders(response, {
+        edgeCacheControl: 'public, max-age=8, stale-if-error=0',
+        tags: ['project:demo', 'table:demo:users']
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sets Workers Cache no-store when cache status is stale or not ready', async () => {
+    const cases = [
+      {
+        name: 'stale ready cache',
+        env: createEnv({ tableCacheStatus: 'ready', tableCacheStale: true, tableCacheTtlSeconds: 60 })
+      },
+      {
+        name: 'not-ready cache',
+        env: createEnv({ tableCacheStatus: 'syncing', tableCacheStale: false, tableCacheTtlSeconds: 60 })
+      }
+    ];
+
+    for (const { name, env } of cases) {
+      const { entrypoint } = createCachedTableReadsHarness(env);
+
+      const response = await entrypoint.fetch(
+        new Request(`https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10&case=${encodeURIComponent(name)}`)
+      );
+
+      expect(response.status).toBe(200);
+      expectSuccessfulCachedReadHeaders(response, {
+        edgeCacheControl: 'no-store',
+        tags: ['project:demo', 'table:demo:users']
+      });
+    }
   });
 
   it('returns a defensive no-store 404 for unknown cached-read paths', async () => {
@@ -2023,6 +2182,9 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
+    expect(response.headers.get('cache-tag')).toBeNull();
     expect(env.__projectRequests).toContain('project.access.get');
     expect(env.__projectRequests).toContain('project.table.resolve');
     expect(env.__cachedReadRequests).toHaveLength(1);

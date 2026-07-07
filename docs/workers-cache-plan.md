@@ -112,27 +112,27 @@ flowchart LR
 
 ## Phase 5 - Response Headers and Client Cache Safety
 
-- [ ] Set explicit edge cache directives on every successful cached table-read response.
-- [ ] For private/API-key reads, use `cloudflare-cdn-cache-control: public, max-age=<effectiveTtl>` or `cdn-cache-control` for Workers Cache, and send client-visible `Cache-Control: private, no-store`.
-- [ ] For anonymous `public-read` reads, intentionally decide whether clients may cache; if yes, send client-visible `Cache-Control: public, max-age=<effectiveTtl>`, otherwise keep client-visible `Cache-Control: no-store` and use edge-only cache directives.
-- [ ] Use `max-age=<effectiveTtl>` for the edge freshness window.
-- [ ] Compute `effectiveTtl` from `table.cacheTtlSeconds`, current `TableDO` freshness state, and any external-change debounce deadline.
-- [ ] Treat `cacheTtlSeconds = 0` as `no-store` for Workers Cache unless a separate always-revalidate design is approved.
-- [ ] If `TableDO` reports an external-change pending with a future `debounceUntil`, cap `effectiveTtl` to the remaining debounce window or bypass Workers Cache for that response.
-- [ ] If `TableDO` reports stale state that should trigger synchronous refresh, do not cache the stale response beyond the intended current request.
-- [ ] Add a bounded `stale-while-revalidate` window only where serving stale reads is acceptable and documented.
-- [ ] Do not combine `s-maxage`, `must-revalidate`, or `proxy-revalidate` with `stale-while-revalidate`; Cloudflare documents that those directives disable stale serving.
-- [ ] Set `stale-if-error=0` unless a bounded stale-on-error policy is explicitly chosen and documented.
-- [ ] Add `Cache-Tag: project:<project>,table:<project>:<table>` to list and schema responses.
-- [ ] Add `Cache-Tag: project:<project>,table:<project>:<table>,row:<project>:<table>:<id>` to point-read responses.
-- [ ] Ensure tag values are printable ASCII and short enough for Cloudflare tag limits.
-- [ ] Validate tag construction because Cloudflare silently drops invalid tags at storage time.
-- [ ] Do not emit `Set-Cookie` on cached read responses.
-- [ ] Add `Vary` only for request headers that actually affect representation.
-- [ ] If `Vary` is used, normalize the varied request headers in the gateway to avoid unbounded variant fan-out.
-- [ ] Never use `Vary: *`; it disables caching.
-- [ ] Do not cache inner-entrypoint responses with `x-request-id`, `x-ratelimit-*`, or per-request CORS values; those are default-gateway response concerns.
-- [ ] Add explicit `Cache-Control: no-store` to every non-2xx response produced by the cached entrypoint.
+- [x] Set explicit edge cache directives on every successful cached table-read response.
+- [x] For private/API-key reads, use `cloudflare-cdn-cache-control: public, max-age=<effectiveTtl>, stale-if-error=0` for Workers Cache, and send client-visible `Cache-Control: private, no-store`.
+- [x] For anonymous `public-read` reads, keep client-visible `Cache-Control: private, no-store`; only the internal cached entrypoint carries edge-only cache directives.
+- [x] Use `max-age=<effectiveTtl>` for the edge freshness window.
+- [x] Compute `effectiveTtl` from `table.cacheTtlSeconds`, current `TableDO` freshness state, and any external-change debounce deadline.
+- [x] Treat `cacheTtlSeconds = 0` as `no-store` for Workers Cache unless a separate always-revalidate design is approved.
+- [x] If `TableDO` reports an external-change pending with a future `debounceUntil`, cap `effectiveTtl` to the remaining debounce window or bypass Workers Cache for that response.
+- [x] If `TableDO` reports stale state that should trigger synchronous refresh, do not cache the stale response beyond the intended current request.
+- [x] Do not add `stale-while-revalidate`; serving stale cached reads needs a separate explicit policy.
+- [x] Do not combine `s-maxage`, `must-revalidate`, or `proxy-revalidate` with `stale-while-revalidate`; Cloudflare documents that those directives disable stale serving.
+- [x] Set `stale-if-error=0` unless a bounded stale-on-error policy is explicitly chosen and documented.
+- [x] Add `Cache-Tag: project:<project>,table:<project>:<table>` to list and schema responses.
+- [x] Add `Cache-Tag: project:<project>,table:<project>:<table>,row:<project>:<table>:<id>` to point-read responses.
+- [x] Ensure tag values are printable ASCII and short enough for Cloudflare tag limits.
+- [x] Validate tag construction because Cloudflare silently drops invalid tags at storage time.
+- [x] Do not emit `Set-Cookie` on cached read responses.
+- [x] Add `Vary` only for request headers that actually affect representation.
+- [x] If `Vary` is used, normalize the varied request headers in the gateway to avoid unbounded variant fan-out.
+- [x] Never use `Vary: *`; it disables caching.
+- [x] Do not cache inner-entrypoint responses with `x-request-id`, `x-ratelimit-*`, or per-request CORS values; those are default-gateway response concerns.
+- [x] Add explicit `Cache-Control: no-store` to every non-2xx response produced by the cached entrypoint.
 
 ## Phase 6 - Purge Contract
 
