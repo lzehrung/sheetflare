@@ -988,6 +988,19 @@ function expectSuccessfulCachedReadHeaders(
   expect(response.headers.get('cloudflare-cdn-cache-control')).toBe(options.edgeCacheControl);
   expect(readCacheTagHeader(response)).toEqual(options.tags);
 }
+
+function expectDefaultGatewayNoStore(response: Response) {
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
+  expect(response.headers.get('cache-tag')).toBeNull();
+}
+
+function expectCachedDataReadGatewayHeaders(response: Response) {
+  expect(response.headers.get('cache-control')).toBe('private, no-store');
+  expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
+  expect(response.headers.get('cache-tag')).toBeNull();
+}
+
 function expectNoCredentialMaterial(value: string) {
   const lowerValue = value.toLowerCase();
   expect(lowerValue).not.toContain('authorization');
@@ -1237,6 +1250,130 @@ describe('CachedTableReads', () => {
 describe('api routes', () => {
   beforeEach(() => {
     __resetRecentApiKeyTouchesForTests();
+  });
+
+  it('applies no-store to default-gateway dynamic and privileged routes', async () => {
+    const app = createApp();
+    const cases: Array<{
+      name: string;
+      path: string;
+      init?: RequestInit;
+      expectedStatus: number;
+    }> = [
+      {
+        name: 'readiness probe',
+        path: '/ready',
+        expectedStatus: 200
+      },
+      {
+        name: 'admin project listing',
+        path: '/v1/admin/projects',
+        init: {
+          headers: {
+            authorization: 'Bearer secret'
+          }
+        },
+        expectedStatus: 200
+      },
+      {
+        name: 'api key creation',
+        path: '/v1/admin/keys',
+        init: {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer secret',
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify({
+            name: 'Created key',
+            scopes: ['admin:keys']
+          })
+        },
+        expectedStatus: 201
+      },
+      {
+        name: 'drive watch status',
+        path: '/v1/admin/system/google/drive/watches',
+        init: {
+          headers: {
+            authorization: 'Bearer secret'
+          }
+        },
+        expectedStatus: 200
+      },
+      {
+        name: 'drive notification',
+        path: '/v1/system/google/drive/notifications',
+        init: {
+          method: 'POST',
+          headers: {
+            'x-goog-channel-id': 'channel-1',
+            'x-goog-resource-id': 'resource-1',
+            'x-goog-resource-state': 'update',
+            'x-goog-message-number': '2',
+            'x-goog-channel-token': 'drive-secret'
+          }
+        },
+        expectedStatus: 204
+      },
+      {
+        name: 'spreadsheet tab list',
+        path: '/v1/admin/projects/demo/spreadsheet/tabs',
+        init: {
+          headers: {
+            authorization: 'Bearer secret'
+          }
+        },
+        expectedStatus: 200
+      },
+      {
+        name: 'spreadsheet tab inspection',
+        path: '/v1/admin/projects/demo/spreadsheet/tabs/Users?headerRow=3',
+        init: {
+          headers: {
+            authorization: 'Bearer secret'
+          }
+        },
+        expectedStatus: 200
+      },
+      {
+        name: 'authorization failure',
+        path: '/v1/admin/projects',
+        expectedStatus: 401
+      },
+      {
+        name: 'missing project 404',
+        path: '/v1/admin/projects/missing-project/tables',
+        init: {
+          headers: {
+            authorization: 'Bearer secret'
+          }
+        },
+        expectedStatus: 404
+      },
+      {
+        name: 'unknown route 404',
+        path: '/v1/not-found',
+        expectedStatus: 404
+      },
+      {
+        name: 'OpenAPI document',
+        path: '/doc',
+        expectedStatus: 200
+      },
+      {
+        name: 'interactive docs',
+        path: '/docs',
+        expectedStatus: 200
+      }
+    ];
+
+    for (const { name, path, init, expectedStatus } of cases) {
+      const response = await app.request(path, init ?? {}, createEnv());
+
+      expect(response.status, name).toBe(expectedStatus);
+      expectDefaultGatewayNoStore(response);
+    }
   });
 
   it('enforces admin bearer auth when configured', async () => {
@@ -2358,6 +2495,38 @@ describe('api routes', () => {
     expect(env.__tableRequests[0]).toMatchObject({
       type: 'table.rows.list'
     });
+  });
+
+  it('preserves cached data-read no-store headers without exposing edge cache metadata', async () => {
+    const app = createApp();
+    const cases = [
+      {
+        path: '/v1/projects/demo/tables/users/rows?limit=10'
+      },
+      {
+        path: '/v1/projects/demo/tables/users/schema'
+      },
+      {
+        path: '/v1/projects/demo/tables/users/rows/row-1'
+      }
+    ];
+
+    for (const { path } of cases) {
+      const env = createEnv() as Env & { __cachedReadRequests: CachedReadRequestRecord[] };
+      const response = await app.request(
+        path,
+        {
+          headers: {
+            authorization: 'Bearer sfk_project-key.any-secret'
+          }
+        },
+        env
+      );
+
+      expect(response.status).toBe(200);
+      expectCachedDataReadGatewayHeaders(response);
+      expect(env.__cachedReadRequests).toHaveLength(1);
+    }
   });
 
   it('returns 429 when the edge rate limit is exceeded', async () => {

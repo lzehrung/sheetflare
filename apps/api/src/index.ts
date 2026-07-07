@@ -1593,6 +1593,14 @@ function noStoreJsonResponse(body: unknown, status = 200) {
   });
 }
 
+function applyDefaultGatewayCacheSafetyHeaders(response: Response) {
+  if (!response.headers.has('cache-control')) {
+    response.headers.set('cache-control', 'no-store');
+  }
+  response.headers.delete('cloudflare-cdn-cache-control');
+  response.headers.delete('cache-tag');
+}
+
 function noStoreErrorResponse(error: unknown) {
   const normalizedError = normalizeRequestError(error);
   const rpcErrorResponse = normalizedError instanceof DurableRpcError ? parseDurableRpcErrorResponse(normalizedError) : null;
@@ -2024,6 +2032,7 @@ function createApp() {
       applyCorsHeaders(c.res, c.req.raw, c.env);
     }
 
+    applyDefaultGatewayCacheSafetyHeaders(c.res);
     c.res.headers.set('x-request-id', c.get('requestId'));
     const rateLimit = c.get('rateLimit');
     const rateLimitContext = c.get('rateLimitContext');

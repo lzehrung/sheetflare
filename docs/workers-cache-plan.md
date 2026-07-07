@@ -156,15 +156,15 @@ flowchart LR
 
 ## Phase 7 - Admin and System No-cache Policy
 
-- [ ] Keep `/ready` uncached.
-- [ ] Keep admin/control-plane routes uncached.
-- [ ] Keep API-key listing and creation routes uncached.
-- [ ] Keep Google Drive watch status, retry advice, registration, stop, and notification routes uncached.
-- [ ] Keep spreadsheet tab listing and inspection uncached unless a separate explicit admin cache policy is designed later.
-- [ ] Preserve `cache-control: no-store` in the admin Pages API proxy.
-- [ ] Add explicit no-store headers to dynamic default-entrypoint responses if default-entrypoint cache lookup is ever enabled for other reasons.
-- [ ] Do not cache 401/403 admin or data-route authorization failures.
-- [ ] Do not cache 404 table/project/row failures until negative caching and purge behavior are explicitly designed.
+- [x] Keep `/ready` uncached.
+- [x] Keep admin/control-plane routes uncached.
+- [x] Keep API-key listing and creation routes uncached.
+- [x] Keep Google Drive watch status, retry advice, registration, stop, and notification routes uncached.
+- [x] Keep spreadsheet tab listing and inspection uncached unless a separate explicit admin cache policy is designed later.
+- [x] Preserve `cache-control: no-store` in the admin Pages API proxy.
+- [x] Add explicit no-store headers to dynamic default-entrypoint responses if default-entrypoint cache lookup is ever enabled for other reasons.
+- [x] Do not cache 401/403 admin or data-route authorization failures.
+- [x] Do not cache 404 table/project/row failures until negative caching and purge behavior are explicitly designed.
 
 ## Phase 8 - Optional Docs Cache
 
