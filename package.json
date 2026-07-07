@@ -56,7 +56,7 @@
     "load:staging": "npm run load"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260418.0",
+    "@cloudflare/workers-types": "^4.20260702.1",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.9.1",
     "eslint": "^10.2.1",

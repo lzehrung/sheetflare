@@ -1,7 +1,7 @@
 {
   "name": "sheetflare-staging-api",
   "main": "src/index.ts",
-  "compatibility_date": "2026-04-26",
+  "compatibility_date": "2026-07-07",
   "workers_dev": true,
   "durable_objects": {
     "bindings": [

@@ -60,14 +60,14 @@ flowchart LR
 
 ## Phase 1 - Platform Prerequisites
 
-- [ ] Upgrade API deploy scripts from `npx wrangler@4.85.0` to a Wrangler version that supports per-entrypoint Workers Cache, currently documented as `4.107.0+`.
-- [ ] Update the API workspace `wrangler` dev dependency to the same supported range.
-- [ ] Update Cloudflare Workers types if needed for `WorkerEntrypoint`, `ctx.exports`, `ctx.cache.purge`, and `cloudflare:workers` imports.
-- [ ] Set the API Worker `compatibility_date` to a date compatible with Workers Cache usage.
-- [ ] Confirm whether the project should use top-level `cache.enabled = true` plus `exports.default.cache.enabled = false`, or only an `exports.CachedTableReads.cache.enabled = true` override if Wrangler supports that shape.
-- [ ] Keep staging uncached until the first end-to-end cache validation passes.
-- [ ] Document that default Workers Cache keying is versioned, so deploys cold-start cached responses unless `cross_version_cache` is later enabled.
-- [ ] Keep `cross_version_cache` disabled initially.
+- [x] Upgrade API deploy scripts from `npx wrangler@4.85.0` to a Wrangler version that supports per-entrypoint Workers Cache, currently documented as `4.107.0+`.
+- [x] Update the API workspace `wrangler` dev dependency to the same supported range.
+- [x] Update Cloudflare Workers types if needed for `WorkerEntrypoint`, `ctx.exports`, `ctx.cache.purge`, and `cloudflare:workers` imports.
+- [x] Set the API Worker `compatibility_date` to a date compatible with Workers Cache usage.
+- [x] Use top-level `cache.enabled = true` plus `exports.default.cache.enabled = false` when Phase 2 adds the cached entrypoint; keep cache config absent until then so staging and production stay uncached.
+- [x] Keep staging uncached until the first end-to-end cache validation passes.
+- [x] Document that default Workers Cache keying is versioned, so deploys cold-start cached responses unless `cross_version_cache` is later enabled.
+- [x] Keep `cross_version_cache` disabled initially.
 
 ## Phase 2 - Entrypoint Boundary
 
