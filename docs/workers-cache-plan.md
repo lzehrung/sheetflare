@@ -200,7 +200,9 @@ flowchart LR
 
 ## Phase 10 - Staging Verification
 
+- [x] Deployable staging config keeps default entrypoint cache disabled and enables `CachedTableReads` cache.
 - [ ] Deploy to staging with `CachedTableReads` enabled and default entrypoint disabled for cache.
+  - 2026-07-07 session note: deploy attempt was blocked because Wrangler requires `CLOUDFLARE_API_TOKEN` in this non-interactive environment.
 - [ ] Request the same public-read list endpoint twice and verify `Cf-Cache-Status` changes from `MISS` to `HIT` or documented equivalent behavior.
 - [ ] Request the same private/API-key list endpoint twice and verify gateway auth still runs while the inner response can hit Workers Cache.
 - [ ] Verify private/API-key responses are not browser/proxy-cacheable through client-visible headers.

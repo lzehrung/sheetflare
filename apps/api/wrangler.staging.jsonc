@@ -7,7 +7,7 @@
     "enabled": false
   },
   "exports": {
-    "CachedTableReads": { "type": "worker", "cache": { "enabled": false } }
+    "CachedTableReads": { "type": "worker", "cache": { "enabled": true } }
   },
   "durable_objects": {
     "bindings": [
