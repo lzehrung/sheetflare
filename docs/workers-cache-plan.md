@@ -71,14 +71,14 @@ flowchart LR
 
 ## Phase 2 - Entrypoint Boundary
 
-- [ ] Add a named `CachedTableReads` Worker entrypoint to the API Worker.
-- [ ] Configure `apps/api/wrangler.jsonc` so the default entrypoint cache is disabled.
-- [ ] Enable cache only for `CachedTableReads` in the `exports` map.
-- [ ] Keep the existing Hono app as the default exported API gateway.
-- [ ] Confirm Hono exposes the Cloudflare `ExecutionContext` needed for `ctx.exports` through `c.executionCtx`; if types do not expose `exports`, wrap the Hono app in an explicit `fetch(request, env, ctx)` default export and thread the execution context into route handlers.
-- [ ] Ensure `CachedTableReads` is invoked only through internal `ctx.exports` calls, not as a new public unauthenticated route surface.
-- [ ] Ensure custom RPC invalidation methods on `CachedTableReads` call `this.ctx.cache.purge(...)` so purges apply to the cached-read entrypoint, not the default entrypoint.
-- [ ] Keep custom RPC methods for invalidation only; cacheable work itself must be exposed through `fetch()` because Workers Cache does not cache custom RPC method calls.
+- [x] Add a named `CachedTableReads` Worker entrypoint to the API Worker.
+- [x] Configure `apps/api/wrangler.jsonc` so the default entrypoint cache is disabled.
+- [x] Enable cache only for `CachedTableReads` in the `exports` map.
+- [x] Keep the existing Hono app as the default exported API gateway.
+- [x] Confirm current Workers types expose `cache` on `ExecutionContext` but do not expose `ctx.exports`; Phase 3 must use the typed `cloudflare:workers` exports surface or add an explicit wrapper before routing through the cached entrypoint.
+- [x] Ensure `CachedTableReads` is invoked only through internal Worker-entrypoint calls, not as a new public unauthenticated route surface.
+- [x] Ensure custom RPC invalidation methods on `CachedTableReads` call `this.ctx.cache.purge(...)` so purges apply to the cached-read entrypoint, not the default entrypoint.
+- [x] Keep custom RPC methods for invalidation only; cacheable work itself must be exposed through `fetch()` because Workers Cache does not cache custom RPC method calls.
 
 ## Phase 3 - Cacheable Read Contract
 

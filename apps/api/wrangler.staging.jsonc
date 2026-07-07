@@ -3,6 +3,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-07",
   "workers_dev": true,
+  "cache": {
+    "enabled": false
+  },
+  "exports": {
+    "CachedTableReads": { "type": "worker", "cache": { "enabled": false } }
+  },
   "durable_objects": {
     "bindings": [
       { "name": "CONTROL_PLANE_DO", "class_name": "ControlPlaneDO" },

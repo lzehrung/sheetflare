@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../src/env';
 import {
+  CachedTableReads,
   __getRecentApiKeyTouchCacheSizeForTests,
   __resetRecentApiKeyTouchesForTests,
   __touchApiKeyIfNeededForTests,
@@ -742,6 +743,106 @@ function createEnv(options?: {
 
   return env;
 }
+
+type CachePurgeCall = Parameters<CacheContext['purge']>[0];
+
+class FakeSpan implements Span {
+  get isTraced() {
+    return false;
+  }
+
+  setAttribute() {}
+
+  end() {}
+}
+
+function createTracing(): Tracing {
+  return {
+    Span: FakeSpan,
+    enterSpan<T, A extends unknown[]>(
+      _name: string,
+      callback: (span: Span, ...args: A) => T,
+      ...args: A
+    ): T {
+      return callback(new FakeSpan(), ...args);
+    },
+    startActiveSpan<T, A extends unknown[]>(
+      _name: string,
+      callback: (span: Span, ...args: A) => T,
+      ...args: A
+    ): T {
+      return callback(new FakeSpan(), ...args);
+    }
+  };
+}
+
+function createCachedTableReadsHarness(): { entrypoint: CachedTableReads; purgeCalls: CachePurgeCall[] } {
+  const purgeCalls: CachePurgeCall[] = [];
+  const ctx: ExecutionContext = {
+    waitUntil(promise: Promise<unknown>) {
+      void promise;
+    },
+    passThroughOnException() {},
+    props: {},
+    cache: {
+      async purge(options) {
+        purgeCalls.push(options);
+        return {
+          success: true,
+          errors: []
+        };
+      }
+    },
+    tracing: createTracing()
+  };
+
+  return {
+    entrypoint: new CachedTableReads(ctx, createEnv()),
+    purgeCalls
+  };
+}
+
+describe('CachedTableReads', () => {
+  it('returns a defensive no-store 404 while read routes are unwired', async () => {
+    const { entrypoint } = createCachedTableReadsHarness();
+
+    const response = await entrypoint.fetch(
+      new Request('https://cached.sheetflare.internal/v1/projects/demo/tables/users/rows')
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('content-type') ?? '').toMatch(/^(application\/json|text\/plain)(;|$)/);
+    expect((await response.text()).toLowerCase()).toContain('not');
+  });
+
+  it('purges the table tag when invalidating a table', async () => {
+    const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
+
+    await entrypoint.invalidateTable('demo', 'users');
+
+    expect(purgeCalls).toEqual([
+      {
+        tags: ['table:demo:users']
+      }
+    ]);
+  });
+
+  it('purges table and encoded row tags when invalidating a row', async () => {
+    const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
+
+    await entrypoint.invalidateRow('demo', 'users', 'row/1:alpha,beta?sheet#frag%space value');
+
+    expect(purgeCalls).toEqual([
+      {
+        tags: [
+          'table:demo:users',
+          'row:demo:users:row%2F1%3Aalpha%2Cbeta%3Fsheet%23frag%25space%20value'
+        ]
+      }
+    ]);
+  });
+});
 
 describe('api routes', () => {
   beforeEach(() => {

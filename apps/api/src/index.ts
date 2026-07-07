@@ -1,6 +1,7 @@
 import { Scalar } from '@scalar/hono-api-reference';
 import type { Context } from 'hono';
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { WorkerEntrypoint } from 'cloudflare:workers';
 import {
   AppError,
   adminCreateApiKeyInputSchema,
@@ -1543,6 +1544,58 @@ const revokeApiKeyRoute = createRoute({
     401: unauthorizedResponse
   }
 });
+
+function encodeCacheTagPart(value: string) {
+  return encodeURIComponent(value);
+}
+
+function getTableCacheTag(projectSlug: string, tableSlug: string) {
+  return `table:${encodeCacheTagPart(projectSlug)}:${encodeCacheTagPart(tableSlug)}`;
+}
+
+function getRowCacheTag(projectSlug: string, tableSlug: string, rowId: string) {
+  return `row:${encodeCacheTagPart(projectSlug)}:${encodeCacheTagPart(tableSlug)}:${encodeCacheTagPart(rowId)}`;
+}
+
+export class CachedTableReads extends WorkerEntrypoint<Env> {
+  async fetch(request: Request): Promise<Response> {
+    void request;
+    return Response.json(
+      {
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Cached table read route is not configured.'
+        }
+      },
+      {
+        status: 404,
+        headers: {
+          'cache-control': 'no-store'
+        }
+      }
+    );
+  }
+
+  private async purgeTags(tags: string[]): Promise<void> {
+    const workerCache = this.ctx.cache;
+    if (!workerCache) {
+      throw new ServiceUnavailableError('Workers Cache purge API is unavailable.');
+    }
+
+    await workerCache.purge({ tags });
+  }
+
+  async invalidateTable(projectSlug: string, tableSlug: string): Promise<void> {
+    await this.purgeTags([getTableCacheTag(projectSlug, tableSlug)]);
+  }
+
+  async invalidateRow(projectSlug: string, tableSlug: string, rowId: string): Promise<void> {
+    await this.purgeTags([
+      getTableCacheTag(projectSlug, tableSlug),
+      getRowCacheTag(projectSlug, tableSlug, rowId)
+    ]);
+  }
+}
 
 function createApp() {
   const app = new OpenAPIHono<{ Bindings: Env; Variables: AppVariables }>();
