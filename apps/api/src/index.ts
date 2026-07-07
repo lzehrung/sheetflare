@@ -1657,6 +1657,65 @@ async function runCachedTableRead(env: Env, operation: CachedTableReadOperation)
   return response.result;
 }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableJson(entry)).join(',')}]`;
+  }
+
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(',')}}`;
+  }
+
+  return JSON.stringify(value) ?? 'null';
+}
+
+async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function canonicalListRowsSearch(query?: ListRowsQuery) {
+  if (!query) {
+    return '';
+  }
+
+  const params = new URLSearchParams();
+  if (query.limit !== undefined) {
+    params.set('limit', String(query.limit));
+  }
+  if (query.cursor) {
+    params.set('cursor', query.cursor);
+  }
+  if (query.sort) {
+    params.set('sort', query.sort);
+  }
+  if (query.fields && query.fields.length > 0) {
+    params.set('fields', query.fields.join(','));
+  }
+  if (query.filter) {
+    params.set('filter', stableJson(query.filter));
+  }
+
+  const search = params.toString();
+  return search ? `?${search}` : '';
+}
+
+async function buildCachedTableReadConfigVersion(tableAccess: ResolvedProjectTableResult) {
+  return sha256Hex(stableJson({
+    project: tableAccess.project,
+    table: tableAccess.table,
+    resolvedConfig: tableAccess.resolvedConfig
+  }));
+}
+
+type CachedTableReadFetchOptions = {
+  tableAccess: ResolvedProjectTableResult;
+  query?: ListRowsQuery;
+};
+
 function cachedTableReadBasePath(projectSlug: string, tableSlug: string) {
   return `/internal/cache/v1/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}`;
 }
@@ -1671,20 +1730,31 @@ function createCachedTableReadHeaders(request: Request) {
   return headers;
 }
 
-function createCachedTableReadRequest(c: AppContext, pathname: string, includeQuery: boolean) {
+async function createCachedTableReadRequest(c: AppContext, pathname: string, options: CachedTableReadFetchOptions) {
   const url = new URL(pathname, c.req.url);
-  if (includeQuery) {
-    url.search = new URL(c.req.url).search;
-  }
+  url.search = canonicalListRowsSearch(options.query);
 
-  return new Request(url, {
-    method: 'GET',
-    headers: createCachedTableReadHeaders(c.req.raw)
-  });
+  const cacheKey = new URL(pathname, 'https://sheetflare-cache.internal');
+  cacheKey.search = url.search;
+  cacheKey.searchParams.set('__sf_auth', options.tableAccess.project.defaultAuthMode);
+  cacheKey.searchParams.set('__sf_config', await buildCachedTableReadConfigVersion(options.tableAccess));
+
+  return {
+    request: new Request(url, {
+      method: 'GET',
+      headers: createCachedTableReadHeaders(c.req.raw)
+    }),
+    cacheKey: cacheKey.toString()
+  };
 }
 
-function fetchCachedTableRead(c: AppContext, pathname: string, includeQuery = false) {
-  return workerExports.CachedTableReads.fetch(createCachedTableReadRequest(c, pathname, includeQuery));
+async function fetchCachedTableRead(c: AppContext, pathname: string, options: CachedTableReadFetchOptions) {
+  const { request, cacheKey } = await createCachedTableReadRequest(c, pathname, options);
+  return workerExports.CachedTableReads.fetch(request, {
+    cf: {
+      cacheKey
+    }
+  });
 }
 
 async function parseCachedTableReadResponse<TSchema extends z.ZodType>(
@@ -1710,9 +1780,9 @@ async function fetchCachedTableReadJson<TSchema extends z.ZodType>(
   c: AppContext,
   schema: TSchema,
   pathname: string,
-  includeQuery = false
+  options: CachedTableReadFetchOptions
 ): Promise<z.infer<TSchema>> {
-  return parseCachedTableReadResponse(c, await fetchCachedTableRead(c, pathname, includeQuery), schema);
+  return parseCachedTableReadResponse(c, await fetchCachedTableRead(c, pathname, options), schema);
 }
 
 function encodeCacheTagPart(value: string) {
@@ -2119,12 +2189,12 @@ function createApp() {
     if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
       assertProjectScope(auth, 'table:read', params.project);
     }
-    parseListRowsQuery(c);
+    const query = parseListRowsQuery(c);
     return c.json(await fetchCachedTableReadJson(
       c,
       listRowsResultSchema,
       `${cachedTableReadBasePath(params.project, params.table)}/rows`,
-      true
+      { tableAccess, query }
     ));
   });
 
@@ -2142,7 +2212,8 @@ function createApp() {
     return c.json(await fetchCachedTableReadJson(
       c,
       getSchemaResultSchema,
-      `${cachedTableReadBasePath(params.project, params.table)}/schema`
+      `${cachedTableReadBasePath(params.project, params.table)}/schema`,
+      { tableAccess }
     ));
   });
 
@@ -2309,7 +2380,8 @@ function createApp() {
     return c.json(await fetchCachedTableReadJson(
       c,
       getRowResultSchema,
-      `${cachedTableReadBasePath(params.project, params.table)}/rows/${encodeURIComponent(params.id)}`
+      `${cachedTableReadBasePath(params.project, params.table)}/rows/${encodeURIComponent(params.id)}`,
+      { tableAccess }
     ));
   });
 

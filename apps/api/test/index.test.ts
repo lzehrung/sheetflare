@@ -12,6 +12,13 @@ import {
 
 type StubHandler = (request: Request) => Response | Promise<Response>;
 
+type CachedReadRequestRecord = {
+  url: string;
+  method: string;
+  authorization: string | null;
+  cacheKey: string | null;
+};
+
 class FakeDurableObjectStub {
   constructor(private readonly handler: StubHandler) {}
 
@@ -101,6 +108,7 @@ function createEnv(options?: {
   defaultAuthMode?: 'private' | 'public-read';
   projectAccessStatus?: 200 | 404 | 500;
   tableCacheClearStatus?: 200 | 503;
+  tableCacheTtlSeconds?: number;
   googleClientEmail?: string;
   googlePrivateKey?: string;
   googleCredentialsJson?: string;
@@ -112,7 +120,7 @@ function createEnv(options?: {
   const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }> = [];
   const controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> = [];
   const durableObjectRequests: string[] = [];
-  const cachedReadRequests: Array<{ url: string; method: string; authorization: string | null }> = [];
+  const cachedReadRequests: CachedReadRequestRecord[] = [];
   let verifyApiKeyCallCount = 0;
   let apiKeyTouchCallCount = 0;
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
@@ -340,7 +348,7 @@ function createEnv(options?: {
       createEnabled: true,
       updateEnabled: true,
       deleteEnabled: true,
-      cacheTtlSeconds: 15,
+      cacheTtlSeconds: options?.tableCacheTtlSeconds ?? 15,
       createdAt: '2026-04-26T00:00:00.000Z',
       updatedAt: '2026-04-26T00:00:00.000Z'
     };
@@ -757,11 +765,12 @@ function createEnv(options?: {
     SHEETFLARE_ALLOWED_ORIGINS: options?.allowedOrigins
   };
 
-  workerExports.CachedTableReads.fetch = async (request) => {
+  workerExports.CachedTableReads.fetch = async (request, init) => {
     cachedReadRequests.push({
       url: request.url,
       method: request.method,
-      authorization: request.headers.get('authorization')
+      authorization: request.headers.get('authorization'),
+      cacheKey: init?.cf?.cacheKey ?? null
     });
     return createCachedTableReadsHarness(env).entrypoint.fetch(request);
   };
@@ -858,6 +867,32 @@ function createCachedTableReadsHarness(env: Env = createEnv()): { entrypoint: Ca
     entrypoint: new CachedTableReads(ctx, env),
     purgeCalls
   };
+}
+
+function getOnlyCachedReadRequest(env: { __cachedReadRequests: CachedReadRequestRecord[] }) {
+  expect(env.__cachedReadRequests).toHaveLength(1);
+  const [request] = env.__cachedReadRequests;
+  if (!request) {
+    throw new Error('Expected one cached read request.');
+  }
+  return request;
+}
+
+function requireCacheKey(record: CachedReadRequestRecord) {
+  expect(record.cacheKey).toEqual(expect.any(String));
+  if (record.cacheKey === null) {
+    throw new Error('Expected cached read request to include cf.cacheKey.');
+  }
+  return record.cacheKey;
+}
+
+function expectNoCredentialMaterial(value: string) {
+  const lowerValue = value.toLowerCase();
+  expect(lowerValue).not.toContain('authorization');
+  expect(lowerValue).not.toContain('bearer');
+  expect(value).not.toContain('sfk_project-key.any-secret');
+  expect(value).not.toContain('project-key');
+  expect(value).not.toContain('any-secret');
 }
 
 describe('CachedTableReads', () => {
@@ -1795,7 +1830,7 @@ describe('api routes', () => {
     const app = createApp();
     const env = createEnv() as Env & {
       __tableRequests: Array<{ type: string; requestContext?: Record<string, unknown> }>;
-      __cachedReadRequests: Array<{ url: string; method: string; authorization: string | null }>;
+      __cachedReadRequests: CachedReadRequestRecord[];
     };
 
     const createResponse = await app.request(
@@ -1978,7 +2013,7 @@ describe('api routes', () => {
     const env = createEnv({ defaultAuthMode: 'public-read' }) as Env & {
       __projectRequests: string[];
       __tableRequests: Array<{ type: string; requestContext?: Record<string, unknown> }>;
-      __cachedReadRequests: Array<{ url: string; authorization: string | null }>;
+      __cachedReadRequests: CachedReadRequestRecord[];
     };
 
     const response = await app.request(
@@ -2578,7 +2613,7 @@ describe('api routes', () => {
       __controlPlaneRequests: Array<{ type: string }>;
       __tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }>;
       __projectRequests: string[];
-      __cachedReadRequests: Array<{ url: string; method: string; authorization: string | null }>;
+      __cachedReadRequests: CachedReadRequestRecord[];
     };
 
     const response = await app.request(
@@ -2611,7 +2646,8 @@ describe('api routes', () => {
       {
         url: 'http://localhost/internal/cache/v1/projects/demo/tables/users/rows?limit=10',
         method: 'GET',
-        authorization: null
+        authorization: null,
+        cacheKey: expect.any(String)
       }
     ]);
     expect(env.__tableRequests[0]).toEqual({
@@ -2621,12 +2657,132 @@ describe('api routes', () => {
     });
   });
 
-  it('routes authorized schema reads through the cached entrypoint', async () => {
+  it('canonicalizes semantically identical list-row query strings into one cached URL and cache key', async () => {
     const app = createApp();
-    const env = createEnv() as Env & {
+    const firstEnv = createEnv({ defaultAuthMode: 'private' }) as Env & {
+      __cachedReadRequests: CachedReadRequestRecord[];
+    };
+    const firstQuery = new URLSearchParams([
+      ['filter', JSON.stringify({ status: { eq: 'active' }, email: { eq: 'a@example.com' } })],
+      ['limit', '10'],
+      ['fields', 'email,status'],
+      ['sort', 'email:asc']
+    ]);
+    const secondQuery = new URLSearchParams([
+      ['sort', 'email:asc'],
+      ['fields', 'email,status'],
+      ['limit', '10'],
+      ['filter', JSON.stringify({ email: { eq: 'a@example.com' }, status: { eq: 'active' } })]
+    ]);
+    const expectedCanonicalQuery = new URLSearchParams([
+      ['limit', '10'],
+      ['sort', 'email:asc'],
+      ['fields', 'email,status'],
+      ['filter', '{"email":{"eq":"a@example.com"},"status":{"eq":"active"}}']
+    ]).toString();
+
+    const firstResponse = await app.request(
+      `/v1/projects/demo/tables/users/rows?${firstQuery.toString()}`,
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      firstEnv
+    );
+    const secondEnv = createEnv({ defaultAuthMode: 'private' }) as Env & {
+      __cachedReadRequests: CachedReadRequestRecord[];
+    };
+    const secondResponse = await app.request(
+      `/v1/projects/demo/tables/users/rows?${secondQuery.toString()}`,
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      secondEnv
+    );
+
+    expect(firstResponse.status).toBe(200);
+    expect(secondResponse.status).toBe(200);
+    const firstRecord = getOnlyCachedReadRequest(firstEnv);
+    const secondRecord = getOnlyCachedReadRequest(secondEnv);
+    expect(firstRecord.url).toBe(`http://localhost/internal/cache/v1/projects/demo/tables/users/rows?${expectedCanonicalQuery}`);
+    expect(secondRecord.url).toBe(firstRecord.url);
+    expect(firstRecord.authorization).toBeNull();
+    expect(secondRecord.authorization).toBeNull();
+    const firstCacheKey = requireCacheKey(firstRecord);
+    const secondCacheKey = requireCacheKey(secondRecord);
+    expect(secondCacheKey).toBe(firstCacheKey);
+    const cacheKeyUrl = new URL(firstCacheKey);
+    expect(cacheKeyUrl.origin).toBe('https://sheetflare-cache.internal');
+    expect(cacheKeyUrl.pathname).toBe('/internal/cache/v1/projects/demo/tables/users/rows');
+    expect(cacheKeyUrl.searchParams.get('limit')).toBe('10');
+    expect(cacheKeyUrl.searchParams.get('sort')).toBe('email:asc');
+    expect(cacheKeyUrl.searchParams.get('fields')).toBe('email,status');
+    expect(cacheKeyUrl.searchParams.get('filter')).toBe('{"email":{"eq":"a@example.com"},"status":{"eq":"active"}}');
+    expect(cacheKeyUrl.searchParams.get('__sf_auth')).toBe('private');
+    expect(cacheKeyUrl.searchParams.get('__sf_config')).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+    expectNoCredentialMaterial(firstRecord.url);
+    expectNoCredentialMaterial(firstCacheKey);
+  });
+
+  it('partitions list-row cache keys by project auth mode and resolved table config', async () => {
+    const app = createApp();
+    const readCacheKey = async (env: Env & { __cachedReadRequests: CachedReadRequestRecord[] }) => {
+      const response = await app.request(
+        '/v1/projects/demo/tables/users/rows?limit=10',
+        {
+          headers: {
+            authorization: 'Bearer sfk_project-key.any-secret'
+          }
+        },
+        env
+      );
+
+      expect(response.status).toBe(200);
+      return requireCacheKey(getOnlyCachedReadRequest(env));
+    };
+
+    const privateCacheKey = await readCacheKey(createEnv({
+      defaultAuthMode: 'private',
+      tableCacheTtlSeconds: 15
+    }) as Env & { __cachedReadRequests: CachedReadRequestRecord[] });
+    const publicReadCacheKey = await readCacheKey(createEnv({
+      defaultAuthMode: 'public-read',
+      tableCacheTtlSeconds: 15
+    }) as Env & {
+      __cachedReadRequests: CachedReadRequestRecord[];
+    });
+    const changedConfigCacheKey = await readCacheKey(createEnv({
+      defaultAuthMode: 'private',
+      tableCacheTtlSeconds: 30
+    }) as Env & {
+      __cachedReadRequests: CachedReadRequestRecord[];
+    });
+
+    expect(publicReadCacheKey).not.toBe(privateCacheKey);
+    expect(changedConfigCacheKey).not.toBe(privateCacheKey);
+    const privateCacheKeyUrl = new URL(privateCacheKey);
+    const publicReadCacheKeyUrl = new URL(publicReadCacheKey);
+    const changedConfigCacheKeyUrl = new URL(changedConfigCacheKey);
+    expect(privateCacheKeyUrl.searchParams.get('__sf_auth')).toBe('private');
+    expect(publicReadCacheKeyUrl.searchParams.get('__sf_auth')).toBe('public-read');
+    expect(changedConfigCacheKeyUrl.searchParams.get('__sf_auth')).toBe('private');
+    expect(changedConfigCacheKeyUrl.searchParams.get('__sf_config')).not.toBe(
+      privateCacheKeyUrl.searchParams.get('__sf_config')
+    );
+    expectNoCredentialMaterial(privateCacheKey);
+    expectNoCredentialMaterial(publicReadCacheKey);
+    expectNoCredentialMaterial(changedConfigCacheKey);
+  });
+
+  it('routes authorized schema reads through the cached entrypoint with a path-scoped secret-free cache key', async () => {
+    const app = createApp();
+    const env = createEnv({ defaultAuthMode: 'private' }) as Env & {
       __tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }>;
       __projectRequests: string[];
-      __cachedReadRequests: Array<{ url: string; method: string; authorization: string | null }>;
+      __cachedReadRequests: CachedReadRequestRecord[];
     };
 
     const response = await app.request(
@@ -2657,9 +2813,17 @@ describe('api routes', () => {
       {
         url: 'http://localhost/internal/cache/v1/projects/demo/tables/users/schema',
         method: 'GET',
-        authorization: null
+        authorization: null,
+        cacheKey: expect.any(String)
       }
     ]);
+    const schemaCacheKey = requireCacheKey(getOnlyCachedReadRequest(env));
+    const schemaCacheKeyUrl = new URL(schemaCacheKey);
+    expect(schemaCacheKeyUrl.pathname).toBe('/internal/cache/v1/projects/demo/tables/users/schema');
+    expect(schemaCacheKeyUrl.searchParams.get('__sf_auth')).toBe('private');
+    expect(schemaCacheKeyUrl.searchParams.get('__sf_config')).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+    expectNoCredentialMaterial(env.__cachedReadRequests[0]?.url ?? '');
+    expectNoCredentialMaterial(schemaCacheKey);
     expect(env.__tableRequests[0]).toEqual({
       type: 'table.schema.get',
       resolvedConfig: undefined,
@@ -2667,12 +2831,12 @@ describe('api routes', () => {
     });
   });
 
-  it('routes authorized get-row reads through the cached entrypoint', async () => {
+  it('routes authorized get-row reads through the cached entrypoint with a row-scoped secret-free cache key', async () => {
     const app = createApp();
-    const env = createEnv() as Env & {
+    const env = createEnv({ defaultAuthMode: 'private' }) as Env & {
       __tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }>;
       __projectRequests: string[];
-      __cachedReadRequests: Array<{ url: string; method: string; authorization: string | null }>;
+      __cachedReadRequests: CachedReadRequestRecord[];
     };
 
     const response = await app.request(
@@ -2698,9 +2862,17 @@ describe('api routes', () => {
       {
         url: 'http://localhost/internal/cache/v1/projects/demo/tables/users/rows/row-1',
         method: 'GET',
-        authorization: null
+        authorization: null,
+        cacheKey: expect.any(String)
       }
     ]);
+    const rowCacheKey = requireCacheKey(getOnlyCachedReadRequest(env));
+    const rowCacheKeyUrl = new URL(rowCacheKey);
+    expect(rowCacheKeyUrl.pathname).toBe('/internal/cache/v1/projects/demo/tables/users/rows/row-1');
+    expect(rowCacheKeyUrl.searchParams.get('__sf_auth')).toBe('private');
+    expect(rowCacheKeyUrl.searchParams.get('__sf_config')).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+    expectNoCredentialMaterial(env.__cachedReadRequests[0]?.url ?? '');
+    expectNoCredentialMaterial(rowCacheKey);
     expect(env.__tableRequests[0]).toEqual({
       type: 'table.row.get',
       resolvedConfig: undefined,

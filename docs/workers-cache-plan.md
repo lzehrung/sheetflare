@@ -95,20 +95,20 @@ flowchart LR
 
 ## Phase 4 - Cache Key and Config Partitioning
 
-- [ ] Canonicalize list-row query strings before calling `CachedTableReads`.
-- [ ] Sort query parameters deterministically.
-- [ ] Omit or normalize default query values consistently.
-- [ ] Preserve every query component that changes semantics.
-- [ ] Include project slug and table slug in the internal cached-read path.
-- [ ] Include row ID in the point-read path.
-- [ ] Include a table config version in the key, preferably derived from the loaded project/table config such as `project.updatedAt`, `table.updatedAt`, or a stable config signature.
-- [ ] Include the public/private auth mode in the key or response policy decision so a project auth-mode change cannot reuse a response with the wrong client cache headers.
-- [ ] Use `cf.cacheKey` on the `ctx.exports.CachedTableReads.fetch(...)` call when the internal request URL is not already canonical enough.
-- [ ] Use `ctx.props` for unavoidable trusted partitions such as config version or future caller-specific data; remember `ctx.props` is part of the Workers Cache key.
-- [ ] Do not rely on hostname for cache partitioning; Workers Cache does not include host in the cache key.
-- [ ] Do not put credentials, bearer tokens, raw API keys, or secret material in the key, URL, tags, or props.
-- [ ] Add tests proving semantically identical query parameter order maps to one cached key when canonicalized.
-- [ ] Add tests proving table/project config changes produce a different key or trigger a purge before old entries can be reused.
+- [x] Canonicalize list-row query strings before calling `CachedTableReads`.
+- [x] Sort query parameters deterministically.
+- [x] Omit or normalize default query values consistently; current list-row query has no implicit defaults, so absent values stay absent.
+- [x] Preserve every query component that changes semantics.
+- [x] Include project slug and table slug in the internal cached-read path.
+- [x] Include row ID in the point-read path.
+- [x] Include a table config version in the key, derived from a stable signature of the loaded project/table config and resolved runtime config.
+- [x] Include the public/private auth mode in the key so a project auth-mode change cannot reuse a response with the wrong client cache headers.
+- [x] Use `cf.cacheKey` on the `CachedTableReads.fetch(...)` loopback call for explicit canonical partitioning.
+- [x] Avoid `ctx.props` for Phase 4 because the required partitions fit in `cf.cacheKey`; future caller-specific data must still account for `ctx.props` being part of the Workers Cache key.
+- [x] Do not rely on hostname for cache partitioning; Workers Cache does not include host in the cache key.
+- [x] Do not put credentials, bearer tokens, raw API keys, or secret material in the key, URL, tags, or props.
+- [x] Add tests proving semantically identical query parameter order maps to one cached key when canonicalized.
+- [x] Add tests proving table/project config changes produce a different key or trigger a purge before old entries can be reused.
 
 ## Phase 5 - Response Headers and Client Cache Safety
 

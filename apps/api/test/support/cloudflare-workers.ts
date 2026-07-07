@@ -11,8 +11,14 @@ export type WorkerEntrypointContext<Props> = {
   cache?: WorkerCache;
 };
 
+export type CachedWorkerEntrypointFetchInit = RequestInit & {
+  cf?: {
+    cacheKey?: string;
+  };
+};
+
 export type CachedWorkerEntrypoint = {
-  fetch(request: Request, init?: RequestInit): Promise<Response>;
+  fetch(request: Request, init?: CachedWorkerEntrypointFetchInit): Promise<Response>;
 };
 
 export const exports: {
