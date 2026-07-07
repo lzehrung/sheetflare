@@ -177,26 +177,26 @@ flowchart LR
 
 ## Phase 9 - Tests
 
-- [ ] Add route-level tests proving default API auth still runs before cached reads.
-- [ ] Add route-level tests proving default API rate limiting still runs before cached reads.
-- [ ] Add route-level tests proving private-table anonymous reads are rejected even when a cached entry exists internally.
-- [ ] Add route-level tests proving public-read anonymous reads can use cached responses safely.
-- [ ] Add tests proving API-key authorized reads do not expose cached private data to unauthorized callers.
-- [ ] Add tests proving forwarded cached-entrypoint requests strip `Authorization`.
-- [ ] Add tests for edge-only cache headers on private/API-key reads.
-- [ ] Add tests for client-visible cache headers on private/API-key reads.
-- [ ] Add tests for public-read cache headers.
-- [ ] Add tests for cache tags on list, point-read, and schema responses.
-- [ ] Add tests proving non-2xx cached-entrypoint responses are `no-store`.
-- [ ] Add tests for purge calls after create, update, delete, reindex, refresh, table delete, project delete, and config replacement.
-- [ ] Add tests for canonical query key generation.
-- [ ] Add tests for config-version key partitioning.
-- [ ] Add tests for `cacheTtlSeconds = 0` bypass behavior.
-- [ ] Add tests for pending external-change debounce TTL capping or bypass behavior.
-- [ ] Add tests for stale/config-change behavior so Workers Cache cannot bypass `TableDO` cache-signature correctness.
-- [ ] Add tests for purge failure handling.
-- [ ] Add tests confirming default gateway overwrites or appends fresh `x-request-id`, CORS, and rate-limit headers after a cached inner response.
-- [ ] Add tests for explicit `HEAD` behavior or explicit rejection.
+- [x] Add route-level tests proving default API auth still runs before cached reads.
+- [x] Add route-level tests proving default API rate limiting still runs before cached reads.
+- [x] Add route-level tests proving private-table anonymous reads are rejected even when a cached entry exists internally.
+- [x] Add route-level tests proving public-read anonymous reads can use cached responses safely.
+- [x] Add tests proving API-key authorized reads do not expose cached private data to unauthorized callers.
+- [x] Add tests proving forwarded cached-entrypoint requests strip `Authorization`.
+- [x] Add tests for edge-only cache headers on private/API-key reads.
+- [x] Add tests for client-visible cache headers on private/API-key reads.
+- [x] Add tests for public-read cache headers.
+- [x] Add tests for cache tags on list, point-read, and schema responses.
+- [x] Add tests proving non-2xx cached-entrypoint responses are `no-store`.
+- [x] Add tests for purge calls after create, update, delete, reindex, refresh, table delete, project delete, and config replacement.
+- [x] Add tests for canonical query key generation.
+- [x] Add tests for config-version key partitioning.
+- [x] Add tests for `cacheTtlSeconds = 0` bypass behavior.
+- [x] Add tests for pending external-change debounce TTL capping or bypass behavior.
+- [x] Add tests for stale/config-change behavior so Workers Cache cannot bypass `TableDO` cache-signature correctness.
+- [x] Add tests for purge failure handling.
+- [x] Add tests confirming default gateway overwrites or appends fresh `x-request-id`, CORS, and rate-limit headers after a cached inner response.
+- [x] Add tests for explicit `HEAD` behavior or explicit rejection.
 
 ## Phase 10 - Staging Verification
 

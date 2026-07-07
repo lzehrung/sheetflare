@@ -2529,6 +2529,39 @@ describe('api routes', () => {
     }
   });
 
+  it('adds default-gateway request, CORS, and rate-limit headers after cached data reads', async () => {
+    const app = createApp();
+    const env = createEnv({ allowedOrigins: 'https://client.example' }) as Env & {
+      __cachedReadRequests: CachedReadRequestRecord[];
+      __rateLimitRequests: Array<{ name: string; key: string }>;
+    };
+
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows?limit=10',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret',
+          origin: 'https://client.example'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expectCachedDataReadGatewayHeaders(response);
+    expect(response.headers.get('x-request-id')).toEqual(expect.any(String));
+    expect(response.headers.get('access-control-allow-origin')).toBe('https://client.example');
+    expect(response.headers.get('vary')).toBe('Origin');
+    expect(response.headers.get('x-ratelimit-limit')).toBe('300');
+    expect(response.headers.get('x-ratelimit-remaining')).toBe('299');
+    expect(response.headers.get('x-ratelimit-reset')).toEqual(expect.any(String));
+    expect(env.__cachedReadRequests).toHaveLength(1);
+    expect(env.__rateLimitRequests).toEqual([
+      { name: 'rate-limit:data:client:anonymous', key: 'rows.list' },
+      { name: 'rate-limit:data:api-key:project-key', key: 'rows.list' }
+    ]);
+  });
+
   it('returns 429 when the edge rate limit is exceeded', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const app = createApp();
