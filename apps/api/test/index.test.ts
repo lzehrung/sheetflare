@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { exports as workerExports } from 'cloudflare:workers';
 import type { Env } from '../src/env';
 import {
   CachedTableReads,
@@ -111,6 +112,7 @@ function createEnv(options?: {
   const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }> = [];
   const controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> = [];
   const durableObjectRequests: string[] = [];
+  const cachedReadRequests: Array<{ url: string; method: string; authorization: string | null }> = [];
   let verifyApiKeyCallCount = 0;
   let apiKeyTouchCallCount = 0;
   const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
@@ -559,6 +561,7 @@ function createEnv(options?: {
       query?: unknown;
       resolvedConfig?: Record<string, unknown>;
       requestContext?: Record<string, unknown>;
+      rowId?: string;
     };
     tableRequests.push({
       type: body.type,
@@ -577,6 +580,30 @@ function createEnv(options?: {
             values: body.input?.values ?? {}
           },
           ignoredKeys: []
+        }
+      });
+    }
+
+    if (body.type === 'table.row.update') {
+      return Response.json({
+        type: 'table.row.update.result',
+        result: {
+          data: {
+            id: body.rowId ?? 'row-1',
+            rowNumber: 2,
+            values: body.input?.values ?? {}
+          },
+          ignoredKeys: []
+        }
+      });
+    }
+
+    if (body.type === 'table.row.delete') {
+      return Response.json({
+        type: 'table.row.delete.result',
+        result: {
+          ok: true,
+          deletedId: body.rowId ?? 'row-1'
         }
       });
     }
@@ -672,6 +699,24 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'table.schema.get') {
+      return Response.json({
+        type: 'table.schema.get.result',
+        result: {
+          data: {
+            fields: [
+              {
+                name: '_id',
+                inferredType: 'string',
+                nullable: false
+              }
+            ],
+            inferredAt: '2026-04-26T00:00:00.000Z'
+          }
+        }
+      });
+    }
+
     return Response.json({
       type: 'table.row.get.result',
       result: {
@@ -712,6 +757,15 @@ function createEnv(options?: {
     SHEETFLARE_ALLOWED_ORIGINS: options?.allowedOrigins
   };
 
+  workerExports.CachedTableReads.fetch = async (request) => {
+    cachedReadRequests.push({
+      url: request.url,
+      method: request.method,
+      authorization: request.headers.get('authorization')
+    });
+    return createCachedTableReadsHarness(env).entrypoint.fetch(request);
+  };
+
   Object.defineProperty(env, '__rateLimitRequests', {
     value: rateLimitRequests,
     enumerable: false
@@ -730,6 +784,10 @@ function createEnv(options?: {
   });
   Object.defineProperty(env, '__durableObjectRequests', {
     value: durableObjectRequests,
+    enumerable: false
+  });
+  Object.defineProperty(env, '__cachedReadRequests', {
+    value: cachedReadRequests,
     enumerable: false
   });
   Object.defineProperty(env, '__verifyApiKeyCallCount', {
@@ -776,7 +834,7 @@ function createTracing(): Tracing {
   };
 }
 
-function createCachedTableReadsHarness(): { entrypoint: CachedTableReads; purgeCalls: CachePurgeCall[] } {
+function createCachedTableReadsHarness(env: Env = createEnv()): { entrypoint: CachedTableReads; purgeCalls: CachePurgeCall[] } {
   const purgeCalls: CachePurgeCall[] = [];
   const ctx: ExecutionContext = {
     waitUntil(promise: Promise<unknown>) {
@@ -797,23 +855,70 @@ function createCachedTableReadsHarness(): { entrypoint: CachedTableReads; purgeC
   };
 
   return {
-    entrypoint: new CachedTableReads(ctx, createEnv()),
+    entrypoint: new CachedTableReads(ctx, env),
     purgeCalls
   };
 }
 
 describe('CachedTableReads', () => {
-  it('returns a defensive no-store 404 while read routes are unwired', async () => {
+  it('serves list rows through the internal cached-read fetch route without edge caching yet', async () => {
     const { entrypoint } = createCachedTableReadsHarness();
 
     const response = await entrypoint.fetch(
-      new Request('https://cached.sheetflare.internal/v1/projects/demo/tables/users/rows')
+      new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10')
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({
+      data: [
+        {
+          id: 'row-1',
+          rowNumber: 2,
+          values: {
+            matched: true
+          }
+        }
+      ],
+      nextCursor: null
+    });
+  });
+
+  it('returns a defensive no-store 404 for unknown cached-read paths', async () => {
+    const { entrypoint } = createCachedTableReadsHarness();
+
+    const response = await entrypoint.fetch(
+      new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/unknown')
     );
 
     expect(response.status).toBe(404);
     expect(response.headers.get('cache-control')).toBe('no-store');
-    expect(response.headers.get('content-type') ?? '').toMatch(/^(application\/json|text\/plain)(;|$)/);
-    expect((await response.text()).toLowerCase()).toContain('not');
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'NOT_FOUND',
+        message: 'Cached table read route is not configured.',
+        details: null
+      }
+    });
+  });
+
+  it('rejects cached-read HEAD requests so HEAD cannot populate GET cache entries', async () => {
+    const env = createEnv() as Env & {
+      __tableRequests: Array<{ type: string }>;
+    };
+    const { entrypoint } = createCachedTableReadsHarness(env);
+
+    const response = await entrypoint.fetch(
+      new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows', {
+        method: 'HEAD'
+      })
+    );
+
+    expect(response.status).toBe(405);
+    expect(response.headers.get('allow')).toBe('GET');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.text()).toBe('');
+    expect(env.__tableRequests).toEqual([]);
   });
 
   it('purges the table tag when invalidating a table', async () => {
@@ -1686,6 +1791,96 @@ describe('api routes', () => {
     expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitPrincipal":"api-key:project-key"'));
   });
 
+  it('keeps row mutations on the default route instead of the cached entrypoint', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __tableRequests: Array<{ type: string; requestContext?: Record<string, unknown> }>;
+      __cachedReadRequests: Array<{ url: string; method: string; authorization: string | null }>;
+    };
+
+    const createResponse = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          values: {
+            name: 'Ada'
+          }
+        })
+      },
+      env
+    );
+    const updateResponse = await app.request(
+      '/v1/projects/demo/tables/users/rows/row-1',
+      {
+        method: 'PATCH',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          values: {
+            name: 'Grace'
+          }
+        })
+      },
+      env
+    );
+    const deleteResponse = await app.request(
+      '/v1/projects/demo/tables/users/rows/row-1',
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(createResponse.status).toBe(201);
+    expect(await createResponse.json()).toEqual({
+      data: {
+        id: 'row-1',
+        rowNumber: 2,
+        values: {
+          name: 'Ada'
+        }
+      },
+      ignoredKeys: []
+    });
+    expect(updateResponse.status).toBe(200);
+    expect(await updateResponse.json()).toEqual({
+      data: {
+        id: 'row-1',
+        rowNumber: 2,
+        values: {
+          name: 'Grace'
+        }
+      },
+      ignoredKeys: []
+    });
+    expect(deleteResponse.status).toBe(200);
+    expect(await deleteResponse.json()).toEqual({
+      ok: true,
+      deletedId: 'row-1'
+    });
+    expect(env.__cachedReadRequests).toEqual([]);
+    expect(env.__tableRequests.map((request) => request.type)).toEqual([
+      'table.row.create',
+      'table.row.update',
+      'table.row.delete'
+    ]);
+    expect(env.__tableRequests.map((request) => request.requestContext?.route)).toEqual([
+      'rows.create',
+      'rows.update',
+      'rows.delete'
+    ]);
+  });
+
   it('rejects protected row creation without credentials', async () => {
     const app = createApp();
     const response = await app.request(
@@ -1783,6 +1978,7 @@ describe('api routes', () => {
     const env = createEnv({ defaultAuthMode: 'public-read' }) as Env & {
       __projectRequests: string[];
       __tableRequests: Array<{ type: string; requestContext?: Record<string, unknown> }>;
+      __cachedReadRequests: Array<{ url: string; authorization: string | null }>;
     };
 
     const response = await app.request(
@@ -1794,12 +1990,13 @@ describe('api routes', () => {
     expect(response.status).toBe(200);
     expect(env.__projectRequests).toContain('project.access.get');
     expect(env.__projectRequests).toContain('project.table.resolve');
+    expect(env.__cachedReadRequests).toHaveLength(1);
+    expect(env.__cachedReadRequests[0].authorization).toBeNull();
+    expect(env.__cachedReadRequests[0].url).toBe(
+      'http://localhost/internal/cache/v1/projects/demo/tables/users/rows'
+    );
     expect(env.__tableRequests[0]).toMatchObject({
-      type: 'table.rows.list',
-      requestContext: {
-        route: 'rows.list',
-        principal: 'anonymous'
-      }
+      type: 'table.rows.list'
     });
   });
 
@@ -2375,15 +2572,17 @@ describe('api routes', () => {
     expect(__getRecentApiKeyTouchCacheSizeForTests()).toBe(10_000);
   });
 
-  it('passes resolved table config to public-read route durable-object calls', async () => {
+  it('routes authorized list-row reads through the cached entrypoint after resolving table access', async () => {
     const app = createApp();
     const env = createEnv() as Env & {
-      __tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown> }>;
+      __controlPlaneRequests: Array<{ type: string }>;
+      __tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }>;
       __projectRequests: string[];
+      __cachedReadRequests: Array<{ url: string; method: string; authorization: string | null }>;
     };
 
     const response = await app.request(
-      '/v1/projects/demo/tables/users/rows',
+      '/v1/projects/demo/tables/users/rows?limit=10',
       {
         headers: {
           authorization: 'Bearer sfk_project-key.any-secret'
@@ -2393,23 +2592,120 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(env.__tableRequests[0]).toMatchObject({
-      type: 'table.rows.list',
-      resolvedConfig: {
-        projectSlug: 'demo',
-        tableSlug: 'users',
-        spreadsheetId: 'sheet-1',
-        googleCredentialRef: 'default'
-      }
+    expect(await response.json()).toEqual({
+      data: [
+        {
+          id: 'row-1',
+          rowNumber: 2,
+          values: {
+            matched: true
+          }
+        }
+      ],
+      nextCursor: null
     });
-    expect(env.__tableRequests[0]).toMatchObject({
-      requestContext: {
-        route: 'rows.list',
-        principal: 'api-key:project-key'
+    expect(env.__controlPlaneRequests[0]?.type).toBe('control.api-key.verify');
+    expect(env.__projectRequests).toContain('project.table.resolve');
+    expect(env.__projectRequests).not.toContain('project.get');
+    expect(env.__cachedReadRequests).toEqual([
+      {
+        url: 'http://localhost/internal/cache/v1/projects/demo/tables/users/rows?limit=10',
+        method: 'GET',
+        authorization: null
+      }
+    ]);
+    expect(env.__tableRequests[0]).toEqual({
+      type: 'table.rows.list',
+      resolvedConfig: undefined,
+      requestContext: undefined
+    });
+  });
+
+  it('routes authorized schema reads through the cached entrypoint', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }>;
+      __projectRequests: string[];
+      __cachedReadRequests: Array<{ url: string; method: string; authorization: string | null }>;
+    };
+
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/schema',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: {
+        fields: [
+          {
+            name: '_id',
+            inferredType: 'string',
+            nullable: false
+          }
+        ],
+        inferredAt: '2026-04-26T00:00:00.000Z'
       }
     });
     expect(env.__projectRequests).toContain('project.table.resolve');
-    expect(env.__projectRequests).not.toContain('project.get');
+    expect(env.__cachedReadRequests).toEqual([
+      {
+        url: 'http://localhost/internal/cache/v1/projects/demo/tables/users/schema',
+        method: 'GET',
+        authorization: null
+      }
+    ]);
+    expect(env.__tableRequests[0]).toEqual({
+      type: 'table.schema.get',
+      resolvedConfig: undefined,
+      requestContext: undefined
+    });
+  });
+
+  it('routes authorized get-row reads through the cached entrypoint', async () => {
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }>;
+      __projectRequests: string[];
+      __cachedReadRequests: Array<{ url: string; method: string; authorization: string | null }>;
+    };
+
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows/row-1',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: {
+        id: 'row-1',
+        rowNumber: 2,
+        values: {}
+      }
+    });
+    expect(env.__projectRequests).toContain('project.table.resolve');
+    expect(env.__cachedReadRequests).toEqual([
+      {
+        url: 'http://localhost/internal/cache/v1/projects/demo/tables/users/rows/row-1',
+        method: 'GET',
+        authorization: null
+      }
+    ]);
+    expect(env.__tableRequests[0]).toEqual({
+      type: 'table.row.get',
+      resolvedConfig: undefined,
+      requestContext: undefined
+    });
   });
 
   it('serves an OpenAPI document with the expected API surface', async () => {

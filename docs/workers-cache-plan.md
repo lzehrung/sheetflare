@@ -82,16 +82,16 @@ flowchart LR
 
 ## Phase 3 - Cacheable Read Contract
 
-- [ ] Define internal cached-read request paths for list rows, get row, and get schema.
-- [ ] Route `GET /v1/projects/{project}/tables/{table}/rows` through `CachedTableReads` only after existing auth, project-boundary checks, public-read checks, and table access loading succeed.
-- [ ] Route `GET /v1/projects/{project}/tables/{table}/rows/{id}` through `CachedTableReads` only after existing auth and authorization checks succeed.
-- [ ] Route `GET /v1/projects/{project}/tables/{table}/schema` through `CachedTableReads` only after existing auth and authorization checks succeed.
-- [ ] Decide and test explicit `HEAD` behavior; Workers Cache shares `GET` and `HEAD` entries and may populate a full `GET` response for a cold `HEAD` request.
-- [ ] Preserve current error behavior for auth failures, disabled reads, missing projects, missing tables, unsupported queries, and missing rows.
-- [ ] Preserve current response schemas for list rows, get row, and schema responses.
-- [ ] Centralize JSON/error serialization so the cached entrypoint cannot drift from existing API error shape.
-- [ ] Keep mutation routes on the default entrypoint only.
-- [ ] Strip `Authorization` and any other automatic-bypass request headers before calling `ctx.exports.CachedTableReads.fetch(...)`.
+- [x] Define internal cached-read request paths for list rows, get row, and get schema.
+- [x] Route `GET /v1/projects/{project}/tables/{table}/rows` through `CachedTableReads` only after existing auth, project-boundary checks, public-read checks, and table access loading succeed.
+- [x] Route `GET /v1/projects/{project}/tables/{table}/rows/{id}` through `CachedTableReads` only after existing auth and authorization checks succeed.
+- [x] Route `GET /v1/projects/{project}/tables/{table}/schema` through `CachedTableReads` only after existing auth and authorization checks succeed.
+- [x] Decide and test explicit `HEAD` behavior; Workers Cache shares `GET` and `HEAD` entries and may populate a full `GET` response for a cold `HEAD` request.
+- [x] Preserve current error behavior for auth failures, disabled reads, missing projects, missing tables, unsupported queries, and missing rows.
+- [x] Preserve current response schemas for list rows, get row, and schema responses.
+- [x] Centralize JSON/error serialization so the cached entrypoint cannot drift from existing API error shape.
+- [x] Keep mutation routes on the default entrypoint only.
+- [x] Strip `Authorization` and any other automatic-bypass request headers before calling the cached `CachedTableReads` entrypoint.
 
 ## Phase 4 - Cache Key and Config Partitioning
 

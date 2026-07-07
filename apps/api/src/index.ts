@@ -1,7 +1,7 @@
 import { Scalar } from '@scalar/hono-api-reference';
 import type { Context } from 'hono';
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
-import { WorkerEntrypoint } from 'cloudflare:workers';
+import { WorkerEntrypoint, exports as workerExports } from 'cloudflare:workers';
 import {
   AppError,
   adminCreateApiKeyInputSchema,
@@ -63,11 +63,8 @@ import {
   type CreateRowResult,
   type DeleteProjectResult,
   type DeleteTableResult,
-  type GetRowResult,
-  type GetSchemaResult,
   type GetTableCacheStatusResult,
   type ListRowsQuery,
-  type ListRowsResult,
   type ProjectAccessResult,
   type ProjectDoResponse,
   type RefreshTableCacheResult,
@@ -1545,6 +1542,179 @@ const revokeApiKeyRoute = createRoute({
   }
 });
 
+const cachedTableReadPrefixSegments = ['internal', 'cache', 'v1', 'projects'] as const;
+
+type CachedTableReadOperation =
+  | { kind: 'listRows'; projectSlug: string; tableSlug: string; query: ListRowsQuery }
+  | { kind: 'getRow'; projectSlug: string; tableSlug: string; rowId: string }
+  | { kind: 'getSchema'; projectSlug: string; tableSlug: string };
+
+function noStoreJsonResponse(body: unknown, status = 200) {
+  return Response.json(body, {
+    status,
+    headers: {
+      'cache-control': 'no-store'
+    }
+  });
+}
+
+function noStoreErrorResponse(error: unknown) {
+  const normalizedError = normalizeRequestError(error);
+  const rpcErrorResponse = normalizedError instanceof DurableRpcError ? parseDurableRpcErrorResponse(normalizedError) : null;
+  const { status, body } = rpcErrorResponse ?? toErrorResponse(normalizedError);
+  return noStoreJsonResponse(body, status);
+}
+
+function decodeCachedPathSegment(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new BadRequestError('Malformed cached table read path.');
+  }
+}
+
+function parseListRowsQueryFromUrl(url: URL) {
+  return parseListRowsQuery({
+    req: {
+      query: (name) => url.searchParams.get(name) ?? undefined
+    }
+  });
+}
+
+function parseCachedTableReadRequest(request: Request): CachedTableReadOperation {
+  const url = new URL(request.url);
+  const segments = url.pathname.split('/').filter((segment) => segment.length > 0);
+  const hasPrefix = cachedTableReadPrefixSegments.every((segment, index) => segments[index] === segment);
+  if (!hasPrefix || segments[5] !== 'tables') {
+    throw new NotFoundError('Cached table read route is not configured.');
+  }
+
+  const projectSlug = decodeCachedPathSegment(segments[4] ?? '');
+  const tableSlug = decodeCachedPathSegment(segments[6] ?? '');
+
+  if (segments.length === 8 && segments[7] === 'schema') {
+    const params = adminProjectTableParamsSchema.parse({ project: projectSlug, table: tableSlug });
+    return { kind: 'getSchema', projectSlug: params.project, tableSlug: params.table };
+  }
+
+  if (segments.length === 8 && segments[7] === 'rows') {
+    const params = adminProjectTableParamsSchema.parse({ project: projectSlug, table: tableSlug });
+    return {
+      kind: 'listRows',
+      projectSlug: params.project,
+      tableSlug: params.table,
+      query: parseListRowsQueryFromUrl(url)
+    };
+  }
+
+  if (segments.length === 9 && segments[7] === 'rows') {
+    const rowId = decodeCachedPathSegment(segments[8] ?? '');
+    const params = rowParamsSchema.parse({ project: projectSlug, table: tableSlug, id: rowId });
+    return { kind: 'getRow', projectSlug: params.project, tableSlug: params.table, rowId: params.id };
+  }
+
+  throw new NotFoundError('Cached table read route is not configured.');
+}
+
+async function runCachedTableRead(env: Env, operation: CachedTableReadOperation) {
+  if (operation.kind === 'listRows') {
+    const response = await doRpc<TableDoResponse>(getTableStub(env, operation.projectSlug, operation.tableSlug), {
+      type: 'table.rows.list',
+      projectSlug: operation.projectSlug,
+      tableSlug: operation.tableSlug,
+      query: operation.query
+    });
+    if (response.type !== 'table.rows.list.result') {
+      throw new ServiceUnavailableError('Unexpected table rows list response.');
+    }
+
+    return response.result;
+  }
+
+  if (operation.kind === 'getRow') {
+    const response = await doRpc<TableDoResponse>(getTableStub(env, operation.projectSlug, operation.tableSlug), {
+      type: 'table.row.get',
+      projectSlug: operation.projectSlug,
+      tableSlug: operation.tableSlug,
+      rowId: operation.rowId
+    });
+    if (response.type !== 'table.row.get.result') {
+      throw new ServiceUnavailableError('Unexpected table row get response.');
+    }
+
+    return response.result;
+  }
+
+  const response = await doRpc<TableDoResponse>(getTableStub(env, operation.projectSlug, operation.tableSlug), {
+    type: 'table.schema.get',
+    projectSlug: operation.projectSlug,
+    tableSlug: operation.tableSlug
+  });
+  if (response.type !== 'table.schema.get.result') {
+    throw new ServiceUnavailableError('Unexpected table schema get response.');
+  }
+
+  return response.result;
+}
+
+function cachedTableReadBasePath(projectSlug: string, tableSlug: string) {
+  return `/internal/cache/v1/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}`;
+}
+
+function createCachedTableReadHeaders(request: Request) {
+  const headers = new Headers();
+  const accept = request.headers.get('accept');
+  if (accept) {
+    headers.set('accept', accept);
+  }
+
+  return headers;
+}
+
+function createCachedTableReadRequest(c: AppContext, pathname: string, includeQuery: boolean) {
+  const url = new URL(pathname, c.req.url);
+  if (includeQuery) {
+    url.search = new URL(c.req.url).search;
+  }
+
+  return new Request(url, {
+    method: 'GET',
+    headers: createCachedTableReadHeaders(c.req.raw)
+  });
+}
+
+function fetchCachedTableRead(c: AppContext, pathname: string, includeQuery = false) {
+  return workerExports.CachedTableReads.fetch(createCachedTableReadRequest(c, pathname, includeQuery));
+}
+
+async function parseCachedTableReadResponse<TSchema extends z.ZodType>(
+  c: AppContext,
+  response: Response,
+  schema: TSchema
+): Promise<z.infer<TSchema>> {
+  const cacheControl = response.headers.get('cache-control');
+  if (cacheControl) {
+    c.header('cache-control', cacheControl);
+  }
+
+  const body: unknown = await response.json();
+  if (response.ok) {
+    return schema.parse(body);
+  }
+
+  const errorBody = errorResponseSchema.parse(body);
+  throw new AppError(errorBody.error.message, errorBody.error.code, response.status, errorBody.error.details);
+}
+
+async function fetchCachedTableReadJson<TSchema extends z.ZodType>(
+  c: AppContext,
+  schema: TSchema,
+  pathname: string,
+  includeQuery = false
+): Promise<z.infer<TSchema>> {
+  return parseCachedTableReadResponse(c, await fetchCachedTableRead(c, pathname, includeQuery), schema);
+}
+
 function encodeCacheTagPart(value: string) {
   return encodeURIComponent(value);
 }
@@ -1559,21 +1729,34 @@ function getRowCacheTag(projectSlug: string, tableSlug: string, rowId: string) {
 
 export class CachedTableReads extends WorkerEntrypoint<Env> {
   async fetch(request: Request): Promise<Response> {
-    void request;
-    return Response.json(
-      {
-        error: {
-          code: 'NOT_FOUND',
-          message: 'Cached table read route is not configured.'
-        }
-      },
-      {
-        status: 404,
+    if (request.method === 'HEAD') {
+      return new Response(null, {
+        status: 405,
         headers: {
+          allow: 'GET',
           'cache-control': 'no-store'
         }
-      }
-    );
+      });
+    }
+
+    if (request.method !== 'GET') {
+      return noStoreJsonResponse(
+        {
+          error: {
+            code: 'METHOD_NOT_ALLOWED',
+            message: 'Cached table reads only support GET requests.',
+            details: null
+          }
+        },
+        405
+      );
+    }
+
+    try {
+      return noStoreJsonResponse(await runCachedTableRead(this.env, parseCachedTableReadRequest(request)));
+    } catch (error) {
+      return noStoreErrorResponse(error);
+    }
   }
 
   private async purgeTags(tags: string[]): Promise<void> {
@@ -1936,17 +2119,13 @@ function createApp() {
     if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
       assertProjectScope(auth, 'table:read', params.project);
     }
-    const query = parseListRowsQuery(c);
-    const response = await doRpc<TableDoResponse>(getTableStub(c.env, params.project, params.table), {
-      type: 'table.rows.list',
-      projectSlug: params.project,
-      tableSlug: params.table,
-      query,
-      resolvedConfig: tableAccess.resolvedConfig,
-      requestContext: buildTableRequestContext(c, 'rows.list')
-    });
-
-    return c.json((response as { type: 'table.rows.list.result'; result: ListRowsResult }).result);
+    parseListRowsQuery(c);
+    return c.json(await fetchCachedTableReadJson(
+      c,
+      listRowsResultSchema,
+      `${cachedTableReadBasePath(params.project, params.table)}/rows`,
+      true
+    ));
   });
 
   app.openapi(getSchemaRoute, async (c) => {
@@ -1960,15 +2139,11 @@ function createApp() {
     if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
       assertProjectScope(auth, 'table:read', params.project);
     }
-    const response = await doRpc<TableDoResponse>(getTableStub(c.env, params.project, params.table), {
-      type: 'table.schema.get',
-      projectSlug: params.project,
-      tableSlug: params.table,
-      resolvedConfig: tableAccess.resolvedConfig,
-      requestContext: buildTableRequestContext(c, 'rows.schema.get')
-    });
-
-    return c.json((response as { type: 'table.schema.get.result'; result: GetSchemaResult }).result);
+    return c.json(await fetchCachedTableReadJson(
+      c,
+      getSchemaResultSchema,
+      `${cachedTableReadBasePath(params.project, params.table)}/schema`
+    ));
   });
 
   app.openapi(getCacheStatusRoute, async (c) => {
@@ -2131,16 +2306,11 @@ function createApp() {
     if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
       assertProjectScope(auth, 'table:read', params.project);
     }
-    const response = await doRpc<TableDoResponse>(getTableStub(c.env, params.project, params.table), {
-      type: 'table.row.get',
-      projectSlug: params.project,
-      tableSlug: params.table,
-      rowId: params.id,
-      resolvedConfig: tableAccess.resolvedConfig,
-      requestContext: buildTableRequestContext(c, 'rows.get')
-    });
-
-    return c.json((response as { type: 'table.row.get.result'; result: GetRowResult }).result);
+    return c.json(await fetchCachedTableReadJson(
+      c,
+      getRowResultSchema,
+      `${cachedTableReadBasePath(params.project, params.table)}/rows/${encodeURIComponent(params.id)}`
+    ));
   });
 
   app.openapi(createRowRoute, async (c) => {
