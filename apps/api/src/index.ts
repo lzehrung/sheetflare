@@ -1999,7 +1999,10 @@ export class CachedTableReads extends WorkerEntrypoint<Env> {
       throw new ServiceUnavailableError('Workers Cache purge API is unavailable.');
     }
 
-    await workerCache.purge({ tags });
+    const result = await workerCache.purge({ tags });
+    if (!result.success) {
+      throw new Error('Workers Cache purge was unsuccessful.');
+    }
   }
 
   async invalidateProject(projectSlug: string): Promise<void> {

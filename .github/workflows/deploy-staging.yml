@@ -21,10 +21,10 @@ jobs:
       SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN: ${{ secrets.SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm

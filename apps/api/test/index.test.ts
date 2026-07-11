@@ -923,7 +923,7 @@ function createTracing(): Tracing {
 
 function createCachedTableReadsHarness(
   env: Env = createEnv(),
-  options?: { purgeCalls?: CachePurgeCall[]; purgeShouldFail?: boolean }
+  options?: { purgeCalls?: CachePurgeCall[]; purgeShouldFail?: boolean; purgeResultShouldFail?: boolean }
 ): { entrypoint: CachedTableReads; purgeCalls: CachePurgeCall[] } {
   const purgeCalls = options?.purgeCalls ?? [];
   const ctx: ExecutionContext = {
@@ -937,6 +937,17 @@ function createCachedTableReadsHarness(
         purgeCalls.push(purgeOptions);
         if (options?.purgeShouldFail === true) {
           throw new Error('Workers Cache purge failed for test.');
+        }
+        if (options?.purgeResultShouldFail === true) {
+          return {
+            success: false,
+            errors: [
+              {
+                code: 1000,
+                message: 'Workers Cache purge was rejected for test.'
+              }
+            ]
+          };
         }
         return {
           success: true,
@@ -1258,6 +1269,14 @@ describe('CachedTableReads', () => {
         tags: ['table:demo:users']
       }
     ]);
+  });
+
+  it('rejects table invalidation when Workers Cache returns a failed purge result', async () => {
+    const { entrypoint } = createCachedTableReadsHarness(createEnv(), {
+      purgeResultShouldFail: true
+    });
+
+    await expect(entrypoint.invalidateTable('demo', 'users')).rejects.toThrow();
   });
 
   it('purges table and encoded row tags when invalidating a row', async () => {
