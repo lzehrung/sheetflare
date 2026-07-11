@@ -4,9 +4,10 @@
   "compatibility_date": "2026-07-07",
   "workers_dev": true,
   "cache": {
-    "enabled": false
+    "enabled": true
   },
   "exports": {
+    "default": { "type": "worker", "cache": { "enabled": false } },
     "CachedTableReads": { "type": "worker", "cache": { "enabled": true } }
   },
   "durable_objects": {

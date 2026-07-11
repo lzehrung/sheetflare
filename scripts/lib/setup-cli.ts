@@ -169,7 +169,7 @@ Common flows:
 Options:
   -h, --help                         Show this help.
   --config <path>                    Use a setup config path. Default: sheetflare.setup.json.
-  --profile <name>                   Select deployment profile when creating config.
+  --profile <name>                   Select production or staging; must match existing config.
   --write-default-config             Write a starter setup config and exit.
   --apply-secrets                    Apply Worker and admin Pages secrets.
   --deploy                           Deploy the API Worker and admin Pages site.

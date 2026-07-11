@@ -284,7 +284,7 @@ async function main() {
 
   if (options.writeDefaultConfig) {
     logStep(`Writing starter setup file to ${resolvedConfigPath}`);
-      await writeFile(resolvedConfigPath, createDefaultSetupConfig(options.profile ?? 'production'), 'utf8');
+    await writeFile(resolvedConfigPath, createDefaultSetupConfig(options.profile ?? 'production'), 'utf8');
     logSuccess(`Starter setup file written to ${resolvedConfigPath}`);
     return;
   }

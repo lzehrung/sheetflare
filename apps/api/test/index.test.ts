@@ -108,6 +108,7 @@ function createEnv(options?: {
   defaultAuthMode?: 'private' | 'public-read';
   projectAccessStatus?: 200 | 404 | 500;
   tableCacheClearStatus?: 200 | 503;
+  tableRowsListStatus?: 200 | 503;
   tableCacheTtlSeconds?: number;
   tableCacheStatus?: 'idle' | 'syncing' | 'ready' | 'error';
   tableCacheStale?: boolean;
@@ -737,6 +738,16 @@ function createEnv(options?: {
     }
 
     if (body.type === 'table.rows.list') {
+      if (options?.tableRowsListStatus === 503) {
+        return Response.json({
+          error: {
+            code: 'SERVICE_UNAVAILABLE',
+            message: 'Cached rows are temporarily unavailable.',
+            details: null
+          }
+        }, { status: 503 });
+      }
+
       return Response.json({
         type: 'table.rows.list.result',
         result: {
@@ -1168,6 +1179,24 @@ describe('CachedTableReads', () => {
         tags: ['project:demo', 'table:demo:users']
       });
     }
+  });
+
+  it('resolves asynchronous cached-read failures as structured no-store responses', async () => {
+    const { entrypoint } = createCachedTableReadsHarness(createEnv({ tableRowsListStatus: 503 }));
+
+    const response = await entrypoint.fetch(
+      new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10')
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'Cached rows are temporarily unavailable.',
+        details: null
+      }
+    });
   });
 
   it('returns a defensive no-store 404 for unknown cached-read paths', async () => {

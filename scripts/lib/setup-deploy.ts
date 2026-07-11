@@ -135,19 +135,19 @@ export async function listPagesProjects(options: { debug?: boolean } = {}) {
 }
 
 export function buildApiDeployCommand(configPath: string) {
-  return ['wrangler@4.85.0', 'deploy', '--config', configPath];
+  return ['wrangler@4.107.0', 'deploy', '--config', configPath];
 }
 
 export function buildAdminDeployCommand(projectName: string) {
-  return ['wrangler@4.85.0', 'pages', 'deploy', '--project-name', projectName, '--branch', 'main'];
+  return ['wrangler@4.107.0', 'pages', 'deploy', '--project-name', projectName, '--branch', 'main'];
 }
 
 export function buildPagesProjectListCommand() {
-  return ['wrangler@4.85.0', 'pages', 'project', 'list', '--json'];
+  return ['wrangler@4.107.0', 'pages', 'project', 'list', '--json'];
 }
 
 export function buildPagesProjectCreateCommand(projectName: string) {
-  return ['wrangler@4.85.0', 'pages', 'project', 'create', projectName, '--production-branch', 'main'];
+  return ['wrangler@4.107.0', 'pages', 'project', 'create', projectName, '--production-branch', 'main'];
 }
 
 export async function deployApiWorker(profile: string, googleClientEmail: string | null, options: { debug?: boolean } = {}) {

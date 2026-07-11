@@ -24,7 +24,7 @@ afterEach(async () => {
 describe('setup deploy command builders', () => {
   it('builds the pinned API deploy command', () => {
     expect(buildApiDeployCommand('wrangler.setup.jsonc')).toEqual([
-      'wrangler@4.85.0',
+      'wrangler@4.107.0',
       'deploy',
       '--config',
       'wrangler.setup.jsonc'
@@ -33,7 +33,7 @@ describe('setup deploy command builders', () => {
 
   it('builds the pinned admin pages deploy command', () => {
     expect(buildAdminDeployCommand('sheetflare-admin')).toEqual([
-      'wrangler@4.85.0',
+      'wrangler@4.107.0',
       'pages',
       'deploy',
       '--project-name',
@@ -45,7 +45,7 @@ describe('setup deploy command builders', () => {
 
   it('builds the pinned pages project list command', () => {
     expect(buildPagesProjectListCommand()).toEqual([
-      'wrangler@4.85.0',
+      'wrangler@4.107.0',
       'pages',
       'project',
       'list',
@@ -55,7 +55,7 @@ describe('setup deploy command builders', () => {
 
   it('builds the pinned pages project create command', () => {
     expect(buildPagesProjectCreateCommand('sheetflare-admin')).toEqual([
-      'wrangler@4.85.0',
+      'wrangler@4.107.0',
       'pages',
       'project',
       'create',

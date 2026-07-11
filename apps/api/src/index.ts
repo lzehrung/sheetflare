@@ -1987,7 +1987,7 @@ export class CachedTableReads extends WorkerEntrypoint<Env> {
     }
 
     try {
-      return cachedTableReadSuccessResponse(this.env, parseCachedTableReadRequest(request));
+      return await cachedTableReadSuccessResponse(this.env, parseCachedTableReadRequest(request));
     } catch (error) {
       return noStoreErrorResponse(error);
     }
