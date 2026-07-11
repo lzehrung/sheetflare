@@ -34,8 +34,6 @@ npm run setup
 
 Have a Google service-account JSON already? Skip `gcloud auth login`; setup will ask for its path. Full walkthrough: [docs/quickstart.md](./docs/quickstart.md).
 
-Repository staging uses the same flow: `npm run setup:staging`.
-
 ## How It Works
 
 Each Google Sheet tab you connect becomes a **table** inside a **project**. Sheetflare syncs rows from the sheet into a local SQLite cache inside a Cloudflare Durable Object. Reads and queries serve from that cache; writes go to the sheet first and then update the cache immediately. Google Drive watches trigger automatic cache refreshes when the source sheet changes.
