@@ -123,7 +123,7 @@ describe('buildBeginnerSetupConfigFromAnswers', () => {
 describe('buildSetupConfigFromAnswers', () => {
   it('builds a private-only setup config from prompt answers', () => {
     const config = buildSetupConfigFromAnswers({
-      profile: 'local',
+      profile: 'production',
       deployAdmin: true,
       spreadsheetIdOrUrl: 'https://docs.google.com/spreadsheets/d/sheet-1/edit#gid=0',
       privateProjectSlug: 'demo',
@@ -170,7 +170,7 @@ describe('buildSetupConfigFromAnswers', () => {
 
   it('derives a public-read project when requested', () => {
     const config = buildSetupConfigFromAnswers({
-      profile: 'local',
+      profile: 'production',
       deployAdmin: false,
       spreadsheetIdOrUrl: 'sheet-1',
       privateProjectSlug: 'demo',
@@ -209,7 +209,7 @@ describe('buildSetupConfigFromAnswers', () => {
 
   it('rejects a blank smoke field name', () => {
     expect(() => buildSetupConfigFromAnswers({
-      profile: 'local',
+      profile: 'production',
       deployAdmin: true,
       spreadsheetIdOrUrl: 'sheet-1',
       privateProjectSlug: 'demo',
@@ -230,7 +230,7 @@ describe('buildSetupConfigFromAnswers', () => {
 
   it('rejects using the managed id column for smoke writes', () => {
     expect(() => buildSetupConfigFromAnswers({
-      profile: 'local',
+      profile: 'production',
       deployAdmin: true,
       spreadsheetIdOrUrl: 'sheet-1',
       privateProjectSlug: 'demo',
@@ -314,10 +314,10 @@ describe('promptForSetup', () => {
     expect(result.provisionGoogle).toBe(true);
   });
 
-  it('preserves the advanced setup prompt actions', async () => {
-    const { prompter } = createFakePrompter({
+  it('defaults the advanced profile prompt to production', async () => {
+    const { prompter, textPrompts } = createFakePrompter({
       textResponses: [
-        'local',
+        'production',
         'sheet-1',
         'demo',
         'Demo',
@@ -338,6 +338,10 @@ describe('promptForSetup', () => {
       googleCredentialAvailable: false
     });
 
+    expect(textPrompts[0]).toEqual({
+      message: 'Setup profile',
+      defaultValue: 'production'
+    });
     expect(result.actions).toEqual({
       applySecretsNow: true,
       deployNow: false,
@@ -346,7 +350,47 @@ describe('promptForSetup', () => {
       verifyNow: false
     });
     expect(result.provisionGoogle).toBe(false);
+    expect(result.config.profile).toBe('production');
     expect(result.config.privateProject.slug).toBe('demo');
+  });
+
+  it('rejects an unsupported advanced profile', async () => {
+    const { prompter } = createFakePrompter({
+      textResponses: ['local']
+    });
+
+    await expect(promptForSetup(prompter, {
+      mode: 'advanced',
+      googleCredentialAvailable: false
+    })).rejects.toThrow('profile must be production or staging.');
+  });
+
+  it('uses an explicit staging profile without asking for a profile', async () => {
+    const { prompter, textPrompts } = createFakePrompter({
+      textResponses: [
+        'sheet-1',
+        'demo',
+        'Demo',
+        'users',
+        'Users',
+        '_id',
+        'email,status',
+        '60',
+        'email',
+        'Smoke Row',
+        'Smoke Row Updated'
+      ],
+      confirmResponses: [true, false, true, false, true, false]
+    });
+
+    const result = await promptForSetup(prompter, {
+      mode: 'advanced',
+      googleCredentialAvailable: false,
+      profile: 'staging'
+    });
+
+    expect(textPrompts.map(({ message }) => message)).not.toContain('Setup profile');
+    expect(result.config.profile).toBe('staging');
   });
 });
 

@@ -6,7 +6,7 @@ If this is your first deployment, start with [quickstart.md](./quickstart.md) in
 
 Use [google-service-accounts.md](./google-service-accounts.md) for the exact recommended Google credential model, secret layout, and rotation workflow.
 
-If you are maintaining this repository's shared staging workflows, use [contributor-staging.md](./contributor-staging.md) for the exact GitHub secret names and project-specific staging asset names.
+If you are maintaining this repository's shared staging environment, use [contributor-staging.md](../contributor-staging.md) for its asset names and setup command.
 
 ## Setup Flow
 
@@ -25,21 +25,15 @@ Cloudflare auth note:
 - Expect to re-authenticate periodically when using Wrangler's browser-backed OAuth login.
 - For unattended deploys, CI, or long-lived scripted sessions, prefer `CLOUDFLARE_API_TOKEN`.
 
-The setup command can:
+The normal operator journey is one command: `npm run setup`. It collects credentials, applies secrets, deploys the API and admin UI, pauses while you share the sheet with its service account, bootstraps the table and API keys, smoke-tests real reads and writes, and verifies the finished deployment.
 
-- write `sheetflare.setup.json`
-- keep local reusable secret state in `.sheetflare.setup.local.json`
-- apply Worker secrets
-- provision a Google Cloud project and service account during first-run beginner setup, or when `--provision-google` is used with a working `gcloud` login
-- ensure the target Cloudflare Pages project exists for admin deploys
-- apply the admin Pages runtime binding to the deployed API base URL
-- deploy the API Worker
-- deploy the admin UI
-- verify the protected admin site root plus proxied `/ready`, `/docs`, and `/v1/admin/projects`
-- bootstrap the first project and keys
-- run smoke validation
+Repository staging uses the exact same orchestrator with isolated config and local state:
 
-Use `npm run setup -- --advanced` on a first run with no `sheetflare.setup.json` to get the full prompt flow for project names, table slugs, indexed fields, cache TTL, public-read coverage, and per-step action choices.
+```powershell
+npm run setup:staging
+```
+
+Use `npm run setup -- --advanced` only when the safe defaults do not fit. Use the rest of this guide for CI, recovery, and manual fallback—not for a normal first deployment.
 
 For reruns from an existing setup config:
 
@@ -85,9 +79,8 @@ npm run setup -- --apply-secrets --provision-google
 
 Profile-derived defaults:
 
-- `production` or `prod` -> `sheetflare-prod`
+- `production` -> `sheetflare-prod`
 - `staging` -> `sheetflare-staging`
-- any other profile -> `sheetflare-<profile>`
 
 Explicit override example:
 

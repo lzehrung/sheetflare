@@ -9,6 +9,8 @@ import {
 } from '@sheetflare/contracts';
 import { ScriptError } from './runtime';
 
+export type SetupProfile = 'production' | 'staging';
+
 type SetupProjectSection = Omit<CreateProjectInput, 'defaultAuthMode'> & {
   tables: CreateTableInput[];
 };
@@ -99,6 +101,14 @@ function parseProjectSection(input: unknown, label: 'privateProject' | 'publicRe
     ...project,
     tables: parsedTables
   };
+}
+
+export function parseSetupProfile(input: unknown, path = 'profile'): SetupProfile {
+  const profile = parseRequiredString(input, path).toLowerCase();
+  if (profile !== 'production' && profile !== 'staging') {
+    throw new ScriptError(`${path} must be production or staging.`);
+  }
+  return profile;
 }
 
 function parseRequiredString(input: unknown, path: string) {
@@ -197,9 +207,9 @@ export function serializeSetupConfig(config: SetupConfig) {
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 
-export function createDefaultSetupConfig() {
+export function createDefaultSetupConfig(profile: SetupProfile = 'production') {
   return serializeSetupConfig({
-    profile: 'local',
+    profile,
     deploy: {
       api: true,
       admin: true
@@ -243,7 +253,7 @@ export function parseSetupConfig(input: unknown): SetupConfig {
     throw new ScriptError('Setup config must be a JSON object.');
   }
 
-  const profile = parseRequiredString(input.profile, 'profile');
+  const profile = parseSetupProfile(input.profile);
 
   if (!isRecord(input.deploy)) {
     throw new ScriptError('deploy must be an object.');

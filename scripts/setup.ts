@@ -284,7 +284,7 @@ async function main() {
 
   if (options.writeDefaultConfig) {
     logStep(`Writing starter setup file to ${resolvedConfigPath}`);
-    await writeFile(resolvedConfigPath, createDefaultSetupConfig(), 'utf8');
+      await writeFile(resolvedConfigPath, createDefaultSetupConfig(options.profile ?? 'production'), 'utf8');
     logSuccess(`Starter setup file written to ${resolvedConfigPath}`);
     return;
   }
@@ -327,7 +327,8 @@ async function main() {
       const promptResult = await promptForSetup(prompter, {
         mode: promptMode,
         googleCredentialAvailable: await hasSetupGoogleCredential(localState),
-        provisionGoogleRequested: provisionGoogle
+        provisionGoogleRequested: provisionGoogle,
+        profile: options.profile
       });
       if (promptResult.provisionGoogle && !provisionGoogle) {
         provisionGoogle = true;
@@ -339,14 +340,22 @@ async function main() {
         }
       }
       promptActions = promptResult.actions;
-      configInput = promptResult.config;
+      const promptedConfig = options.profile
+        ? { ...promptResult.config, profile: options.profile }
+        : promptResult.config;
+      configInput = promptedConfig;
       logStep(`Saving setup choices to ${resolvedConfigPath}`);
-      await writeFile(resolvedConfigPath, serializeSetupConfig(promptResult.config), 'utf8');
+      await writeFile(resolvedConfigPath, serializeSetupConfig(promptedConfig), 'utf8');
       logSuccess(`Setup choices saved to ${resolvedConfigPath}`);
     }
 
     logStep('Checking setup choices');
     const config = parseSetupConfig(configInput);
+    if (options.profile && config.profile !== options.profile) {
+      throw new ScriptError(
+        `Setup config profile is ${config.profile}, but --profile requested ${options.profile}. Use the matching config or remove --profile.`
+      );
+    }
     const tableCount = config.privateProject.tables.length + (config.publicReadProject?.tables.length ?? 0);
     logSuccess(`Setup choices look valid for project ${config.privateProject.slug} with ${tableCount} table${tableCount === 1 ? '' : 's'}.`);
 
