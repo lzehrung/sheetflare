@@ -1293,6 +1293,19 @@ describe('CachedTableReads', () => {
       }
     ]);
   });
+
+  it('falls back to only the table tag when a row tag exceeds the Workers Cache limit', async () => {
+    const longRowId = 'x'.repeat(1025);
+    const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
+
+    await entrypoint.invalidateRow('demo', 'users', longRowId);
+
+    expect(purgeCalls).toEqual([
+      {
+        tags: ['table:demo:users']
+      }
+    ]);
+  });
 });
 
 describe('api routes', () => {
@@ -2377,6 +2390,36 @@ describe('api routes', () => {
       ['table:demo:users'],
       ['table:demo:users', 'row:demo:users:row-1'],
       ['table:demo:users', 'row:demo:users:row-1']
+    ]);
+  });
+
+  it('deletes rows with over-limit cache tags and purges only the table tag', async () => {
+    const longRowId = 'x'.repeat(1025);
+    const app = createApp();
+    const env = createEnv() as Env & {
+      __tableRequests: Array<{ type: string }>;
+      __cachedReadPurgeCalls: CachePurgeCall[];
+    };
+
+    const response = await app.request(
+      `/v1/projects/demo/tables/users/rows/${longRowId}`,
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer secret'
+        }
+      },
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      deletedId: longRowId
+    });
+    expect(env.__tableRequests.map((request) => request.type)).toContain('table.row.delete');
+    expectCachedReadPurgeCalls(env, [
+      ['table:demo:users']
     ]);
   });
 

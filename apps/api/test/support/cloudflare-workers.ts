@@ -2,8 +2,13 @@ type CachePurgeOptions =
   | { purgeEverything: true }
   | { tags?: string[]; pathPrefixes?: string[] };
 
+type CachePurgeResult = {
+  success: boolean;
+  errors: Array<{ code: number; message: string }>;
+};
+
 type WorkerCache = {
-  purge(options: CachePurgeOptions): Promise<void>;
+  purge(options: CachePurgeOptions): Promise<CachePurgeResult>;
 };
 
 export type WorkerEntrypointContext<Props> = {

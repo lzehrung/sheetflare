@@ -1928,11 +1928,15 @@ function isPrintableAsciiCacheTag(value: string) {
   return value.length > 0;
 }
 
+function isValidCacheTag(value: string) {
+  return value.length <= maxPurgeCacheTagLength && isPrintableAsciiCacheTag(value);
+}
+
 function serializeCacheTags(tags: string[]) {
   let headerLength = 0;
   let first = true;
   for (const tag of tags) {
-    if (tag.length > maxPurgeCacheTagLength || !isPrintableAsciiCacheTag(tag)) {
+    if (!isValidCacheTag(tag)) {
       return null;
     }
 
@@ -2014,10 +2018,13 @@ export class CachedTableReads extends WorkerEntrypoint<Env> {
   }
 
   async invalidateRow(projectSlug: string, tableSlug: string, rowId: string): Promise<void> {
-    await this.purgeTags([
-      getTableCacheTag(projectSlug, tableSlug),
-      getRowCacheTag(projectSlug, tableSlug, rowId)
-    ]);
+    const tags = [getTableCacheTag(projectSlug, tableSlug)];
+    const rowTag = getRowCacheTag(projectSlug, tableSlug, rowId);
+    if (isValidCacheTag(rowTag)) {
+      tags.push(rowTag);
+    }
+
+    await this.purgeTags(tags);
   }
 }
 
