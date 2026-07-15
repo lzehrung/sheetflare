@@ -291,7 +291,16 @@ const maxRecentApiKeyTouches = 10_000;
 const recentApiKeyTouches = new Map<string, number>();
 const corsAllowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
 const corsAllowedHeaders = 'Authorization, Content-Type';
-const corsExposedHeaders = 'X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset';
+const cacheStatusHeaderName = 'x-sheetflare-cache-status';
+const cacheInvalidationHeaderName = 'x-sheetflare-cache-invalidation';
+const corsExposedHeaders = [
+  'X-Request-Id',
+  'X-RateLimit-Limit',
+  'X-RateLimit-Remaining',
+  'X-RateLimit-Reset',
+  cacheStatusHeaderName,
+  cacheInvalidationHeaderName
+].join(', ');
 
 function pruneRecentApiKeyTouches(nowMs: number) {
   if (recentApiKeyTouches.size < maxRecentApiKeyTouches) {
@@ -987,7 +996,24 @@ async function invalidateCachedRow(projectSlug: string, tableSlug: string, rowId
   await workerExports.CachedTableReads.invalidateRow(projectSlug, tableSlug, rowId);
 }
 
-async function invalidateCachedProjectsForSpreadsheet(c: { env: Env }, spreadsheetId: string) {
+async function invalidateAfterCommittedChange(c: AppContext, invalidate: () => Promise<void>) {
+  try {
+    await invalidate();
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error);
+    c.header(cacheInvalidationHeaderName, 'failed');
+    console.error(JSON.stringify({
+      event: 'cache.invalidation.failed',
+      method: c.req.method,
+      path: c.req.path,
+      requestId: c.get('requestId'),
+      errorName: normalizedError instanceof Error ? normalizedError.name : 'UnknownError',
+      errorMessage: normalizedError instanceof Error ? normalizedError.message : String(normalizedError)
+    }));
+  }
+}
+
+async function invalidateCachedProjectsForSpreadsheet(c: AppContext, spreadsheetId: string) {
   const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
     type: 'control.projects.list'
   });
@@ -995,7 +1021,7 @@ async function invalidateCachedProjectsForSpreadsheet(c: { env: Env }, spreadshe
 
   for (const project of result.data) {
     if (project.spreadsheetId === spreadsheetId) {
-      await invalidateCachedProject(project.slug);
+      await invalidateAfterCommittedChange(c, () => invalidateCachedProject(project.slug));
     }
   }
 }
@@ -1594,7 +1620,9 @@ function noStoreJsonResponse(body: unknown, status = 200) {
 }
 
 function applyDefaultGatewayCacheSafetyHeaders(response: Response) {
-  if (!response.headers.has('cache-control')) {
+  const cacheControl = response.headers.get('cache-control');
+  const hasNoStore = cacheControl?.split(',').some((directive) => directive.trim().toLowerCase() === 'no-store');
+  if (!hasNoStore) {
     response.headers.set('cache-control', 'no-store');
   }
   response.headers.delete('cloudflare-cdn-cache-control');
@@ -1782,13 +1810,23 @@ async function cachedTableReadSuccessResponse(env: Env, operation: CachedTableRe
   });
 }
 
+function compareStableJsonKeys(left: string, right: string) {
+  if (left < right) {
+    return -1;
+  }
+  if (left > right) {
+    return 1;
+  }
+  return 0;
+}
+
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map((entry) => stableJson(entry)).join(',')}]`;
   }
 
   if (value !== null && typeof value === 'object') {
-    const entries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right));
+    const entries = Object.entries(value).sort(([left], [right]) => compareStableJsonKeys(left, right));
     return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(',')}}`;
   }
 
@@ -1890,6 +1928,11 @@ async function parseCachedTableReadResponse<TSchema extends z.ZodType>(
   const cacheControl = response.headers.get('cache-control');
   if (cacheControl) {
     c.header('cache-control', cacheControl);
+  }
+
+  const cacheStatus = response.headers.get('cf-cache-status')?.trim();
+  if (cacheStatus) {
+    c.header(cacheStatusHeaderName, cacheStatus);
   }
 
   const body: unknown = await response.json();
@@ -2005,7 +2048,9 @@ export class CachedTableReads extends WorkerEntrypoint<Env> {
 
     const result = await workerCache.purge({ tags });
     if (!result.success) {
-      throw new Error('Workers Cache purge was unsuccessful.');
+      const failures = result.errors.map(({ code, message }) => `${code}: ${message}`).join('; ');
+      const suffix = failures ? `: ${failures}` : '.';
+      throw new Error(`Workers Cache purge was unsuccessful${suffix}`);
     }
   }
 
@@ -2244,7 +2289,7 @@ function createApp() {
       result: { data: AdminGetProjectResult; created: boolean };
     }).result;
     if (!result.created) {
-      await invalidateCachedProject(result.data.project.slug);
+      await invalidateAfterCommittedChange(c, () => invalidateCachedProject(result.data.project.slug));
     }
     return c.json(result.data, result.created ? 201 : 200);
   });
@@ -2266,7 +2311,7 @@ function createApp() {
       type: 'project.delete.result';
       result: DeleteProjectResult;
     }).result;
-    await invalidateCachedProject(project);
+    await invalidateAfterCommittedChange(c, () => invalidateCachedProject(project));
 
     return c.json(result);
   });
@@ -2338,7 +2383,7 @@ function createApp() {
       result: { data: UpsertTableResult['data']; created: boolean };
     }).result;
     if (!result.created) {
-      await invalidateCachedTable(project, result.data.tableSlug);
+      await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, result.data.tableSlug));
     }
     return c.json(
       { data: result.data },
@@ -2360,7 +2405,7 @@ function createApp() {
       type: 'project.table.delete.result';
       result: DeleteTableResult;
     }).result;
-    await invalidateCachedTable(project, table);
+    await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
 
     return c.json(result);
   });
@@ -2427,7 +2472,7 @@ function createApp() {
 
     const result = (response as { type: 'table.cache.refresh.result'; result: RefreshTableCacheResult }).result;
     if (cacheStatusBeforeRefresh.status !== 'ready' || cacheStatusBeforeRefresh.stale) {
-      await invalidateCachedTable(project, table);
+      await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
     }
     return c.json(result);
   });
@@ -2444,7 +2489,7 @@ function createApp() {
     });
 
     const result = (response as { type: 'table.reindex.result'; result: ReindexTableResult }).result;
-    await invalidateCachedTable(project, table);
+    await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
     return c.json(result);
   });
 
@@ -2596,7 +2641,7 @@ function createApp() {
     });
 
     const result = (response as { type: 'table.row.create.result'; result: CreateRowResult }).result;
-    await invalidateCachedTable(project, table);
+    await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
     return c.json(result, 201);
   });
 
@@ -2615,7 +2660,7 @@ function createApp() {
     });
 
     const result = (response as { type: 'table.row.update.result'; result: UpdateRowResult }).result;
-    await invalidateCachedRow(project, table, id);
+    await invalidateAfterCommittedChange(c, () => invalidateCachedRow(project, table, id));
     return c.json(result);
   });
 
@@ -2635,7 +2680,7 @@ function createApp() {
       type: 'table.row.delete.result';
       result: { ok: true; deletedId: string };
     }).result;
-    await invalidateCachedRow(project, table, id);
+    await invalidateAfterCommittedChange(c, () => invalidateCachedRow(project, table, id));
     return c.json(result);
   });
 

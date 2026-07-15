@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import * as ts from 'typescript';
 import { getCommandName, runCommand } from './process';
 import { ScriptError } from './runtime';
+import type { SetupProfile } from './setup-config';
 
 const apiWranglerConfigPath = resolve('apps/api/wrangler.jsonc');
 const stagingApiWranglerConfigPath = resolve('apps/api/wrangler.staging.jsonc');
@@ -13,13 +14,6 @@ type PagesProjectListEntry = {
   name: string;
 };
 
-function normalizeSetupProfile(profile: string) {
-  return profile.trim().toLowerCase();
-}
-
-function isStagingProfile(profile: string) {
-  return normalizeSetupProfile(profile) === 'staging';
-}
 
 function parseJsonConfig(text: string, path: string) {
   let result: ReturnType<typeof ts.parseConfigFileTextToJson>;
@@ -150,7 +144,7 @@ export function buildPagesProjectCreateCommand(projectName: string) {
   return ['wrangler@4.107.0', 'pages', 'project', 'create', projectName, '--production-branch', 'main'];
 }
 
-export async function deployApiWorker(profile: string, googleClientEmail: string | null, options: { debug?: boolean } = {}) {
+export async function deployApiWorker(profile: SetupProfile, googleClientEmail: string | null, options: { debug?: boolean } = {}) {
   return withPatchedJsonConfig(
     getApiWranglerConfigPath(profile),
     (config) => patchApiConfigForDeploy(config, googleClientEmail),
@@ -204,7 +198,7 @@ export async function ensurePagesProjectExists(projectName: string, options: { d
   };
 }
 
-export async function deployAdminPages(profile: string, options: { debug?: boolean } = {}) {
+export async function deployAdminPages(profile: SetupProfile, options: { debug?: boolean } = {}) {
   const projectName = getAdminPagesProjectName(profile);
   const buildResult = await runCommand(
     getCommandName('npm'),
@@ -239,12 +233,12 @@ export async function deployAdminPages(profile: string, options: { debug?: boole
   };
 }
 
-export function getApiWranglerConfigPath(profile = 'production') {
-  return isStagingProfile(profile) ? stagingApiWranglerConfigPath : apiWranglerConfigPath;
+export function getApiWranglerConfigPath(profile: SetupProfile = 'production') {
+  return profile === 'staging' ? stagingApiWranglerConfigPath : apiWranglerConfigPath;
 }
 
-export function getAdminPagesProjectName(profile = 'production') {
-  return isStagingProfile(profile) ? 'sheetflare-staging-admin' : 'sheetflare-admin';
+export function getAdminPagesProjectName(profile: SetupProfile = 'production') {
+  return profile === 'staging' ? 'sheetflare-staging-admin' : 'sheetflare-admin';
 }
 
 export function getAdminPagesSiteUrl(projectName = getAdminPagesProjectName()) {

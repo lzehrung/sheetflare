@@ -120,6 +120,7 @@ function createEnv(options?: {
   adminBearerToken?: string;
   allowedOrigins?: string;
   cachedReadPurgeShouldFail?: boolean;
+  cachedReadResponseHeaders?: Record<string, string>;
 }): Env {
   const rateLimitRequests: Array<{ name: string; key: string }> = [];
   const projectRequests: string[] = [];
@@ -822,10 +823,14 @@ function createEnv(options?: {
       authorization: request.headers.get('authorization'),
       cacheKey: init?.cf?.cacheKey ?? null
     });
-    return createCachedTableReadsHarness(env, {
+    const response = await createCachedTableReadsHarness(env, {
       purgeCalls: cachedReadPurgeCalls,
       purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
     }).entrypoint.fetch(request);
+    for (const [name, value] of Object.entries(options?.cachedReadResponseHeaders ?? {})) {
+      response.headers.set(name, value);
+    }
+    return response;
   };
 
   workerExports.CachedTableReads.invalidateProject = async (projectSlug) => {
@@ -2349,6 +2354,7 @@ describe('api routes', () => {
     );
 
     expect(createResponse.status).toBe(201);
+    expect(createResponse.headers.get('x-sheetflare-cache-invalidation')).toBeNull();
     expect(await createResponse.json()).toEqual({
       data: {
         id: 'row-1',
@@ -2423,7 +2429,7 @@ describe('api routes', () => {
     ]);
   });
 
-  it('surfaces row mutation purge failures instead of returning a silent success', async () => {
+  it('returns a committed row creation with a warning and structured log when cache invalidation fails', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const app = createApp();
     const env = createEnv({ cachedReadPurgeShouldFail: true }) as Env & {
@@ -2449,18 +2455,41 @@ describe('api routes', () => {
         env
       );
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(201);
+      expect(response.headers.get('x-sheetflare-cache-invalidation')).toBe('failed');
+      expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
+      expect(response.headers.get('cache-tag')).toBeNull();
+      const requestId = response.headers.get('x-request-id');
+      expect(requestId).toEqual(expect.any(String));
       expect(await response.json()).toEqual({
-        error: {
-          code: 'INTERNAL_ERROR',
-          message: 'Internal server error.',
-          details: null
-        }
+        data: {
+          id: 'row-1',
+          rowNumber: 2,
+          values: {
+            name: 'Ada'
+          }
+        },
+        ignoredKeys: []
       });
-      expect(env.__tableRequests.map((request) => request.type)).toContain('table.row.create');
+      expect(env.__tableRequests.map((request) => request.type)).toEqual(['table.row.create']);
       expectCachedReadPurgeCalls(env, [
         ['table:demo:users']
       ]);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const errorLog = errorSpy.mock.calls[0]?.[0];
+      expect(errorLog).toEqual(expect.any(String));
+      if (typeof errorLog !== 'string') {
+        throw new Error('Expected cache invalidation failure to emit a JSON log line.');
+      }
+      const event: unknown = JSON.parse(errorLog);
+      expect(event).toEqual({
+        event: 'cache.invalidation.failed',
+        method: 'POST',
+        path: '/v1/projects/demo/tables/users/rows',
+        requestId,
+        errorName: 'Error',
+        errorMessage: 'Workers Cache purge failed for test.'
+      });
     } finally {
       errorSpy.mockRestore();
     }
@@ -2620,6 +2649,60 @@ describe('api routes', () => {
     }
   });
 
+  it('propagates only a non-empty inner cache status under the Sheetflare namespace', async () => {
+    const app = createApp();
+    const cases = [
+      { name: 'present status', innerStatus: ' HIT ', expectedStatus: 'HIT' },
+      { name: 'missing status', innerStatus: undefined, expectedStatus: null },
+      { name: 'blank status', innerStatus: '   ', expectedStatus: null }
+    ];
+
+    for (const { name, innerStatus, expectedStatus } of cases) {
+      const env = createEnv(innerStatus === undefined ? undefined : {
+        cachedReadResponseHeaders: {
+          'cf-cache-status': innerStatus
+        }
+      });
+      const response = await app.request(
+        `/v1/projects/demo/tables/users/rows?case=${encodeURIComponent(name)}`,
+        {
+          headers: {
+            authorization: 'Bearer sfk_project-key.any-secret'
+          }
+        },
+        env
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('x-sheetflare-cache-status')).toBe(expectedStatus);
+      expect(response.headers.get('cf-cache-status')).toBeNull();
+      expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
+      expect(response.headers.get('cache-tag')).toBeNull();
+    }
+  });
+
+  it('replaces a downstream cacheable client directive with gateway no-store', async () => {
+    const app = createApp();
+    const response = await app.request(
+      '/v1/projects/demo/tables/users/rows?limit=10',
+      {
+        headers: {
+          authorization: 'Bearer sfk_project-key.any-secret'
+        }
+      },
+      createEnv({
+        cachedReadResponseHeaders: {
+          'cache-control': 'public, max-age=600'
+        }
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
+    expect(response.headers.get('cache-tag')).toBeNull();
+  });
+
   it('adds default-gateway request, CORS, and rate-limit headers after cached data reads', async () => {
     const app = createApp();
     const env = createEnv({ allowedOrigins: 'https://client.example' }) as Env & {
@@ -2642,6 +2725,13 @@ describe('api routes', () => {
     expectCachedDataReadGatewayHeaders(response);
     expect(response.headers.get('x-request-id')).toEqual(expect.any(String));
     expect(response.headers.get('access-control-allow-origin')).toBe('https://client.example');
+    const exposedHeaders = response.headers.get('access-control-expose-headers')
+      ?.split(',')
+      .map((header) => header.trim().toLowerCase());
+    expect(exposedHeaders).toEqual(expect.arrayContaining([
+      'x-sheetflare-cache-status',
+      'x-sheetflare-cache-invalidation'
+    ]));
     expect(response.headers.get('vary')).toBe('Origin');
     expect(response.headers.get('x-ratelimit-limit')).toBe('300');
     expect(response.headers.get('x-ratelimit-remaining')).toBe('299');
@@ -3426,6 +3516,48 @@ describe('api routes', () => {
     expect(cacheKeyUrl.searchParams.get('__sf_config')).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
     expectNoCredentialMaterial(firstRecord.url);
     expectNoCredentialMaterial(firstCacheKey);
+  });
+
+  it('orders Unicode filter keys by deterministic UTF-16 code units in cached URLs and keys', async () => {
+    const app = createApp();
+    const readCanonicalRequest = async (filter: Record<string, { eq: string }>) => {
+      const env = createEnv({ defaultAuthMode: 'private' }) as Env & {
+        __cachedReadRequests: CachedReadRequestRecord[];
+      };
+      const query = new URLSearchParams([
+        ['filter', JSON.stringify(filter)]
+      ]);
+      const response = await app.request(
+        `/v1/projects/demo/tables/users/rows?${query.toString()}`,
+        {
+          headers: {
+            authorization: 'Bearer sfk_project-key.any-secret'
+          }
+        },
+        env
+      );
+
+      expect(response.status).toBe(200);
+      const record = getOnlyCachedReadRequest(env);
+      return {
+        url: record.url,
+        cacheKey: requireCacheKey(record),
+        filter: new URL(record.url).searchParams.get('filter')
+      };
+    };
+
+    const accentFirst = await readCanonicalRequest({
+      'éclair': { eq: 'accented' },
+      zebra: { eq: 'ascii' }
+    });
+    const asciiFirst = await readCanonicalRequest({
+      zebra: { eq: 'ascii' },
+      'éclair': { eq: 'accented' }
+    });
+
+    expect(accentFirst.filter).toBe('{"zebra":{"eq":"ascii"},"éclair":{"eq":"accented"}}');
+    expect(asciiFirst.url).toBe(accentFirst.url);
+    expect(asciiFirst.cacheKey).toBe(accentFirst.cacheKey);
   });
 
   it('partitions list-row cache keys by project auth mode and resolved table config', async () => {

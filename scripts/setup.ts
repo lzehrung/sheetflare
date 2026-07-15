@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setupConfigUsesDefaultGoogleCredential } from './lib/setup-config';
+import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setupConfigUsesDefaultGoogleCredential, type SetupProfile } from './lib/setup-config';
 import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
 import { confirmSheetShared, createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, recordPrereqResult, type SetupPrereqResult } from './lib/setup-prereqs';
@@ -233,7 +233,7 @@ async function registerDriveWatchesIfPossible(options: {
   }
 }
 
-async function ensureAdminPagesProjectReady(profile: string, options: { debug?: boolean } = {}) {
+async function ensureAdminPagesProjectReady(profile: SetupProfile, options: { debug?: boolean } = {}) {
   const pagesProjectName = getAdminPagesProjectName(profile);
   const result = await ensurePagesProjectExists(pagesProjectName, options);
   if (result.created) {

@@ -5,22 +5,28 @@ import {
   normalizeSpreadsheetId,
   parseSetupConfig,
   serializeSetupConfig,
-  setupConfigUsesDefaultGoogleCredential
+  setupConfigUsesDefaultGoogleCredential,
+  type SetupProfile
 } from './setup-config';
 
 describe('parseSetupConfig', () => {
-  it('normalizes supported profile casing', () => {
-    const config = JSON.parse(createDefaultSetupConfig('staging'));
-    config.profile = 'StAgInG';
+  it.each([
+    { input: ' PrOdUcTiOn ', expected: 'production' },
+    { input: ' StAgInG ', expected: 'staging' }
+  ] satisfies ReadonlyArray<{ input: string; expected: SetupProfile }>)('parses $input as the supported $expected profile', ({ input, expected }) => {
+    const inputConfig: Record<string, unknown> = JSON.parse(createDefaultSetupConfig(expected));
+    inputConfig.profile = input;
 
-    expect(parseSetupConfig(config).profile).toBe('staging');
+    const profile: SetupProfile = parseSetupConfig(inputConfig).profile;
+
+    expect(profile).toBe(expected);
   });
 
-  it('rejects profiles outside production and staging', () => {
-    const config = JSON.parse(createDefaultSetupConfig('production'));
-    config.profile = 'local';
+  it.each(['production-like', 'stage', 'local'])('rejects the unsupported %s profile instead of selecting a deployment fallback', (profile) => {
+    const inputConfig: Record<string, unknown> = JSON.parse(createDefaultSetupConfig('production'));
+    inputConfig.profile = profile;
 
-    expect(() => parseSetupConfig(config)).toThrow('profile must be production or staging.');
+    expect(() => parseSetupConfig(inputConfig)).toThrow('profile must be production or staging.');
   });
 
   it('parses a private-only setup config', () => {

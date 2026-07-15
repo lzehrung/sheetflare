@@ -1,7 +1,5 @@
 # Local Admin Cutover Plan: Replace Cloudflare Pages Admin with a Loopback-Only Local Vite Admin Proxy
 
-Status: implementation-ready. Drafted 2026-07-12 and independently reviewed for architecture, security, and operations on 2026-07-14. Re-locate cited symbols before editing if the tree has moved; line numbers are navigational hints, not patch anchors.
-
 ## Summary
 
 Sheetflare currently ships the admin UI two ways: a local Vite dev server, and a deployed Cloudflare Pages site (`sheetflare-admin` / `sheetflare-staging-admin`) with Pages Functions that Basic-Auth-gate the site and proxy `/v1`, `/health`, `/ready`, `/doc`, `/docs` to the Worker API. This plan removes the Pages control plane entirely and makes the loopback-bound local Vite server the only admin UI runtime. The deployed Worker API (`apps/api`) remains the sole remote authorization boundary: bootstrap bearer token or scoped `sfk_` API keys, route scopes, and per-key rate limits are unchanged. No new server, dependency, or framework is added; no CORS is opened on the Worker; no credential is ever persisted. Setup/doctor/deploy become Worker-only, legacy config and local-state files migrate automatically, Pages-only code/tests/workflows/scripts are deleted, and docs are rewritten around two commands: `npm run setup` (deploy/operate the API) and `npm run dev:admin` (launch the local admin UI).
@@ -219,10 +217,10 @@ Anchors are current line numbers; adjust to content, not numbers.
 4. `docs/operator-runbook.md`: add 'Run The Admin UI Locally' after 'Bootstrap Setup' (command, credential-per-session UX, loopback warning, scoped-key guidance, and local Worker override). Rewrite the doctor sentence near line 35 so it mentions only Worker readiness, Google credential, and Drive-watch checks; the later admin task guidance remains.
 5. `apps/admin/README.md`: rewrite 'Important Files' (drop `functions/*`; add `vite-proxy.ts`) and 'Key Insights' (loopback-only server boundary, local header-to-Bearer translation, HTTPS remote target, security headers, ephemeral credentials, unchanged UI features). Delete Pages auth-gate bullets.
 6. `contributor-staging.md`: delete Pages asset rows; change local-state wording near line 46 from 'local admin-site state' to API deployment state; fix flow text to Worker secrets/API deployment only; replace the hosted admin target with the local launch command against staging; add the explicit local Worker override for contributor UI work; update the raw-workflow caveat.
-7. `workers-cache-handoff.md`: update Worker-secrets/API-deploy wording and remove the 'Admin Pages' resource row.
-8. `docs/workers-cache-plan.md` line 164: annotate: '(historical - the Pages proxy was removed by the local-admin cutover; admin responses keep no-store at the Worker)'.
+7. `workers-cache-handoff.md`: remove the obsolete admin Pages resource and make the local admin command the only supported control-plane UI path.
+8. `docs/workers-cache-plan.md`: keep the current Worker cache invariants unchanged; remove obsolete Pages references rather than adding historical annotations.
 
-Acceptance criteria: repository search for `pages.dev|Pages|ADMIN_UI_|[Bb]asic[- ][Aa]uth|protected admin|admin-site|deploy:admin:raw` across `README.md`, `docs/`, `contributor-staging.md`, `workers-cache-handoff.md`, and `apps/admin/README.md` yields only the intentional historical note or generic non-Cloudflare uses. Every documented npm command exists in the root or owning workspace `package.json`.
+Acceptance criteria: repository search for `pages.dev|Pages|ADMIN_UI_|[Bb]asic[- ][Aa]uth|protected admin|admin-site|deploy:admin:raw` across `README.md`, `docs/`, `contributor-staging.md`, `workers-cache-handoff.md`, and `apps/admin/README.md` yields no obsolete hosted-admin guidance. Every documented npm command exists in the root or owning workspace `package.json`.
 
 ### Phase 7 - Full verification sweep
 
@@ -305,16 +303,10 @@ npm run dev:admin      # manual browser QA against the deployed API (see Phase 7
 
 ## 10. Risk Summary
 
-1. Local-state bricking (highest): `createSetupLocalStateFromUnknown` throws on unknown keys, and every returning operator's `.sheetflare*.local.json` contains `adminUrl` (verified on this machine). The Phase 4 tombstone-drop + regression tests are mandatory, not optional.
+1. Local-state bricking (highest): `createSetupLocalStateFromUnknown` rejects unknown keys, while returning operator state may contain `adminUrl`. The Phase 4 tombstone migration and regression tests are mandatory.
 2. Accidental network exposure of the credential-bearing proxy: mitigated by pinned `host: 127.0.0.1` + `strictPort`, the https-only rule for remote targets, and explicit docs prohibiting `--host 0.0.0.0`/tunnels. CLI flags can still override config - documentation is the only guard there.
 3. Loss of hosted security middleware: mitigated by applying equivalent CSP, anti-framing, nosniff, no-referrer, and noindex headers through both Vite server modes and directly testing the exported header contract.
 4. Coverage regression on the auth-translation hop: deleting `api-proxy.test.ts` removes the only direct test of header-to-Bearer translation; Phase 1's `vite-proxy.test.ts` must land BEFORE deletion.
 5. Setup type-coupling: caller-first sequencing plus temporary literals keeps each phase type-correct.
 6. Operator UX regression: no hosted URL; requires Node/repo and credential re-entry. Accepted and mitigated by zero-argument target resolution, explicit target logging, and docs.
 7. Rollback debt: after 14 days and Pages deletion, rollback requires full Pages reprovisioning. The plan makes that cliff explicit.
-
-## 11. Plan Review Record
-
-- Architecture review: checked file/symbol inventory, sequencing, migrations, test coverage, and documentation deletion surface. Corrections incorporated: verify-only Wrangler prerequisite, five stale Pages-era documentation statements, raw deploy command removal, dead redaction helper deletion, ESM-relative local-state resolution, blank-env semantics, and fixture count.
-- Security and operations review: checked auth/CORS boundaries, loopback exposure, credential lifecycle, response headers, live-verification prerequisites, target validation, rollback executability, decommission order, staging/local-development behavior, and token narrowing. Corrections incorporated: security headers, explicit invalid-state behavior, conditional live checks, retained legacy deploy config through rollback, and narrowed E2E host contract.
-- Review result after incorporation: no architectural resequencing or API/data-plane change required. Implementation remains a clean deletion-oriented cutover with automated regression coverage before destructive removal.

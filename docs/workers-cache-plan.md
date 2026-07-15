@@ -1,258 +1,130 @@
-# Workers Cache Adoption Plan
+# Workers Cache Rollout
 
-## Goal
+## Contract
 
-Adopt Cloudflare Workers Cache idiomatically and safely for Sheetflare read paths without weakening auth, rate limiting, table freshness, client cache safety, or operator observability.
+Sheetflare caches eligible table reads in the `CachedTableReads` Worker entrypoint. Every external request still enters the default API gateway, which performs authentication, authorization, rate limiting, project/table resolution, and cache-key construction before dispatch.
 
-Workers Cache must sit behind the API gateway logic, not in front of it. The default API entrypoint must continue to run on every external request so it can authenticate, authorize, rate limit, assign request IDs, apply CORS, and log request completion.
+Cached operations:
 
-## Non-goals
+- list rows
+- get one row
+- get schema
 
-- Do not enable Workers Cache globally on the current default API entrypoint.
-- Do not cache admin/control-plane responses.
-- Do not cache `/ready`.
-- Do not add legacy `caches.default` cache-aside logic.
-- Do not use Workers Cache as a replacement for `TableDO`'s SQLite cache.
-- Do not cache mutation responses.
-- Do not use client-visible `Cache-Control: public` for private/API-key table data.
+The default entrypoint remains uncached. Admin, system, mutation, readiness, and documentation routes remain on that entrypoint.
 
-## Reviewed Corrections
+## Safety invariants
 
-This plan was reviewed against the current Cloudflare Workers Cache documentation and the current Sheetflare API implementation. Important corrections from that review:
+- The gateway authenticates and authorizes every request before cached dispatch.
+- `Authorization` is not forwarded to the cached entrypoint.
+- Cache keys contain the canonical query, project auth mode, and resolved table configuration signature; they contain no credential material.
+- The inner entrypoint uses `Cloudflare-CDN-Cache-Control` for edge-only caching and `Cache-Tag` for invalidation.
+- The outer gateway removes edge-only directives and tags and enforces client-visible `no-store`.
+- Errors, unsupported methods, stale/not-ready table state, disabled TTLs, and unsafe tags are not cached.
+- External-change debounce bounds the edge TTL.
+- Purge failures after committed changes preserve the successful mutation response, set `X-Sheetflare-Cache-Invalidation: failed`, and emit a structured internal error event.
+- `X-Sheetflare-Cache-Status` exposes the inner cache result without forwarding Cloudflare cache metadata directly.
 
-- Use `cloudflare-cdn-cache-control` or `cdn-cache-control` for edge-only caching of private/API-key read responses, not client-visible `Cache-Control: public`.
-- Strip `Authorization` before forwarding to the cached entrypoint, or the inner cache will be `BYPASS` on authenticated requests.
-- Do not cache errors by default; non-2xx responses from the cached entrypoint should carry `Cache-Control: no-store`.
-- Include a table config version/signature in the cache key or `ctx.props`, so table/project config changes cannot be hidden by an old Workers Cache hit.
-- Treat `cacheTtlSeconds = 0` as Workers Cache disabled for that table unless an explicit always-revalidate policy is designed.
-- Cap or bypass Workers Cache while `TableDO` reports a pending external-change debounce, so an old edge response cannot outlive the debounce window.
-- Do not cache request-specific headers from the inner entrypoint. The default gateway should add `x-request-id`, CORS, and rate-limit headers after the cached entrypoint returns.
-- Account for purge rate limits before purging on every high-frequency mutation path.
-- Confirm Hono access to the Cloudflare `ExecutionContext` through `c.executionCtx` and type access to `ctx.exports` before implementation.
+## Cache keys
 
-## Expected Architecture
+List-row keys normalize these semantic inputs in fixed order:
 
-```mermaid
-flowchart LR
-  Client --> Default["default API entrypoint<br/>cache disabled<br/>auth/rate-limit/logging"]
-  Default --> CachedReads["CachedTableReads entrypoint<br/>cache enabled<br/>GET/HEAD table reads only"]
-  CachedReads --> TableDO["TableDO SQLite cache"]
-  Mutations["writes / reindex / refresh / config / Drive webhook"] --> Purge["purge cached-read entrypoint"]
-  Purge --> CachedReads
+- `limit`
+- `cursor`
+- `sort`
+- `fields`
+- `filter`, serialized with deterministic UTF-16 code-unit key ordering
+
+Absent optional values stay absent. Project auth mode and a SHA-256 signature of resolved project/table configuration partition otherwise identical requests.
+
+Worker-version identity remains part of Cloudflare's default key. Do not enable `cross_version_cache` without a separate compatibility and rollback design.
+
+## Invalidation
+
+Every cached response carries project and table tags. Point reads also carry a row tag when that tag satisfies Cloudflare's printable-ASCII and length limits.
+
+Invalidate:
+
+- project tag after project replacement/deletion and Drive notifications
+- table tag after table replacement/deletion, row creation, refresh, and reindex
+- table plus row tag after row update/delete
+
+An invalid row tag falls back to table-only invalidation. Unsuccessful purge results and thrown purge failures are recorded as `cache.invalidation.failed`; Cloudflare error details remain internal.
+
+## Automated verification
+
+The API suite covers:
+
+- authentication, project boundaries, and rate limiting before cached dispatch
+- public/private access behavior
+- canonical query and configuration key partitioning
+- credential exclusion from requests, keys, and tags
+- cacheable and uncacheable response headers
+- namespaced cache-status propagation
+- default-gateway cache-metadata stripping and `no-store` enforcement
+- method/path/error handling
+- tag encoding and limits
+- project/table/row invalidation arguments
+- post-commit purge failure behavior
+- CORS exposure of Sheetflare cache health headers
+
+Run:
+
+```powershell
+npm --workspace @sheetflare/api test -- test/index.test.ts
+npm run check
 ```
 
-## Safety Rules
+The local harness invokes the entrypoint directly and records purge requests; it does not emulate Cloudflare cache storage. Staging validation is therefore required before production rollout.
 
-- The default API entrypoint stays uncached.
-- Every cached response sets explicit edge cache directives.
-- Private/API-key table data uses edge-only cache directives and client-visible `Cache-Control: private, no-store`.
-- Public-read table data may use client-visible public caching only if that is an intentional API contract.
-- Every cached table response has purgeable `Cache-Tag` values.
-- Purges are called from the same entrypoint that owns cached responses.
-- Private/authenticated external routes never return `Cache-Control: public` directly from the default entrypoint.
-- The default gateway strips `Authorization` before forwarding requests to the cached entrypoint.
-- If a cached response varies by caller, caller partitioning must move into `ctx.props` before caching.
-- Query strings used for cache keys must be canonicalized before dispatch to the cached entrypoint.
-- Config changes that can affect read behavior must change the cache key and purge affected entries.
-- Worker cache TTL must align with operator-visible table freshness semantics.
-- Error responses must be explicitly uncacheable unless a specific negative-cache contract is designed.
-- Cached responses must not include request-specific headers such as stale `x-request-id` or rate-limit values.
+## Staging gate
 
-## Phase 1 - Platform Prerequisites
+Deploy through the setup orchestrator:
 
-- [x] Upgrade API deploy scripts from `npx wrangler@4.85.0` to a Wrangler version that supports per-entrypoint Workers Cache, currently documented as `4.107.0+`.
-- [x] Update the API workspace `wrangler` dev dependency to the same supported range.
-- [x] Update Cloudflare Workers types if needed for `WorkerEntrypoint`, `ctx.exports`, `ctx.cache.purge`, and `cloudflare:workers` imports.
-- [x] Set the API Worker `compatibility_date` to a date compatible with Workers Cache usage.
-- [x] Use top-level `cache.enabled = true` plus `exports.default.cache.enabled = false` when Phase 2 adds the cached entrypoint; keep cache config absent until then so staging and production stay uncached.
-- [x] Keep staging uncached until the first end-to-end cache validation passes.
-- [x] Document that default Workers Cache keying is versioned, so deploys cold-start cached responses unless `cross_version_cache` is later enabled.
-- [x] Keep `cross_version_cache` disabled initially.
+```powershell
+npm run setup:staging -- --deploy
+npm run setup:staging -- --verify
+```
 
-## Phase 2 - Entrypoint Boundary
+The staging Wrangler configuration must keep the default entrypoint cache disabled and enable cache only for `CachedTableReads`.
 
-- [x] Add a named `CachedTableReads` Worker entrypoint to the API Worker.
-- [x] Configure `apps/api/wrangler.jsonc` so the default entrypoint cache is disabled.
-- [x] Enable cache only for `CachedTableReads` in the `exports` map.
-- [x] Keep the existing Hono app as the default exported API gateway.
-- [x] Confirm current Workers types expose `cache` on `ExecutionContext` but do not expose `ctx.exports`; Phase 3 must use the typed `cloudflare:workers` exports surface or add an explicit wrapper before routing through the cached entrypoint.
-- [x] Ensure `CachedTableReads` is invoked only through internal Worker-entrypoint calls, not as a new public unauthenticated route surface.
-- [x] Ensure custom RPC invalidation methods on `CachedTableReads` call `this.ctx.cache.purge(...)` so purges apply to the cached-read entrypoint, not the default entrypoint.
-- [x] Keep custom RPC methods for invalidation only; cacheable work itself must be exposed through `fetch()` because Workers Cache does not cache custom RPC method calls.
+Validate with a configured public-read table and a private API key:
 
-## Phase 3 - Cacheable Read Contract
+1. Request the same public list URL twice; `X-Sheetflare-Cache-Status` must move from a miss-equivalent status to `HIT`.
+2. Repeat with the private API key; auth and rate-limit headers must remain present while the inner response reaches `HIT`.
+3. Verify anonymous private reads remain `401`/`403` with `Cache-Control: no-store`.
+4. Populate a cached row/list response, mutate the row, and verify the next matching read is fresh.
+5. Repeat invalidation checks for table configuration replacement, refresh, reindex, deletion, and a Drive notification.
+6. Confirm every outer response receives a fresh `x-request-id` and contains neither `Cache-Tag` nor `Cloudflare-CDN-Cache-Control`.
+7. Exercise a response near and above the current Workers Cache response-size limit and record Cloudflare's bypass/rejection behavior.
+8. Confirm `cache.invalidation.failed` is absent during the run.
 
-- [x] Define internal cached-read request paths for list rows, get row, and get schema.
-- [x] Route `GET /v1/projects/{project}/tables/{table}/rows` through `CachedTableReads` only after existing auth, project-boundary checks, public-read checks, and table access loading succeed.
-- [x] Route `GET /v1/projects/{project}/tables/{table}/rows/{id}` through `CachedTableReads` only after existing auth and authorization checks succeed.
-- [x] Route `GET /v1/projects/{project}/tables/{table}/schema` through `CachedTableReads` only after existing auth and authorization checks succeed.
-- [x] Decide and test explicit `HEAD` behavior; Workers Cache shares `GET` and `HEAD` entries and may populate a full `GET` response for a cold `HEAD` request.
-- [x] Preserve current error behavior for auth failures, disabled reads, missing projects, missing tables, unsupported queries, and missing rows.
-- [x] Preserve current response schemas for list rows, get row, and schema responses.
-- [x] Centralize JSON/error serialization so the cached entrypoint cannot drift from existing API error shape.
-- [x] Keep mutation routes on the default entrypoint only.
-- [x] Strip `Authorization` and any other automatic-bypass request headers before calling the cached `CachedTableReads` entrypoint.
+Do not begin production rollout until every staging check passes.
 
-## Phase 4 - Cache Key and Config Partitioning
+## Production rollout
 
-- [x] Canonicalize list-row query strings before calling `CachedTableReads`.
-- [x] Sort query parameters deterministically.
-- [x] Omit or normalize default query values consistently; current list-row query has no implicit defaults, so absent values stay absent.
-- [x] Preserve every query component that changes semantics.
-- [x] Include project slug and table slug in the internal cached-read path.
-- [x] Include row ID in the point-read path.
-- [x] Include a table config version in the key, derived from a stable signature of the loaded project/table config and resolved runtime config.
-- [x] Include the public/private auth mode in the key so a project auth-mode change cannot reuse a response with the wrong client cache headers.
-- [x] Use `cf.cacheKey` on the `CachedTableReads.fetch(...)` loopback call for explicit canonical partitioning.
-- [x] Avoid `ctx.props` for Phase 4 because the required partitions fit in `cf.cacheKey`; future caller-specific data must still account for `ctx.props` being part of the Workers Cache key.
-- [x] Do not rely on hostname for cache partitioning; Workers Cache does not include host in the cache key.
-- [x] Do not put credentials, bearer tokens, raw API keys, or secret material in the key, URL, tags, or props.
-- [x] Add tests proving semantically identical query parameter order maps to one cached key when canonicalized.
-- [x] Add tests proving table/project config changes produce a different key or trigger a purge before old entries can be reused.
+1. Deploy with the default entrypoint disabled and `CachedTableReads` enabled.
+2. Run the staging gate against production smoke tables.
+3. Monitor cache status, TableDO request volume, Worker CPU, response size, purge failures, and stale-response reports.
+4. Keep `cacheTtlSeconds` within the operator-configured freshness envelope; `0` disables edge caching.
+5. Treat any auth bypass, client-cacheable private response, stale post-mutation response, or sustained purge failure as a rollback condition.
 
-## Phase 5 - Response Headers and Client Cache Safety
+## Rollback
 
-- [x] Set explicit edge cache directives on every successful cached table-read response.
-- [x] For private/API-key reads, use `cloudflare-cdn-cache-control: public, max-age=<effectiveTtl>, stale-if-error=0` for Workers Cache, and send client-visible `Cache-Control: private, no-store`.
-- [x] For anonymous `public-read` reads, keep client-visible `Cache-Control: private, no-store`; only the internal cached entrypoint carries edge-only cache directives.
-- [x] Use `max-age=<effectiveTtl>` for the edge freshness window.
-- [x] Compute `effectiveTtl` from `table.cacheTtlSeconds`, current `TableDO` freshness state, and any external-change debounce deadline.
-- [x] Treat `cacheTtlSeconds = 0` as `no-store` for Workers Cache unless a separate always-revalidate design is approved.
-- [x] If `TableDO` reports an external-change pending with a future `debounceUntil`, cap `effectiveTtl` to the remaining debounce window or bypass Workers Cache for that response.
-- [x] If `TableDO` reports stale state that should trigger synchronous refresh, do not cache the stale response beyond the intended current request.
-- [x] Do not add `stale-while-revalidate`; serving stale cached reads needs a separate explicit policy.
-- [x] Do not combine `s-maxage`, `must-revalidate`, or `proxy-revalidate` with `stale-while-revalidate`; Cloudflare documents that those directives disable stale serving.
-- [x] Set `stale-if-error=0` unless a bounded stale-on-error policy is explicitly chosen and documented.
-- [x] Add `Cache-Tag: project:<project>,table:<project>:<table>` to list and schema responses.
-- [x] Add `Cache-Tag: project:<project>,table:<project>:<table>,row:<project>:<table>:<id>` to point-read responses.
-- [x] Ensure tag values are printable ASCII and short enough for Cloudflare tag limits.
-- [x] Validate tag construction because Cloudflare silently drops invalid tags at storage time.
-- [x] Do not emit `Set-Cookie` on cached read responses.
-- [x] Add `Vary` only for request headers that actually affect representation.
-- [x] If `Vary` is used, normalize the varied request headers in the gateway to avoid unbounded variant fan-out.
-- [x] Never use `Vary: *`; it disables caching.
-- [x] Do not cache inner-entrypoint responses with `x-request-id`, `x-ratelimit-*`, or per-request CORS values; those are default-gateway response concerns.
-- [x] Add explicit `Cache-Control: no-store` to every non-2xx response produced by the cached entrypoint.
+Disable cache for `CachedTableReads` in the active Wrangler configuration and redeploy. The gateway and TableDO query path remain authoritative, so rollback changes performance rather than table semantics.
 
-## Phase 6 - Purge Contract
+After rollback, verify:
 
-- [x] Add `CachedTableReads.invalidateProject(projectSlug)` for project-wide config/external-change invalidation.
-- [x] Add `CachedTableReads.invalidateTable(projectSlug, tableSlug)`.
-- [x] Add `CachedTableReads.invalidateRow(projectSlug, tableSlug, rowId)` only as an optimization; table-level purge remains required for mutations.
-- [x] Purge table cache after successful row create.
-- [x] Purge table cache after successful row update.
-- [x] Purge table cache after successful row delete.
-- [x] Purge table cache after successful admin reindex.
-- [x] Purge table cache after admin refresh when the pre-refresh table state is stale or not ready.
-- [x] Purge table cache after table deletion so stale reads cannot survive table removal.
-- [x] Purge the project tag after project deletion so every table cache in that project is invalidated.
-- [x] Purge table cache after table config create/upsert when replacing an existing table.
-- [x] Purge project cache after project config changes that can affect auth mode, credential resolution, spreadsheet identity, or table resolution.
-- [x] Purge affected project cache and cap TTL for affected table cache when Google Drive notification records an external change.
-- [x] For automatic external-change reindex/sync, rely on notification-time project purge plus debounce-capped TTL so interim cached entries expire at the debounce deadline.
-- [x] Treat purge failures as operationally visible errors; do not silently continue as if cached reads are invalidated.
-- [x] Check Cloudflare purge semantics before introducing per-mutation purge calls; use coarse project/table tags, not per-cell/per-query purges.
-- [x] If write volume can exceed purge limits, prefer table-level short TTL, coalesced purges, or a documented degraded mode rather than silent best-effort invalidation.
-
-## Phase 7 - Admin and System No-cache Policy
-
-- [x] Keep `/ready` uncached.
-- [x] Keep admin/control-plane routes uncached.
-- [x] Keep API-key listing and creation routes uncached.
-- [x] Keep Google Drive watch status, retry advice, registration, stop, and notification routes uncached.
-- [x] Keep spreadsheet tab listing and inspection uncached unless a separate explicit admin cache policy is designed later.
-- [x] Preserve `cache-control: no-store` in the admin Pages API proxy.
-- [x] Add explicit no-store headers to dynamic default-entrypoint responses if default-entrypoint cache lookup is ever enabled for other reasons.
-- [x] Do not cache 401/403 admin or data-route authorization failures.
-- [x] Do not cache 404 table/project/row failures until negative caching and purge behavior are explicitly designed.
-
-## Phase 8 - Optional Docs Cache
-
-- [x] Decide `/doc` and `/docs` are not worth caching in this rollout.
-- [x] Keep docs on the default entrypoint with `cache-control: no-store`.
-- [x] Do not add a docs TTL until a separate explicit admin/docs cache policy is designed.
-- [x] Rely on Worker deploys and default no-store behavior instead of cross-version docs cache reuse.
-- [x] Keep docs behavior isolated from auth, readiness, and data-route caching behavior.
-- [x] Do not enable cache lookup on the default gateway just to cache docs; Cloudflare documents this as extra latency when most responses are `no-store`.
-
-## Phase 9 - Tests
-
-- [x] Add route-level tests proving default API auth still runs before cached reads.
-- [x] Add route-level tests proving default API rate limiting still runs before cached reads.
-- [x] Add route-level tests proving private-table anonymous reads are rejected even when a cached entry exists internally.
-- [x] Add route-level tests proving public-read anonymous reads can use cached responses safely.
-- [x] Add tests proving API-key authorized reads do not expose cached private data to unauthorized callers.
-- [x] Add tests proving forwarded cached-entrypoint requests strip `Authorization`.
-- [x] Add tests for edge-only cache headers on private/API-key reads.
-- [x] Add tests for client-visible cache headers on private/API-key reads.
-- [x] Add tests for public-read cache headers.
-- [x] Add tests for cache tags on list, point-read, and schema responses.
-- [x] Add tests proving non-2xx cached-entrypoint responses are `no-store`.
-- [x] Add tests for purge calls after create, update, delete, reindex, refresh, table delete, project delete, and config replacement.
-- [x] Add tests for canonical query key generation.
-- [x] Add tests for config-version key partitioning.
-- [x] Add tests for `cacheTtlSeconds = 0` bypass behavior.
-- [x] Add tests for pending external-change debounce TTL capping or bypass behavior.
-- [x] Add tests for stale/config-change behavior so Workers Cache cannot bypass `TableDO` cache-signature correctness.
-- [x] Add tests for purge failure handling.
-- [x] Add tests confirming default gateway overwrites or appends fresh `x-request-id`, CORS, and rate-limit headers after a cached inner response.
-- [x] Add tests for explicit `HEAD` behavior or explicit rejection.
-
-## Phase 10 - Staging Verification
-
-- [x] Deployable staging config keeps default entrypoint cache disabled and enables `CachedTableReads` cache.
-- [ ] Deploy to staging with `CachedTableReads` enabled and default entrypoint disabled for cache.
-  - 2026-07-07 session note: deploy attempt was blocked because Wrangler requires `CLOUDFLARE_API_TOKEN` in this non-interactive environment.
-- [ ] Request the same public-read list endpoint twice and verify `Cf-Cache-Status` changes from `MISS` to `HIT` or documented equivalent behavior.
-- [ ] Request the same private/API-key list endpoint twice and verify gateway auth still runs while the inner response can hit Workers Cache.
-- [ ] Verify private/API-key responses are not browser/proxy-cacheable through client-visible headers.
-- [ ] Verify private anonymous reads still return `401` or `403` and are not served from cache.
-- [ ] Verify an API-key private read still succeeds after gateway auth.
-- [ ] Mutate a row and verify the next matching read is not stale beyond the documented purge behavior.
-- [ ] Reindex a table and verify cached list/schema responses are invalidated.
-- [ ] Change table config and verify stale Workers Cache entries do not survive the change.
-- [ ] Trigger or simulate a Drive external-change notification and verify stale edge responses do not outlive the debounce policy.
-- [ ] Confirm request logs still appear for default gateway hits, including cached-read hits.
-- [ ] Confirm rate-limit headers still appear on default gateway responses when applicable.
-- [ ] Confirm `x-request-id` is fresh on default gateway responses and not cached from an old inner response.
-- [ ] Confirm errors from the cached entrypoint are not cached.
-- [ ] Confirm response sizes for cached list pages are below current Workers Cache limits.
-
-## Phase 11 - Production Rollout
-
-- [ ] Roll out with default Worker-version cache keying; do not enable `cross_version_cache` initially.
-- [ ] Monitor `Cf-Cache-Status` on smoke/load traffic.
-- [ ] Monitor Workers cache hit ratio, misses, bypasses, and updating responses in Workers Observability.
-- [ ] Monitor TableDO request volume and API Worker CPU time before and after rollout.
-- [ ] Monitor purge failures and purge rate-limit responses.
-- [ ] Monitor stale response reports around Drive external-change notifications and table mutations.
-- [ ] Keep a rollback path that disables the `CachedTableReads` entrypoint cache without changing table semantics.
-- [ ] Do not enable `cross_version_cache` until deployment invalidation and version-tag purging are explicitly designed.
-
-## Acceptance Criteria
-
-- [ ] Default API entrypoint still runs for every external API request.
-- [ ] Auth and rate limiting cannot be bypassed by a Workers Cache hit.
-- [ ] Only GET/HEAD table read responses are cacheable.
-- [ ] All cached table responses have explicit edge cache directives and `Cache-Tag` headers.
-- [ ] Private/API-key responses are not client-cacheable unless a future explicit contract says otherwise.
-- [ ] Mutations and config changes purge affected cached read responses or change their cache key before reuse.
-- [ ] Public-read behavior remains correct before and after cached entries exist.
-- [ ] Private-table behavior remains correct before and after cached entries exist.
-- [ ] `cacheTtlSeconds` remains the operator-facing freshness contract.
-- [ ] `cacheTtlSeconds = 0` does not accidentally create stale edge responses.
-- [ ] Pending external-change debounce state cannot be hidden by a longer Workers Cache TTL.
-- [ ] Non-2xx responses from cached read paths are not cached.
-- [ ] Staging verification observes expected `Cf-Cache-Status` transitions.
-- [ ] `npm run check` passes after implementation.
+- private and public reads
+- mutation freshness
+- cache status and reindex operations
+- Drive notification handling
+- default-gateway `Cache-Control: no-store`
 
 ## References
 
-- Cloudflare announcement: https://blog.cloudflare.com/workers-cache/
-- Workers Cache overview: https://developers.cloudflare.com/workers/cache/
-- Workers Cache configuration: https://developers.cloudflare.com/workers/cache/configuration/
-- Workers Cache keys: https://developers.cloudflare.com/workers/cache/cache-keys/
-- Workers Cache purge API: https://developers.cloudflare.com/workers/cache/purge/
-- Workers Cache debugging: https://developers.cloudflare.com/workers/cache/debugging/
-- Workers Cache examples: https://developers.cloudflare.com/workers/cache/examples/
-- Workers Cache limitations: https://developers.cloudflare.com/workers/cache/limitations/
+- https://blog.cloudflare.com/workers-cache/
+- https://developers.cloudflare.com/workers/cache/
+- https://developers.cloudflare.com/workers/cache/cache-keys/
+- https://developers.cloudflare.com/workers/cache/purge/
+- https://developers.cloudflare.com/workers/cache/debugging/
+- https://developers.cloudflare.com/workers/cache/configuration/

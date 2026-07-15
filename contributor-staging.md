@@ -54,13 +54,11 @@ npm run setup:staging -- --smoke
 npm run setup:staging -- --verify
 ```
 
-## GitHub Workflows
+## Deployment authority
 
-The checked-in staging workflows are not currently provisioned with repository secrets and have never deployed staging. Local `npm run setup:staging` is authoritative until CI is migrated to invoke the same setup orchestrator with a securely supplied staging setup config.
+`npm run setup:staging` is the supported staging deployment path. It owns Google credentials, Worker and Pages secrets, API-origin configuration, bootstrap, smoke validation, Drive watches, and deployment verification.
 
-Do not use the raw workflows as a substitute for setup: they do not currently own the complete Google credential, Drive webhook, Pages API-origin, bootstrap, smoke, and verification lifecycle.
-
-If unattended staging deployment is added later, it must map environment-specific secret storage into setup's standard inputs and invoke the same setup pipeline rather than duplicating Wrangler commands.
+The raw GitHub workflows cover only individual asset deployment and are not substitutes for the setup orchestrator. Any CI-owned staging deployment must supply the standard setup inputs and invoke the same setup contract rather than duplicating lifecycle commands.
 
 ## What Does Not Belong In Consumer Docs
 

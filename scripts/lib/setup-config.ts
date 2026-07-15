@@ -27,7 +27,7 @@ type SetupSmokeConfig = {
 };
 
 export type SetupConfig = {
-  profile: string;
+  profile: SetupProfile;
   deploy: {
     api: boolean;
     admin: boolean;
