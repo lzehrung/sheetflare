@@ -69,6 +69,7 @@ import {
   type ProjectDoResponse,
   type RefreshTableCacheResult,
   type ResolvedProjectTableResult,
+  type ResolvedTableConfigSnapshot,
   type ReindexTableResult,
   type RateLimitDoResponse,
   type TableDoResponse,
@@ -1021,7 +1022,10 @@ async function invalidateCachedProjectsForSpreadsheet(c: AppContext, spreadsheet
   const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
     type: 'control.projects.list'
   });
-  const result = (response as { type: 'control.projects.list.result'; result: AdminListProjectsResult }).result;
+  if (response.type !== 'control.projects.list.result') {
+    throw new ServiceUnavailableError('Unexpected control plane projects list response.');
+  }
+  const result = response.result;
 
   for (const project of result.data) {
     if (project.spreadsheetId === spreadsheetId) {
@@ -1614,6 +1618,10 @@ type CachedTableReadOperation =
   | { kind: 'getRow'; projectSlug: string; tableSlug: string; rowId: string }
   | { kind: 'getSchema'; projectSlug: string; tableSlug: string };
 
+export type CachedTableReadProps = Readonly<{
+  resolvedConfig: ResolvedTableConfigSnapshot;
+}>;
+
 function noStoreJsonResponse(body: unknown, status = 200) {
   return Response.json(body, {
     status,
@@ -1691,13 +1699,18 @@ function parseCachedTableReadRequest(request: Request): CachedTableReadOperation
   throw new NotFoundError('Cached table read route is not configured.');
 }
 
-async function runCachedTableRead(env: Env, operation: CachedTableReadOperation) {
+async function runCachedTableRead(
+  env: Env,
+  operation: CachedTableReadOperation,
+  resolvedConfig: ResolvedTableConfigSnapshot
+) {
   if (operation.kind === 'listRows') {
     const response = await doRpc<TableDoResponse>(getTableStub(env, operation.projectSlug, operation.tableSlug), {
       type: 'table.rows.list',
       projectSlug: operation.projectSlug,
       tableSlug: operation.tableSlug,
-      query: operation.query
+      query: operation.query,
+      resolvedConfig
     });
     if (response.type !== 'table.rows.list.result') {
       throw new ServiceUnavailableError('Unexpected table rows list response.');
@@ -1711,7 +1724,8 @@ async function runCachedTableRead(env: Env, operation: CachedTableReadOperation)
       type: 'table.row.get',
       projectSlug: operation.projectSlug,
       tableSlug: operation.tableSlug,
-      rowId: operation.rowId
+      rowId: operation.rowId,
+      resolvedConfig
     });
     if (response.type !== 'table.row.get.result') {
       throw new ServiceUnavailableError('Unexpected table row get response.');
@@ -1723,7 +1737,8 @@ async function runCachedTableRead(env: Env, operation: CachedTableReadOperation)
   const response = await doRpc<TableDoResponse>(getTableStub(env, operation.projectSlug, operation.tableSlug), {
     type: 'table.schema.get',
     projectSlug: operation.projectSlug,
-    tableSlug: operation.tableSlug
+    tableSlug: operation.tableSlug,
+    resolvedConfig
   });
   if (response.type !== 'table.schema.get.result') {
     throw new ServiceUnavailableError('Unexpected table schema get response.');
@@ -1732,11 +1747,16 @@ async function runCachedTableRead(env: Env, operation: CachedTableReadOperation)
   return response.result;
 }
 
-async function getCachedTableReadCacheStatus(env: Env, operation: CachedTableReadOperation) {
+async function getCachedTableReadCacheStatus(
+  env: Env,
+  operation: CachedTableReadOperation,
+  resolvedConfig: ResolvedTableConfigSnapshot
+) {
   const response = await doRpc<TableDoResponse>(getTableStub(env, operation.projectSlug, operation.tableSlug), {
     type: 'table.cache.get',
     projectSlug: operation.projectSlug,
-    tableSlug: operation.tableSlug
+    tableSlug: operation.tableSlug,
+    resolvedConfig
   });
   if (response.type !== 'table.cache.get.result') {
     throw new ServiceUnavailableError('Unexpected table cache status response.');
@@ -1806,9 +1826,13 @@ function cachedTableReadSuccessHeaders(operation: CachedTableReadOperation, cach
   return headers;
 }
 
-async function cachedTableReadSuccessResponse(env: Env, operation: CachedTableReadOperation) {
-  const result = await runCachedTableRead(env, operation);
-  const cacheStatus = await getCachedTableReadCacheStatus(env, operation);
+async function cachedTableReadSuccessResponse(
+  env: Env,
+  operation: CachedTableReadOperation,
+  resolvedConfig: ResolvedTableConfigSnapshot
+) {
+  const result = await runCachedTableRead(env, operation, resolvedConfig);
+  const cacheStatus = await getCachedTableReadCacheStatus(env, operation, resolvedConfig);
   return Response.json(result, {
     headers: cachedTableReadSuccessHeaders(operation, cacheStatus)
   });
@@ -1917,7 +1941,11 @@ async function createCachedTableReadRequest(c: AppContext, pathname: string, opt
 
 async function fetchCachedTableRead(c: AppContext, pathname: string, options: CachedTableReadFetchOptions) {
   const { request, cacheKey } = await createCachedTableReadRequest(c, pathname, options);
-  return workerExports.CachedTableReads.fetch(request, {
+  return workerExports.CachedTableReads({
+    props: {
+      resolvedConfig: options.tableAccess.resolvedConfig
+    }
+  }).fetch(request, {
     cf: {
       cacheKey
     }
@@ -2012,7 +2040,7 @@ function getRowCacheTag(projectSlug: string, tableSlug: string, rowId: string) {
   return `row:${encodeCacheTagPart(projectSlug)}:${encodeCacheTagPart(tableSlug)}:${encodeCacheTagPart(rowId)}`;
 }
 
-export class CachedTableReads extends WorkerEntrypoint<Env> {
+export class CachedTableReads extends WorkerEntrypoint<Env, CachedTableReadProps> {
   async fetch(request: Request): Promise<Response> {
     if (request.method === 'HEAD') {
       return new Response(null, {
@@ -2038,7 +2066,11 @@ export class CachedTableReads extends WorkerEntrypoint<Env> {
     }
 
     try {
-      return await cachedTableReadSuccessResponse(this.env, parseCachedTableReadRequest(request));
+      return await cachedTableReadSuccessResponse(
+        this.env,
+        parseCachedTableReadRequest(request),
+        this.ctx.props.resolvedConfig
+      );
     } catch (error) {
       return noStoreErrorResponse(error);
     }

@@ -1,3 +1,5 @@
+import type { ResolvedTableConfigSnapshot } from '@sheetflare/contracts';
+
 type CachePurgeOptions =
   | { purgeEverything: true }
   | { tags?: string[]; pathPrefixes?: string[] };
@@ -29,32 +31,46 @@ export type CachedWorkerEntrypoint = {
   invalidateRow(projectSlug: string, tableSlug: string, rowId: string): Promise<void>;
 };
 
-export const exports: {
-  CachedTableReads: CachedWorkerEntrypoint;
-} = {
-  CachedTableReads: {
-    async fetch() {
-      return Response.json(
-        {
-          error: {
-            code: 'SERVICE_UNAVAILABLE',
-            message: 'Cached table read test entrypoint is not configured.',
-            details: null
-          }
-        },
-        { status: 503 }
-      );
-    },
-    async invalidateProject() {
-      throw new Error('Cached table read test entrypoint is not configured.');
-    },
-    async invalidateTable() {
-      throw new Error('Cached table read test entrypoint is not configured.');
-    },
-    async invalidateRow() {
-      throw new Error('Cached table read test entrypoint is not configured.');
-    }
+export type CachedWorkerEntrypointProps = Readonly<{
+  resolvedConfig: ResolvedTableConfigSnapshot;
+}>;
+
+export type CachedWorkerEntrypointBinding = CachedWorkerEntrypoint &
+  ((options: { props: CachedWorkerEntrypointProps }) => Pick<CachedWorkerEntrypoint, 'fetch'>);
+
+const unconfiguredCachedWorkerEntrypoint: CachedWorkerEntrypoint = {
+  async fetch() {
+    return Response.json(
+      {
+        error: {
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'Cached table read test entrypoint is not configured.',
+          details: null
+        }
+      },
+      { status: 503 }
+    );
+  },
+  async invalidateProject() {
+    throw new Error('Cached table read test entrypoint is not configured.');
+  },
+  async invalidateTable() {
+    throw new Error('Cached table read test entrypoint is not configured.');
+  },
+  async invalidateRow() {
+    throw new Error('Cached table read test entrypoint is not configured.');
   }
+};
+
+const unconfiguredCachedWorkerBinding: CachedWorkerEntrypointBinding = Object.assign(
+  () => unconfiguredCachedWorkerEntrypoint,
+  unconfiguredCachedWorkerEntrypoint
+);
+
+export const exports: {
+  CachedTableReads: CachedWorkerEntrypointBinding;
+} = {
+  CachedTableReads: unconfiguredCachedWorkerBinding
 };
 
 export class WorkerEntrypoint<Env = Record<string, never>, Props = Record<string, never>> {

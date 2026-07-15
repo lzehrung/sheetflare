@@ -1,10 +1,15 @@
 import { z } from 'zod';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { exports as workerExports } from 'cloudflare:workers';
-import type { TableDoResponse } from '@sheetflare/contracts';
+import {
+  resolvedTableConfigSnapshotSchema,
+  type ControlPlaneDoResponse,
+  type TableDoResponse
+} from '@sheetflare/contracts';
 import type { Env } from '../src/env';
 import {
   CachedTableReads,
+  type CachedTableReadProps,
   __getRecentApiKeyTouchCacheSizeForTests,
   __resetRecentApiKeyTouchesForTests,
   __touchApiKeyIfNeededForTests,
@@ -18,6 +23,31 @@ type CachedReadRequestRecord = {
   method: string;
   authorization: string | null;
   cacheKey: string | null;
+};
+
+const resolvedTableConfigSnapshot = resolvedTableConfigSnapshotSchema.parse({
+  projectSlug: 'demo',
+  tableSlug: 'users',
+  sheetTabName: 'Users',
+  idColumn: '_id',
+  indexedFields: ['_id'],
+  readOnlyFields: [],
+  fieldRules: {},
+  headerRow: 1,
+  dataStartRow: 2,
+  readEnabled: true,
+  createEnabled: true,
+  updateEnabled: true,
+  deleteEnabled: true,
+  cacheTtlSeconds: 15,
+  createdAt: '2026-04-26T00:00:00.000Z',
+  updatedAt: '2026-04-26T00:00:00.000Z',
+  spreadsheetId: 'sheet-1',
+  googleCredentialRef: 'default'
+});
+
+const defaultCachedTableReadProps: CachedTableReadProps = {
+  resolvedConfig: resolvedTableConfigSnapshot
 };
 
 class FakeDurableObjectStub {
@@ -110,6 +140,7 @@ function createEnv(options?: {
   projectAccessStatus?: 200 | 404 | 500;
   tableCacheClearStatus?: 200 | 503;
   tableCacheGetUnexpectedResponse?: boolean;
+  controlProjectsListUnexpectedResponse?: boolean;
   tableRowsListStatus?: 200 | 503;
   tableCacheTtlSeconds?: number;
   tableCacheStatus?: 'idle' | 'syncing' | 'ready' | 'error';
@@ -313,6 +344,14 @@ function createEnv(options?: {
       });
     }
 
+    if (body.type === 'control.projects.list' && options?.controlProjectsListUnexpectedResponse === true) {
+      const response = {
+        type: 'control.project.upsert.result',
+        result: { ok: true }
+      } satisfies ControlPlaneDoResponse;
+      return Response.json(response);
+    }
+
     return Response.json({
       type: 'control.projects.list.result',
       result: {
@@ -352,6 +391,8 @@ function createEnv(options?: {
       sheetTabName: 'Users',
       idColumn: '_id',
       indexedFields: ['_id'],
+      readOnlyFields: [],
+      fieldRules: {},
       headerRow: 1,
       dataStartRow: 2,
       readEnabled: true,
@@ -361,6 +402,10 @@ function createEnv(options?: {
       cacheTtlSeconds: options?.tableCacheTtlSeconds ?? 15,
       createdAt: '2026-04-26T00:00:00.000Z',
       updatedAt: '2026-04-26T00:00:00.000Z'
+    };
+    const resolvedConfig = {
+      ...resolvedTableConfigSnapshot,
+      cacheTtlSeconds: table.cacheTtlSeconds
     };
 
     if (body.type === 'project.create') {
@@ -455,11 +500,7 @@ function createEnv(options?: {
               defaultAuthMode: options?.defaultAuthMode ?? 'private'
             },
             table,
-            resolvedConfig: {
-              ...table,
-              spreadsheetId: 'sheet-1',
-              googleCredentialRef: 'default'
-            }
+            resolvedConfig
           }
         }
       });
@@ -826,7 +867,11 @@ function createEnv(options?: {
     SHEETFLARE_ALLOWED_ORIGINS: options?.allowedOrigins
   };
 
-  workerExports.CachedTableReads.fetch = async (request, init) => {
+  const fetchCachedTableRead = async (
+    props: CachedTableReadProps,
+    request: Request,
+    init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]
+  ) => {
     cachedReadRequests.push({
       url: request.url,
       method: request.method,
@@ -834,6 +879,7 @@ function createEnv(options?: {
       cacheKey: init?.cf?.cacheKey ?? null
     });
     const response = await createCachedTableReadsHarness(env, {
+      props,
       purgeCalls: cachedReadPurgeCalls,
       purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
     }).entrypoint.fetch(request);
@@ -842,27 +888,34 @@ function createEnv(options?: {
     }
     return response;
   };
-
-  workerExports.CachedTableReads.invalidateProject = async (projectSlug) => {
-    await createCachedTableReadsHarness(env, {
-      purgeCalls: cachedReadPurgeCalls,
-      purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
-    }).entrypoint.invalidateProject(projectSlug);
-  };
-
-  workerExports.CachedTableReads.invalidateTable = async (projectSlug, tableSlug) => {
-    await createCachedTableReadsHarness(env, {
-      purgeCalls: cachedReadPurgeCalls,
-      purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
-    }).entrypoint.invalidateTable(projectSlug, tableSlug);
-  };
-
-  workerExports.CachedTableReads.invalidateRow = async (projectSlug, tableSlug, rowId) => {
-    await createCachedTableReadsHarness(env, {
-      purgeCalls: cachedReadPurgeCalls,
-      purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
-    }).entrypoint.invalidateRow(projectSlug, tableSlug, rowId);
-  };
+  workerExports.CachedTableReads = Object.assign(
+    ({ props }: { props: CachedTableReadProps }) => ({
+      fetch: (request: Request, init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]) =>
+        fetchCachedTableRead(props, request, init)
+    }),
+    {
+      fetch: (request: Request, init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]) =>
+        fetchCachedTableRead(defaultCachedTableReadProps, request, init),
+      async invalidateProject(projectSlug: string) {
+        await createCachedTableReadsHarness(env, {
+          purgeCalls: cachedReadPurgeCalls,
+          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
+        }).entrypoint.invalidateProject(projectSlug);
+      },
+      async invalidateTable(projectSlug: string, tableSlug: string) {
+        await createCachedTableReadsHarness(env, {
+          purgeCalls: cachedReadPurgeCalls,
+          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
+        }).entrypoint.invalidateTable(projectSlug, tableSlug);
+      },
+      async invalidateRow(projectSlug: string, tableSlug: string, rowId: string) {
+        await createCachedTableReadsHarness(env, {
+          purgeCalls: cachedReadPurgeCalls,
+          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
+        }).entrypoint.invalidateRow(projectSlug, tableSlug, rowId);
+      }
+    }
+  );
 
   Object.defineProperty(env, '__rateLimitRequests', {
     value: rateLimitRequests,
@@ -938,15 +991,20 @@ function createTracing(): Tracing {
 
 function createCachedTableReadsHarness(
   env: Env = createEnv(),
-  options?: { purgeCalls?: CachePurgeCall[]; purgeShouldFail?: boolean; purgeResultShouldFail?: boolean }
+  options?: {
+    props?: CachedTableReadProps;
+    purgeCalls?: CachePurgeCall[];
+    purgeShouldFail?: boolean;
+    purgeResultShouldFail?: boolean;
+  }
 ): { entrypoint: CachedTableReads; purgeCalls: CachePurgeCall[] } {
   const purgeCalls = options?.purgeCalls ?? [];
-  const ctx: ExecutionContext = {
+  const ctx: ExecutionContext<CachedTableReadProps> = {
     waitUntil(promise: Promise<unknown>) {
       void promise;
     },
     passThroughOnException() {},
-    props: {},
+    props: options?.props ?? defaultCachedTableReadProps,
     cache: {
       async purge(purgeOptions) {
         purgeCalls.push(purgeOptions);
@@ -1765,6 +1823,72 @@ describe('api routes', () => {
     expectCachedReadPurgeCalls(env, [
       ['project:demo']
     ]);
+  });
+
+  it('returns a controlled service unavailable error when an accepted Drive notification gets an unexpected project list response', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const app = createApp();
+    const path = '/v1/system/google/drive/notifications';
+
+    try {
+      const response = await app.request(
+        path,
+        {
+          method: 'POST',
+          headers: {
+            'x-goog-channel-id': 'channel-1',
+            'x-goog-resource-id': 'resource-1',
+            'x-goog-resource-state': 'update',
+            'x-goog-message-number': '2',
+            'x-goog-channel-token': 'drive-secret'
+          }
+        },
+        createEnv({ controlProjectsListUnexpectedResponse: true })
+      );
+
+      expect(response.status).toBe(503);
+      const responseBody: unknown = await response.json();
+      expect(responseBody).toEqual({
+        error: {
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'Unexpected control plane projects list response.',
+          details: null
+        }
+      });
+
+      const requestId = response.headers.get('x-request-id');
+      expect(requestId).toEqual(expect.any(String));
+      if (requestId === null) {
+        throw new Error('Expected the response to include a request ID.');
+      }
+      const matchingEvents = errorSpy.mock.calls.flatMap(([errorLog]) => {
+        if (typeof errorLog !== 'string') {
+          return [];
+        }
+        try {
+          const event: unknown = JSON.parse(errorLog);
+          const identity = z.object({
+            event: z.literal('request.error'),
+            path: z.literal(path),
+            requestId: z.literal(requestId)
+          }).safeParse(event);
+          return identity.success ? [event] : [];
+        } catch {
+          return [];
+        }
+      });
+      expect(matchingEvents).toHaveLength(1);
+      expect(matchingEvents[0]).toMatchObject({
+        event: 'request.error',
+        method: 'POST',
+        path,
+        requestId,
+        errorName: 'ServiceUnavailableError',
+        errorMessage: 'Unexpected control plane projects list response.'
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('rejects Google Drive webhook notifications with the wrong verification token', async () => {
@@ -3493,7 +3617,7 @@ describe('api routes', () => {
     expect(__getRecentApiKeyTouchCacheSizeForTests()).toBe(10_000);
   });
 
-  it('routes authorized list-row reads through the cached entrypoint after resolving table access', async () => {
+  it('sends resolved config to cached list-row origin reads without leaking it into the cache URL or key', async () => {
     const app = createApp();
     const env = createEnv() as Env & {
       __controlPlaneRequests: Array<{ type: string }>;
@@ -3528,18 +3652,34 @@ describe('api routes', () => {
     expect(env.__controlPlaneRequests[0]?.type).toBe('control.api-key.verify');
     expect(env.__projectRequests).toContain('project.table.resolve');
     expect(env.__projectRequests).not.toContain('project.get');
-    expect(env.__cachedReadRequests).toEqual([
-      {
-        url: 'http://localhost/internal/cache/v1/projects/demo/tables/users/rows?limit=10',
-        method: 'GET',
-        authorization: null,
-        cacheKey: expect.any(String)
-      }
-    ]);
-    expect(env.__tableRequests[0]).toEqual({
+    const cachedReadRequest = getOnlyCachedReadRequest(env);
+    expect(cachedReadRequest).toEqual({
+      url: 'http://localhost/internal/cache/v1/projects/demo/tables/users/rows?limit=10',
+      method: 'GET',
+      authorization: null,
+      cacheKey: expect.any(String)
+    });
+    const cacheKey = requireCacheKey(cachedReadRequest);
+    expectNoCredentialMaterial(cachedReadRequest.url);
+    expectNoCredentialMaterial(cacheKey);
+    for (const rawConfigMarker of ['sheet-1', 'googleCredentialRef', 'sheetTabName', 'cacheTtlSeconds']) {
+      expect(cachedReadRequest.url).not.toContain(rawConfigMarker);
+      expect(cacheKey).not.toContain(rawConfigMarker);
+    }
+    const expectedResolvedConfig = {
+      spreadsheetId: 'sheet-1',
+      googleCredentialRef: 'default',
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      cacheTtlSeconds: 15
+    };
+    expect(env.__tableRequests.find(({ type }) => type === 'table.rows.list')).toMatchObject({
       type: 'table.rows.list',
-      resolvedConfig: undefined,
-      requestContext: undefined
+      resolvedConfig: expectedResolvedConfig
+    });
+    expect(env.__tableRequests.find(({ type }) => type === 'table.cache.get')).toMatchObject({
+      type: 'table.cache.get',
+      resolvedConfig: expectedResolvedConfig
     });
   });
 
@@ -3752,9 +3892,9 @@ describe('api routes', () => {
     expect(schemaCacheKeyUrl.searchParams.get('__sf_config')).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
     expectNoCredentialMaterial(env.__cachedReadRequests[0]?.url ?? '');
     expectNoCredentialMaterial(schemaCacheKey);
-    expect(env.__tableRequests[0]).toEqual({
+    expect(env.__tableRequests[0]).toMatchObject({
       type: 'table.schema.get',
-      resolvedConfig: undefined,
+      resolvedConfig: defaultCachedTableReadProps.resolvedConfig,
       requestContext: undefined
     });
   });
@@ -3801,9 +3941,9 @@ describe('api routes', () => {
     expect(rowCacheKeyUrl.searchParams.get('__sf_config')).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
     expectNoCredentialMaterial(env.__cachedReadRequests[0]?.url ?? '');
     expectNoCredentialMaterial(rowCacheKey);
-    expect(env.__tableRequests[0]).toEqual({
+    expect(env.__tableRequests[0]).toMatchObject({
       type: 'table.row.get',
-      resolvedConfig: undefined,
+      resolvedConfig: defaultCachedTableReadProps.resolvedConfig,
       requestContext: undefined
     });
   });
