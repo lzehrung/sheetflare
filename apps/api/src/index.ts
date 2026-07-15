@@ -1751,7 +1751,7 @@ function getExternalChangeDebounceSeconds(cacheStatus: GetTableCacheStatusResult
     return null;
   }
 
-  return Math.max(0, Math.ceil((debounceUntilMs - Date.now()) / 1000));
+  return Math.max(0, Math.floor((debounceUntilMs - Date.now()) / 1000));
 }
 
 function getCachedTableReadEdgeTtlSeconds(cacheStatus: GetTableCacheStatusResult['data']) {

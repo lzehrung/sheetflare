@@ -1170,6 +1170,30 @@ describe('CachedTableReads', () => {
     }
   });
 
+  it('sets Workers Cache no-store when less than one debounce second remains', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-26T00:00:07.250Z'));
+
+    try {
+      const { entrypoint } = createCachedTableReadsHarness(createEnv({
+        tableCacheTtlSeconds: 60,
+        tableExternalChangeDebounceUntil: '2026-04-26T00:00:08.000Z'
+      }));
+
+      const response = await entrypoint.fetch(
+        new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10')
+      );
+
+      expect(response.status).toBe(200);
+      expectSuccessfulCachedReadHeaders(response, {
+        edgeCacheControl: 'no-store',
+        tags: ['project:demo', 'table:demo:users']
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('sets Workers Cache no-store when cache status is stale or not ready', async () => {
     const cases = [
       {
