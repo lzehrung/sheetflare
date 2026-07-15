@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { exports as workerExports } from 'cloudflare:workers';
+import type { TableDoResponse } from '@sheetflare/contracts';
 import type { Env } from '../src/env';
 import {
   CachedTableReads,
@@ -108,6 +109,7 @@ function createEnv(options?: {
   defaultAuthMode?: 'private' | 'public-read';
   projectAccessStatus?: 200 | 404 | 500;
   tableCacheClearStatus?: 200 | 503;
+  tableCacheGetUnexpectedResponse?: boolean;
   tableRowsListStatus?: 200 | 503;
   tableCacheTtlSeconds?: number;
   tableCacheStatus?: 'idle' | 'syncing' | 'ready' | 'error';
@@ -625,6 +627,14 @@ function createEnv(options?: {
     }
 
     if (body.type === 'table.cache.get') {
+      if (options?.tableCacheGetUnexpectedResponse) {
+        const response = {
+          type: 'table.cache.clear.result',
+          result: { ok: true }
+        } satisfies TableDoResponse;
+        return Response.json(response);
+      }
+
       const stale = options?.tableCacheStale ?? false;
       return Response.json({
         type: 'table.cache.get.result',
@@ -3046,6 +3056,67 @@ describe('api routes', () => {
         }
       }
     });
+  });
+
+  it('returns a controlled service unavailable error for an unexpected table cache status response', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const app = createApp();
+    const path = '/v1/admin/projects/demo/tables/users/cache';
+
+    try {
+      const response = await app.request(
+        path,
+        {
+          headers: {
+            authorization: 'Bearer secret'
+          }
+        },
+        createEnv({ tableCacheGetUnexpectedResponse: true })
+      );
+
+      expect(response.status).toBe(503);
+      const responseBody: unknown = await response.json();
+      expect(responseBody).toEqual({
+        error: {
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'Unexpected table cache status response.',
+          details: null
+        }
+      });
+
+      const requestId = response.headers.get('x-request-id');
+      expect(requestId).toEqual(expect.any(String));
+      if (requestId === null) {
+        throw new Error('Expected the response to include a request ID.');
+      }
+      const matchingEvents = errorSpy.mock.calls.flatMap(([errorLog]) => {
+        if (typeof errorLog !== 'string') {
+          return [];
+        }
+        try {
+          const event: unknown = JSON.parse(errorLog);
+          const identity = z.object({
+            event: z.literal('request.error'),
+            path: z.literal(path),
+            requestId: z.literal(requestId)
+          }).safeParse(event);
+          return identity.success ? [event] : [];
+        } catch {
+          return [];
+        }
+      });
+      expect(matchingEvents).toHaveLength(1);
+      expect(matchingEvents[0]).toMatchObject({
+        event: 'request.error',
+        method: 'GET',
+        path,
+        requestId,
+        errorName: 'ServiceUnavailableError',
+        errorMessage: 'Unexpected table cache status response.'
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('refreshes a table cache if it is stale for admin requests', async () => {

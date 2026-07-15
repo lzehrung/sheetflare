@@ -53,23 +53,31 @@ If the implementation obscures those answers, it is too complicated.
 
 ## TypeScript Rules
 
-### Cast discipline
+### Type assertion discipline
+
+Do not use TypeScript type assertions (`as T` or angle-bracket assertions) in normal code.
 
 Never use:
 
 - `as any`
 - `as unknown`
+- chained or double assertions
 
-Do not introduce them even as a temporary escape hatch.
+`as const` is allowed only to preserve literal or readonly inference; it must not be combined with another assertion to force compatibility.
 
-If types are difficult:
+When types do not line up:
 
-- improve the type model
-- add a narrow helper type
-- validate at boundaries
+- narrow discriminated unions with explicit control flow
+- improve the type model or generic constraint
+- add a type guard when runtime checks establish the type
+- validate trust-boundary data with Zod
+- use an explicit annotation when the value should be checked as that type
+- use `satisfies` for object literals, configuration, handlers, and lookup tables that should conform to a contract while preserving their inferred type
 - refactor the code so the type flow is explicit
 
-Unsafe casting is treated as a design failure, not a convenience.
+A type assertion is an absolute last resort. It is permitted only at an unavoidable platform or third-party interop boundary where the runtime invariant is established, the available types cannot express it, and the alternatives above cannot solve it correctly. Keep it at the narrowest possible scope and add a comment explaining the invariant, why normal narrowing is impossible, and why the assertion is safe.
+
+Never use an assertion to bypass validation, silence a fixable compiler error, force incompatible contracts together, or cross a trust boundary. Treat every assertion as a design exception that requires justification.
 
 ### Prefer explicit contracts
 

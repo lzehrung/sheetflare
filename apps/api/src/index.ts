@@ -981,7 +981,11 @@ async function getTableCacheStatusData(c: AppContext, projectSlug: string, table
     tableSlug
   });
 
-  return (response as { type: 'table.cache.get.result'; result: GetTableCacheStatusResult }).result.data;
+  if (response.type !== 'table.cache.get.result') {
+    throw new ServiceUnavailableError('Unexpected table cache status response.');
+  }
+
+  return response.result.data;
 }
 
 async function invalidateCachedProject(projectSlug: string) {
