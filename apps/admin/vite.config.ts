@@ -1,29 +1,53 @@
-import { defineConfig } from 'vite';
-import { adminCredentialHeaderName } from './src/auth';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { defineConfig, type ProxyOptions } from 'vite';
+import {
+  adminHost,
+  adminPort,
+  adminResponseHeaders,
+  resolveAdminApiTarget,
+  rewriteAdminProxyRequest
+} from './vite-proxy';
 
-const apiTarget = process.env.SHEETFLARE_API_BASE_URL?.trim() || 'http://127.0.0.1:8787';
+const localStatePath = fileURLToPath(new URL('../../.sheetflare.setup.local.json', import.meta.url));
+
+let localStateText: string | null;
+try {
+  localStateText = readFileSync(localStatePath, 'utf8');
+} catch {
+  localStateText = null;
+}
+
+const apiTarget = resolveAdminApiTarget(process.env.SHEETFLARE_API_BASE_URL, localStateText);
+console.log(`[sheetflare-admin] proxying API requests to ${apiTarget}`);
+
+function createApiProxyOptions(): ProxyOptions {
+  return {
+    target: apiTarget,
+    configure(proxy) {
+      proxy.on('proxyReq', rewriteAdminProxyRequest);
+    }
+  };
+}
 
 export default defineConfig({
   server: {
+    host: adminHost,
+    port: adminPort,
+    strictPort: true,
+    headers: adminResponseHeaders,
     proxy: {
-      '/v1': {
-        target: apiTarget,
-        configure(proxy) {
-          proxy.on('proxyReq', (proxyRequest, request) => {
-            const credential = request.headers[adminCredentialHeaderName];
-            if (typeof credential !== 'string' || credential.length === 0) {
-              return;
-            }
-
-            proxyRequest.setHeader('authorization', `Bearer ${credential}`);
-            proxyRequest.removeHeader(adminCredentialHeaderName);
-          });
-        }
-      },
-      '/health': apiTarget,
-      '/ready': apiTarget,
-      '/doc': apiTarget,
-      '/docs': apiTarget
+      '/v1': createApiProxyOptions(),
+      '/health': createApiProxyOptions(),
+      '/ready': createApiProxyOptions(),
+      '/doc': createApiProxyOptions(),
+      '/docs': createApiProxyOptions()
     }
+  },
+  preview: {
+    host: adminHost,
+    port: adminPort,
+    strictPort: true,
+    headers: adminResponseHeaders
   }
 });

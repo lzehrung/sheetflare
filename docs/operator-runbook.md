@@ -24,7 +24,7 @@ npm run setup
 ```
 
 That command can write `sheetflare.setup.json`, deploy, bootstrap, and smoke-check the first project.
-It also keeps local reusable secret state in `.sheetflare.setup.local.json`; treat that file as secret material and keep it on the operator machine only.
+It also keeps reusable API deployment state in `.sheetflare.setup.local.json`. The file is gitignored, contains no admin credential, and should remain on the operator machine.
 
 Post-deploy verification path:
 
@@ -32,7 +32,24 @@ Post-deploy verification path:
 npm run setup -- --verify
 ```
 
-That re-checks the resolved Google credential source, Worker `/ready`, protected admin root plus proxied `/docs`, and Drive watch coverage for the spreadsheets declared in the setup config.
+That re-checks the resolved Google credential source, Worker `/ready`, and Drive watch coverage for the spreadsheets declared in the setup config. Verification is Worker-only and does not require Wrangler authentication.
+
+## Run The Admin UI Locally
+
+```powershell
+npm run dev:admin
+```
+
+Open `http://127.0.0.1:4173`. The Vite server binds exactly to loopback on fixed port `4173`; do not pass `--host 0.0.0.0`, use a LAN hostname, or expose it through a public tunnel.
+
+The proxy targets `SHEETFLARE_API_BASE_URL` when set, otherwise `apiUrl` from `.sheetflare.setup.local.json`, otherwise `http://127.0.0.1:8787`. Remote targets must use HTTPS because the proxy forwards the credential as bearer authorization. To target a local Worker explicitly:
+
+```powershell
+$env:SHEETFLARE_API_BASE_URL = "http://127.0.0.1:8787"
+npm run dev:admin
+```
+
+Paste a scoped admin API key for routine work. Use the bootstrap token only as break-glass. The UI holds the credential in memory for the current session only; refreshing or restarting requires you to paste it again.
 
 Manual fallback:
 

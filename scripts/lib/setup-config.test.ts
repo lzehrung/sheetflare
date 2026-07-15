@@ -4,13 +4,12 @@ import {
   getSetupConfigGoogleCredentialRefs,
   normalizeSpreadsheetId,
   parseSetupConfig,
-  serializeSetupConfig,
   setupConfigUsesDefaultGoogleCredential
 } from './setup-config';
 
 describe('parseSetupConfig', () => {
-  it('parses a private-only setup config', () => {
-    expect(parseSetupConfig({
+  it('accepts a legacy deploy block but removes it from the parsed config', () => {
+    const config = parseSetupConfig({
       profile: 'local',
       deploy: {
         api: true,
@@ -43,12 +42,10 @@ describe('parseSetupConfig', () => {
           status: 'active'
         }
       }
-    })).toMatchObject({
+    });
+
+    expect(config).toMatchObject({
       profile: 'local',
-      deploy: {
-        api: true,
-        admin: false
-      },
       privateProject: {
         slug: 'demo'
       },
@@ -58,15 +55,12 @@ describe('parseSetupConfig', () => {
         publicTableSlug: null
       }
     });
+    expect(config).not.toHaveProperty('deploy');
   });
 
   it('rejects project-level defaultAuthMode in setup config', () => {
     expect(() => parseSetupConfig({
       profile: 'local',
-      deploy: {
-        api: true,
-        admin: false
-      },
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -100,10 +94,6 @@ describe('parseSetupConfig', () => {
   it('parses a setup config with optional public-read coverage', () => {
     expect(parseSetupConfig({
       profile: 'local',
-      deploy: {
-        api: true,
-        admin: true
-      },
       privateProject: {
         slug: 'demo-private',
         name: 'Demo Private',
@@ -153,10 +143,6 @@ describe('parseSetupConfig', () => {
   it('rejects duplicate smoke key names', () => {
     expect(() => parseSetupConfig({
       profile: 'local',
-      deploy: {
-        api: true,
-        admin: true
-      },
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -189,10 +175,6 @@ describe('parseSetupConfig', () => {
   it('rejects a private smoke target that does not exist', () => {
     expect(() => parseSetupConfig({
       profile: 'local',
-      deploy: {
-        api: true,
-        admin: true
-      },
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -225,10 +207,6 @@ describe('parseSetupConfig', () => {
   it('requires a public smoke table when public-read project is configured', () => {
     expect(() => parseSetupConfig({
       profile: 'local',
-      deploy: {
-        api: true,
-        admin: true
-      },
       privateProject: {
         slug: 'demo-private',
         name: 'Demo Private',
@@ -271,10 +249,6 @@ describe('parseSetupConfig', () => {
   it('rejects smoke writes to the managed id column', () => {
     expect(() => parseSetupConfig({
       profile: 'local',
-      deploy: {
-        api: true,
-        admin: true
-      },
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -308,10 +282,6 @@ describe('parseSetupConfig', () => {
   it('rejects smoke writes to read-only fields', () => {
     expect(() => parseSetupConfig({
       profile: 'local',
-      deploy: {
-        api: true,
-        admin: true
-      },
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -345,10 +315,6 @@ describe('parseSetupConfig', () => {
   it('rejects smoke values outside the real row contract', () => {
     expect(() => parseSetupConfig({
       profile: 'local',
-      deploy: {
-        api: true,
-        admin: true
-      },
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -385,10 +351,6 @@ describe('setup credential refs', () => {
   it('detects default and named Google credential refs from configured projects', () => {
     const config = parseSetupConfig({
       profile: 'local',
-      deploy: {
-        api: true,
-        admin: false
-      },
       privateProject: {
         slug: 'demo-private',
         name: 'Demo Private',
@@ -435,10 +397,6 @@ describe('setup credential refs', () => {
   it('detects named-only Google credential configs', () => {
     const config = parseSetupConfig({
       profile: 'local',
-      deploy: {
-        api: true,
-        admin: false
-      },
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -492,9 +450,11 @@ describe('spreadsheet id normalization', () => {
 });
 
 describe('setup config serialization', () => {
-  it('round-trips the starter config', () => {
-    const serialized = createDefaultSetupConfig();
-    expect(parseSetupConfig(JSON.parse(serialized))).toMatchObject({
+  it('emits a starter config without the removed deploy block', () => {
+    const parsed: unknown = JSON.parse(createDefaultSetupConfig());
+
+    expect(parsed).not.toHaveProperty('deploy');
+    expect(parseSetupConfig(parsed)).toMatchObject({
       profile: 'local',
       privateProject: {
         slug: 'demo'
@@ -502,8 +462,4 @@ describe('setup config serialization', () => {
     });
   });
 
-  it('serializes with a trailing newline', () => {
-    const serialized = serializeSetupConfig(parseSetupConfig(JSON.parse(createDefaultSetupConfig())));
-    expect(serialized.endsWith('\n')).toBe(true);
-  });
 });

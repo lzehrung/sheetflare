@@ -5,20 +5,15 @@ import { ScriptError } from './runtime';
 export type SetupLocalState = {
   googleClientEmail?: string;
   apiUrl?: string;
-  adminUrl?: string;
-  adminUiUsername?: string;
-  adminUiPassword?: string;
 };
 
 type SetupLocalStateInputValue = SetupLocalState[keyof SetupLocalState] | null | undefined;
 export type SetupLocalStateUpdate = Partial<Record<keyof SetupLocalState, SetupLocalStateInputValue>>;
-const allowedSetupLocalStateKeys = new Set<keyof SetupLocalState>([
-  'googleClientEmail',
-  'apiUrl',
-  'adminUrl',
-  'adminUiUsername',
-  'adminUiPassword'
-]);
+const removedSetupLocalStateKeys: Readonly<Record<string, true>> = {
+  adminUrl: true,
+  adminUiUsername: true,
+  adminUiPassword: true
+};
 
 function isMissingFileError(error: unknown) {
   return error instanceof Error && 'code' in error && error.code === 'ENOENT';
@@ -57,7 +52,10 @@ export function createSetupLocalStateFromUnknown(input: unknown, path = 'setup l
 
   const state: SetupLocalState = {};
   for (const [rawKey, rawValue] of Object.entries(input)) {
-    if (!allowedSetupLocalStateKeys.has(rawKey as keyof SetupLocalState)) {
+    if (removedSetupLocalStateKeys[rawKey]) {
+      continue;
+    }
+    if (rawKey !== 'googleClientEmail' && rawKey !== 'apiUrl') {
       throw new ScriptError(`${path} contains unknown key ${rawKey}.`);
     }
     if (typeof rawValue !== 'string') {
@@ -66,7 +64,7 @@ export function createSetupLocalStateFromUnknown(input: unknown, path = 'setup l
     if (rawValue.trim().length === 0) {
       throw new ScriptError(`${path}.${rawKey} must not be blank.`);
     }
-    state[rawKey as keyof SetupLocalState] = rawValue;
+    state[rawKey] = rawValue;
   }
 
   return state;
@@ -102,24 +100,4 @@ export function mergeSetupLocalState(currentState: SetupLocalState | null, updat
     }
   }
   return nextState;
-}
-
-function redactValue(value: string | undefined) {
-  if (!value) {
-    return null;
-  }
-  if (value.length <= 8) {
-    return `${value.slice(0, 2)}***`;
-  }
-  return `${value.slice(0, 4)}...${value.slice(-4)}`;
-}
-
-export function redactSetupLocalState(state: SetupLocalState) {
-  return {
-    googleClientEmail: state.googleClientEmail ?? null,
-    apiUrl: state.apiUrl ?? null,
-    adminUrl: state.adminUrl ?? null,
-    adminUiUsername: state.adminUiUsername ?? null,
-    adminUiPassword: redactValue(state.adminUiPassword),
-  };
 }

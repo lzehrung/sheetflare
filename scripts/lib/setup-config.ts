@@ -26,10 +26,6 @@ type SetupSmokeConfig = {
 
 export type SetupConfig = {
   profile: string;
-  deploy: {
-    api: boolean;
-    admin: boolean;
-  };
   privateProject: SetupProjectSection;
   publicReadProject: SetupProjectSection | null;
   smoke: SetupSmokeConfig;
@@ -200,10 +196,6 @@ export function serializeSetupConfig(config: SetupConfig) {
 export function createDefaultSetupConfig() {
   return serializeSetupConfig({
     profile: 'local',
-    deploy: {
-      api: true,
-      admin: true
-    },
     privateProject: {
       slug: 'demo',
       name: 'Demo',
@@ -245,14 +237,6 @@ export function parseSetupConfig(input: unknown): SetupConfig {
 
   const profile = parseRequiredString(input.profile, 'profile');
 
-  if (!isRecord(input.deploy)) {
-    throw new ScriptError('deploy must be an object.');
-  }
-
-  const deploy = {
-    api: parseBoolean(input.deploy.api, 'deploy.api'),
-    admin: parseBoolean(input.deploy.admin, 'deploy.admin')
-  };
 
   const privateProject = parseProjectSection(input.privateProject, 'privateProject');
   const publicReadProject = input.publicReadProject === undefined || input.publicReadProject === null
@@ -305,7 +289,6 @@ export function parseSetupConfig(input: unknown): SetupConfig {
 
   return {
     profile,
-    deploy,
     privateProject,
     publicReadProject,
     smoke

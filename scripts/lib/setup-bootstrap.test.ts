@@ -11,10 +11,6 @@ import type { SetupConfig } from './setup-config';
 
 const baseConfig: SetupConfig = {
   profile: 'local',
-  deploy: {
-    api: true,
-    admin: true
-  },
   privateProject: {
     slug: 'demo',
     name: 'Demo',

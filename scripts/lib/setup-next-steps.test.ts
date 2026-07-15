@@ -19,51 +19,26 @@ describe('formatSheetShareInstruction', () => {
 });
 
 describe('formatBeginnerSetupNextSteps', () => {
-  it('prints deployment URLs and verification guidance without secret values', () => {
+  it('directs a completed setup to the loopback-only local admin UI', () => {
     expect(formatBeginnerSetupNextSteps({
       googleClientEmail: 'service-account@example.com',
-      apiUrl: 'https://sheetflare-api.example.workers.dev',
-      adminUrl: 'https://sheetflare-admin.pages.dev'
+      apiUrl: 'https://sheetflare-api.example.workers.dev'
     })).toEqual([
       'Beginner setup complete.',
       '1. Share your Google Sheet with service-account@example.com as Editor.',
       '2. API URL: https://sheetflare-api.example.workers.dev',
-      '3. Admin URL: https://sheetflare-admin.pages.dev',
+      '3. Launch the admin UI any time with npm run dev:admin (loopback-only, http://127.0.0.1:4173; it targets your deployed API automatically).',
       '4. Run npm run doctor any time you want to re-check this deployment.'
     ]);
   });
 
-  it('omits unavailable deployment URLs and keeps the doctor step numbered correctly', () => {
-    expect(formatBeginnerSetupNextSteps({
-      googleClientEmail: 'service-account@example.com',
-      apiUrl: null,
-      adminUrl: null
-    })).toEqual([
-      'Beginner setup complete.',
-      '1. Share your Google Sheet with service-account@example.com as Editor.',
-      '2. Run npm run doctor any time you want to re-check this deployment.'
-    ]);
-  });
-
-  it('omits the sharing step when the service-account email is unavailable', () => {
+  it('keeps local admin and doctor guidance when deployment details are unavailable', () => {
     expect(formatBeginnerSetupNextSteps({
       googleClientEmail: null,
-      apiUrl: null,
-      adminUrl: null
+      apiUrl: null
     })).toEqual([
       'Beginner setup complete.',
-      '1. Run npm run doctor any time you want to re-check this deployment.'
-    ]);
-  });
-
-  it('omits the sharing step when the service-account email is the checked-in placeholder', () => {
-    expect(formatBeginnerSetupNextSteps({
-      googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
-      apiUrl: 'https://sheetflare-api.example.workers.dev',
-      adminUrl: null
-    })).toEqual([
-      'Beginner setup complete.',
-      '1. API URL: https://sheetflare-api.example.workers.dev',
+      '1. Launch the admin UI any time with npm run dev:admin (loopback-only, http://127.0.0.1:4173; it targets your deployed API automatically).',
       '2. Run npm run doctor any time you want to re-check this deployment.'
     ]);
   });

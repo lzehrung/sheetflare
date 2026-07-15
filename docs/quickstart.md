@@ -2,7 +2,7 @@
 
 This is the shortest safe path from one Google Sheet tab to a deployed API.
 
-By the end of this guide, you will have a live Cloudflare Worker API serving rows from your sheet, an admin UI for managing projects and API keys, and a smoke-tested deployment.
+By the end of this guide, you will have a live Cloudflare Worker API serving rows from your sheet, a local admin UI you can launch on demand, and a smoke-tested deployment.
 
 Use this guide when you want Sheetflare to make the setup decisions for you. For CI deploy details, manual fallback commands, or deeper operations, see [deploy.md](./deploy.md), [operator-runbook.md](./operator-runbook.md), and [google-service-accounts.md](./google-service-accounts.md).
 
@@ -36,7 +36,7 @@ npx wrangler login
 gcloud auth login
 ```
 
-`wrangler` deploys the Cloudflare Worker and admin Pages site. `gcloud` is only needed if you want setup to create the Google Cloud project and service account for you.
+`wrangler` deploys the Cloudflare Worker. `gcloud` is only needed if you want setup to create the Google Cloud project and service account for you.
 
 If you already have a service-account JSON file, you can skip `gcloud auth login`. When setup asks whether to provision Google Cloud credentials, choose `No`; setup will then ask for the file path.
 
@@ -63,7 +63,6 @@ Beginner setup then uses safe defaults:
 - table slug: derived from the tab name
 - ID column: `_id`
 - cache TTL: `60` seconds
-- admin UI: enabled
 - public-read API: disabled
 - setup actions: apply secrets, deploy, bootstrap, smoke-test, verify
 
@@ -77,14 +76,13 @@ npm run setup -- --bootstrap --smoke --verify
 
 Setup writes `sheetflare.setup.json` at the repo root. This checked, non-secret file describes the Sheetflare project, table, and smoke-test shape.
 
-When setup applies secrets, deploys, or bootstraps, it also creates or updates `.sheetflare.setup.local.json`. That file is gitignored local operator state. It can contain deployment URLs and admin-site Basic Auth material, so keep it on your machine.
+When setup applies secrets, deploys, or bootstraps, it also creates or updates `.sheetflare.setup.local.json`. That file is gitignored local operator state containing the deployed Worker URL and resolved Google service-account email; keep it on your operator machine. Setup never persists bootstrap tokens or API keys.
 
 Setup can create or update:
 
 - Worker secrets
 - Google Cloud project and service account, when you choose provisioning
 - API Worker deployment
-- admin Pages project and deployment
 - first Sheetflare project and table
 - initial admin, read, and mutation API keys
 - Google Drive watches for automatic reindexing
@@ -103,7 +101,15 @@ Beginner setup runs verification by default. You can rerun it any time:
 npm run doctor
 ```
 
-`npm run doctor` checks the local config, resolved Google credential source, API `/ready`, protected admin root, proxied `/docs`, proxied admin API surface, and Drive watch coverage.
+`npm run doctor` checks the local config, resolved Google credential source, API Worker `/ready`, and Drive watch coverage. Verification is Worker-only and does not require Wrangler authentication.
+
+Launch the admin UI after the Worker passes verification:
+
+```powershell
+npm run dev:admin
+```
+
+Open `http://127.0.0.1:4173`. The fixed-port server is loopback-only and automatically targets `apiUrl` from `.sheetflare.setup.local.json`. Paste a scoped admin API key for routine work; the UI keeps it in memory only for the current session. Use the bootstrap token only for break-glass access.
 
 Use these when you only want one step:
 
@@ -189,7 +195,7 @@ Prefer setup for normal use. If you need the lower-level bootstrap path, set `SH
 npm run ops:bootstrap
 ```
 
-Use [deploy.md](./deploy.md) for raw deploy commands and [operator-runbook.md](./operator-runbook.md) for day-2 operations.
+Use [deploy.md](./deploy.md) for deployment details and [operator-runbook.md](./operator-runbook.md) for day-2 operations.
 
 ## Common Operations
 

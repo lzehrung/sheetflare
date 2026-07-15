@@ -25,20 +25,7 @@ export type SetupSecrets = {
   googlePrivateKey: string;
   driveWebhookSecret: string;
   adminBearerToken: string;
-  adminUiUsername: string | null;
-  adminUiPassword: string | null;
 };
-
-export type AdminSiteSecrets = {
-  adminUiUsername: string;
-  adminUiPassword: string;
-};
-
-type AdminSiteSecretState = {
-  adminUiUsername: string | null;
-  adminUiPassword: string | null;
-};
-
 type GoogleProvisioningOptions = {
   enabled: boolean;
   profile: string;
@@ -116,70 +103,9 @@ async function readServiceAccountFile(path: string) {
   };
 }
 
-export async function collectAdminSiteSecrets(options: {
-  prompter: SetupPrompter | null;
-  defaultAdminUiUsername?: string | null;
-  defaultAdminUiPassword?: string | null;
-}) : Promise<AdminSiteSecrets> {
-  const defaultAdminUiUsername = readEnvValue('ADMIN_UI_USERNAME')
-    ?? options.defaultAdminUiUsername?.trim()
-    ?? null;
-  const defaultAdminUiPassword = readEnvValue('ADMIN_UI_PASSWORD')
-    ?? options.defaultAdminUiPassword?.trim()
-    ?? null;
-
-  if (!options.prompter) {
-    if (!defaultAdminUiUsername || !defaultAdminUiPassword) {
-      throw new ScriptError(
-        'Admin UI deploy requires ADMIN_UI_USERNAME and ADMIN_UI_PASSWORD from local setup state or the environment. Run npm run setup -- --apply-secrets first, or set those environment variables before deploying the admin UI.'
-      );
-    }
-
-    return {
-      adminUiUsername: defaultAdminUiUsername,
-      adminUiPassword: defaultAdminUiPassword
-    };
-  }
-
-  const adminUiUsername = await options.prompter.text({
-    message: 'Admin UI site username',
-    ...(defaultAdminUiUsername ? { defaultValue: defaultAdminUiUsername } : {}),
-    validate: (value) => value.trim().length > 0 ? null : 'Admin UI username must not be blank.'
-  });
-  const passwordPromptMessage = defaultAdminUiPassword
-    ? 'Admin UI site password (leave blank to keep current)'
-    : 'Admin UI site password (leave blank to generate)';
-  const adminUiPasswordInput = await options.prompter.text({
-    message: passwordPromptMessage
-  });
-  const adminUiPassword = adminUiPasswordInput.trim().length > 0
-    ? adminUiPasswordInput
-    : defaultAdminUiPassword ?? generateSecretToken(24);
-
-  return {
-    adminUiUsername: adminUiUsername.trim(),
-    adminUiPassword
-  };
-}
-
-export function requireAdminSiteSecrets(state: AdminSiteSecretState): AdminSiteSecrets {
-  if (!state.adminUiUsername?.trim() || !state.adminUiPassword?.trim()) {
-    throw new ScriptError(
-      'Admin UI deploy requires ADMIN_UI_USERNAME and ADMIN_UI_PASSWORD from local setup state or the environment. Run npm run setup -- --apply-secrets first, or set those environment variables before deploying the admin UI.'
-    );
-  }
-
-  return {
-    adminUiUsername: state.adminUiUsername,
-    adminUiPassword: state.adminUiPassword
-  };
-}
 
 export async function collectSetupSecrets(options: {
   prompter: SetupPrompter | null;
-  includeAdminUiSecrets: boolean;
-  defaultAdminUiUsername?: string | null;
-  defaultAdminUiPassword?: string | null;
   googleProvisioning?: GoogleProvisioningOptions;
   googleProvisioner?: typeof provisionGoogleServiceAccount;
   gcloudAuthChecker?: typeof checkGcloudAuthPrereq;
@@ -232,29 +158,11 @@ export async function collectSetupSecrets(options: {
   const adminBearerToken = readEnvValue('ADMIN_BEARER_TOKEN') ?? generateSecretToken(32);
   const driveWebhookSecret = readEnvValue('GOOGLE_DRIVE_WEBHOOK_SECRET') ?? generateSecretToken(32);
 
-  if (!options.includeAdminUiSecrets) {
-    return {
-      googleClientEmail,
-      googlePrivateKey,
-      driveWebhookSecret,
-      adminBearerToken,
-      adminUiUsername: null,
-      adminUiPassword: null
-    };
-  }
-  const adminSiteSecrets = await collectAdminSiteSecrets({
-    prompter: options.prompter,
-    defaultAdminUiUsername: options.defaultAdminUiUsername ?? 'admin',
-    ...(options.defaultAdminUiPassword !== undefined ? { defaultAdminUiPassword: options.defaultAdminUiPassword } : {})
-  });
-
   return {
     googleClientEmail,
     googlePrivateKey,
     driveWebhookSecret,
-    adminBearerToken,
-    adminUiUsername: adminSiteSecrets.adminUiUsername,
-    adminUiPassword: adminSiteSecrets.adminUiPassword
+    adminBearerToken
   };
 }
 
@@ -429,77 +337,10 @@ export async function applyApiSecrets(options: {
   }
 }
 
-export async function applyAdminSecrets(options: {
-  debug?: boolean;
-  pagesProjectName: string;
-  username: string;
-  password: string;
-}) {
-  const wrangler = getCommandName('npx');
-  const commands = buildAdminSecretCommands(options.pagesProjectName);
-  const usernameResult = await runCommand(
-    wrangler,
-    commands.username,
-    {
-      echoStdout: Boolean(options.debug),
-      echoStderr: Boolean(options.debug),
-      input: `${options.username}\n`
-    }
-  );
-  if (usernameResult.code !== 0) {
-    throw new ScriptError('Failed to apply ADMIN_UI_USERNAME with wrangler pages secret put.');
-  }
-
-  const passwordResult = await runCommand(
-    wrangler,
-    commands.password,
-    {
-      echoStdout: Boolean(options.debug),
-      echoStderr: Boolean(options.debug),
-      input: `${options.password}\n`
-    }
-  );
-  if (passwordResult.code !== 0) {
-    throw new ScriptError('Failed to apply ADMIN_UI_PASSWORD with wrangler pages secret put.');
-  }
-}
-
-export async function applyAdminApiBaseUrl(options: {
-  apiBaseUrl: string;
-  debug?: boolean;
-  pagesProjectName: string;
-}) {
-  const wrangler = getCommandName('npx');
-  const command = buildAdminApiBaseUrlCommand(options.pagesProjectName);
-  const result = await runCommand(
-    wrangler,
-    command,
-    {
-      echoStdout: Boolean(options.debug),
-      echoStderr: Boolean(options.debug),
-      input: `${options.apiBaseUrl}\n`
-    }
-  );
-  if (result.code !== 0) {
-    throw new ScriptError('Failed to apply SHEETFLARE_API_BASE_URL with wrangler pages secret put.');
-  }
-}
-
 export function buildApiSecretCommands(apiWranglerConfigPath: string) {
   return {
     googlePrivateKey: ['wrangler', 'secret', 'put', 'GOOGLE_PRIVATE_KEY', '--config', apiWranglerConfigPath],
     googleDriveWebhookSecret: ['wrangler', 'secret', 'put', 'GOOGLE_DRIVE_WEBHOOK_SECRET', '--config', apiWranglerConfigPath],
     adminBearerToken: ['wrangler', 'secret', 'put', 'ADMIN_BEARER_TOKEN', '--config', apiWranglerConfigPath]
   };
-}
-
-export function buildAdminSecretCommands(pagesProjectName: string) {
-  return {
-    username: ['wrangler', 'pages', 'secret', 'put', 'ADMIN_UI_USERNAME', '--project-name', pagesProjectName],
-    password: ['wrangler', 'pages', 'secret', 'put', 'ADMIN_UI_PASSWORD', '--project-name', pagesProjectName]
-  };
-}
-
-export function buildAdminApiBaseUrlCommand(pagesProjectName: string) {
-  return ['wrangler', 'pages', 'secret', 'put', 'SHEETFLARE_API_BASE_URL', '--project-name', pagesProjectName];
 }

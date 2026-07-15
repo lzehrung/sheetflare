@@ -6,7 +6,6 @@ If this is your first deployment, start with [quickstart.md](./quickstart.md) in
 
 Use [google-service-accounts.md](./google-service-accounts.md) for the exact recommended Google credential model, secret layout, and rotation workflow.
 
-If you are maintaining this repository's shared staging workflows, use [contributor-staging.md](./contributor-staging.md) for the exact GitHub secret names and project-specific staging asset names.
 
 ## Setup Flow
 
@@ -19,29 +18,11 @@ gcloud auth login
 npm run setup
 ```
 
-Cloudflare auth note:
+`npx wrangler login` is suitable for interactive use. For CI or unattended deployments, use `CLOUDFLARE_API_TOKEN`. `gcloud` is needed only when setup provisions Google credentials.
 
-- `npx wrangler login` is fine for normal interactive operator use.
-- Expect to re-authenticate periodically when using Wrangler's browser-backed OAuth login.
-- For unattended deploys, CI, or long-lived scripted sessions, prefer `CLOUDFLARE_API_TOKEN`.
+Setup can write `sheetflare.setup.json`, keep non-credential deployment state in `.sheetflare.setup.local.json`, provision Google credentials, apply Worker secrets, deploy the API Worker, bootstrap projects and keys, run smoke validation, and verify Google credentials, Worker readiness, and Drive watch coverage.
 
-The setup command can:
-
-- write `sheetflare.setup.json`
-- keep local reusable secret state in `.sheetflare.setup.local.json`
-- apply Worker secrets
-- provision a Google Cloud project and service account during first-run beginner setup, or when `--provision-google` is used with a working `gcloud` login
-- ensure the target Cloudflare Pages project exists for admin deploys
-- apply the admin Pages runtime binding to the deployed API base URL
-- deploy the API Worker
-- deploy the admin UI
-- verify the protected admin site root plus proxied `/ready`, `/docs`, and `/v1/admin/projects`
-- bootstrap the first project and keys
-- run smoke validation
-
-Use `npm run setup -- --advanced` on a first run with no `sheetflare.setup.json` to get the full prompt flow for project names, table slugs, indexed fields, cache TTL, public-read coverage, and per-step action choices.
-
-For reruns from an existing setup config:
+For reruns:
 
 ```powershell
 npm run setup -- --apply-secrets
@@ -51,21 +32,13 @@ npm run setup -- --smoke
 npm run setup -- --verify
 ```
 
-Rerun notes:
+- `--apply-secrets` applies Worker secrets only.
+- `--deploy` deploys the API Worker only.
+- `--smoke` accepts a scoped admin API key or bootstrap credential through `SHEETFLARE_ADMIN_CREDENTIAL` or an interactive prompt; setup does not persist either credential.
+- `--verify` and `npm run doctor` check the resolved Google credential, Worker `/ready`, and Drive watches. Verify-only runs do not require Wrangler authentication.
+- `.sheetflare.setup.local.json` stores the deployed `apiUrl` and resolved Google service-account email, not admin credentials.
 
-- `npm run setup -- --deploy` requires admin-site auth secrets for the admin Pages deploy. Setup reuses `.sheetflare.setup.local.json` when available, or falls back to `ADMIN_UI_USERNAME` and `ADMIN_UI_PASSWORD`. It also ensures the Pages project exists and applies `SHEETFLARE_API_BASE_URL` at the Pages project level before the deploy.
-- `npm run setup -- --smoke` accepts either a scoped admin API key or the bootstrap admin credential through `SHEETFLARE_ADMIN_CREDENTIAL` or an interactive prompt. It no longer reuses those credentials from local setup state.
-- `npm run setup -- --apply-secrets --provision-google` can create the Google project, enable Sheets and Drive APIs, create the service account, and mint a key JSON before applying Worker secrets. Use `--google-project` and `--google-service-account` when the default names derived from the setup profile are not what you want.
-- `npm run setup -- --verify` is the post-deploy confidence pass. It checks Worker readiness, the protected admin root, proxied `/ready`, proxied `/docs`, the proxied `/v1/admin/projects` JSON surface, and Drive watch coverage using the same operator-facing surfaces documented elsewhere. It exits non-zero on warnings as well as blocking failures, so a clean pass means the full verification surface succeeded.
-
-`.sheetflare.setup.local.json` is gitignored and intended to stay local to the operator machine. It may still contain admin-site basic-auth material, but it no longer persists bootstrap or API-key credentials.
-
-Use the rest of this document when:
-
-- you want the manual fallback path
-- you are wiring CI
-- you need exact Cloudflare token scopes
-- you are debugging a failed deploy outside the setup flow
+Use the rest of this document for CI, token scopes, Worker deployment, and post-deploy verification.
 
 ## Google Provisioning Through Setup
 
@@ -122,24 +95,14 @@ Recommendations:
 
 ## GitHub Actions Deployment
 
-If you deploy through GitHub Actions with Wrangler, the workflow needs:
+Wrangler-based CI needs:
 
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 
-For this repo's current deploy flows, the smallest useful Cloudflare account token is:
+Scope the token to the target Cloudflare account and grant `Workers Scripts Write` for `wrangler deploy` and `wrangler secret put`. `CLOUDFLARE_ACCOUNT_ID` is an identifier rather than secret material, but it may remain a repository secret for workflow simplicity.
 
-- `Workers Scripts Write` for `wrangler deploy` and `wrangler secret put`
-- `Pages Write` for `wrangler pages deploy` and `wrangler pages secret put`
-
-Keep that token scoped to the single target Cloudflare account.
-
-`CLOUDFLARE_ACCOUNT_ID` is an account identifier rather than secret material, but many teams still store it as a GitHub secret for workflow simplicity. A repository variable also works if you update the workflow to read from `vars` instead of `secrets`.
-
-In this repository's staging workflows, the additional repo-specific secrets are:
-
-- Worker staging deploy: `SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY`, `SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN`
-- Admin staging deploy: `SHEETFLARE_STAGING_ADMIN_UI_USERNAME`, `SHEETFLARE_STAGING_ADMIN_UI_PASSWORD`
+This repository's staging Worker deployment also uses `SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY` and `SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN`.
 
 ## Pre-Deploy Checklist
 
@@ -156,39 +119,33 @@ Do not deploy if any of these fail.
 
 ## Deploy
 
-Preferred local deploy command from repo root:
+The authoritative setup-driven command is:
 
 ```powershell
 npm run deploy
 ```
 
-That path is authoritative because it provisions the Pages project when missing, applies the project-level runtime binding for `SHEETFLARE_API_BASE_URL`, and verifies the live admin site afterward.
-
-Run deploys from a clean checked-out commit. Do not rely on dirty-worktree Pages deploys for release or rollback workflows.
-
-For first-time or routine admin deploys, prefer:
+Equivalent targeted rerun:
 
 ```powershell
 npm run setup -- --deploy
 ```
 
-Treat the raw deploy commands below as lower-level fallbacks for an already-provisioned environment.
-
-Lower-level raw deploy entrypoints from repo root:
+Both deploy the API Worker only. The lower-level production and staging fallbacks are:
 
 ```powershell
 npm run deploy:api:raw
-npm run deploy:admin:raw
+npm run deploy:staging:api:raw
 ```
 
-Equivalent explicit command for the API Worker if you need to run it manually outside setup:
+To invoke Wrangler directly outside setup:
 
 ```powershell
 npm --workspace @sheetflare/api run build
 npx wrangler deploy --config apps/api/wrangler.jsonc
 ```
 
-If you need to manage secrets through Wrangler manually instead of `npm run setup -- --apply-secrets`, set them before deploy:
+If you manage Worker secrets manually, set them before deployment:
 
 ```powershell
 npx wrangler secret put ADMIN_BEARER_TOKEN --config apps/api/wrangler.jsonc
@@ -196,88 +153,80 @@ npx wrangler secret put GOOGLE_DRIVE_WEBHOOK_SECRET --config apps/api/wrangler.j
 npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
 ```
 
-Also set `GOOGLE_CLIENT_EMAIL` as a normal Worker variable before deploy. Do not omit it just because `GOOGLE_PRIVATE_KEY` is present.
-
-Manual admin Pages fallback:
-
-```powershell
-npx wrangler pages project create sheetflare-admin --production-branch main
-"<ADMIN_UI_USERNAME>" | npx wrangler pages secret put ADMIN_UI_USERNAME --project-name sheetflare-admin
-"<ADMIN_UI_PASSWORD>" | npx wrangler pages secret put ADMIN_UI_PASSWORD --project-name sheetflare-admin
-"https://your-worker.example.workers.dev" | npx wrangler pages secret put SHEETFLARE_API_BASE_URL --project-name sheetflare-admin
-npm --workspace @sheetflare/admin run build
-Push-Location apps/admin
-npx wrangler pages deploy --project-name sheetflare-admin --branch main
-Pop-Location
-```
-
-`apps/admin/wrangler.jsonc` no longer carries a checked runtime API target. The deployed Pages project must supply `SHEETFLARE_API_BASE_URL` itself.
-Deploy the admin site from the `apps/admin` project root. A bare `apps/admin/dist` upload from repo root can omit the Pages `functions/` directory and break proxied routes like `/v1/admin/projects`.
-
-Prefer your deployment system or setup flow for non-secret vars. Editing the checked repo defaults is only the manual fallback path.
-
-Google credential notes:
-
-- `GOOGLE_PRIVATE_KEY` is secret material and should be stored as a Worker secret
-- `GOOGLE_DRIVE_WEBHOOK_SECRET` is secret material and must be stored as a Worker secret
-- `GOOGLE_CREDENTIALS_JSON` is also secret material because it contains private keys
-- `GOOGLE_CLIENT_EMAIL` can be stored as a normal variable
-- if you use named credentials, project config must point at the intended `googleCredentialRef`
+Set `GOOGLE_CLIENT_EMAIL` as a normal Worker variable. `GOOGLE_PRIVATE_KEY`, `GOOGLE_DRIVE_WEBHOOK_SECRET`, and `GOOGLE_CREDENTIALS_JSON` are secret material. Named Google credentials require the matching `googleCredentialRef` in project config.
 
 ## Post-Deploy Verification
 
-1. Set the base URL and admin bearer token:
+1. Set the deployed Worker URL and a scoped admin credential:
 
 ```powershell
 $env:SHEETFLARE_BASE_URL = "https://your-worker.example.workers.dev"
-$env:SHEETFLARE_ADMIN_CREDENTIAL = "<ADMIN_BEARER_TOKEN>"
+$env:SHEETFLARE_ADMIN_CREDENTIAL = "sfk_admin-key.secret"
 ```
 
-2. Run the smoke suite:
+2. Verify Worker-only setup health and API behavior:
 
 ```powershell
+npm run doctor
 npm run smoke
 ```
 
-Also verify the admin Pages project through its protected site URL:
+3. Launch the local admin UI, open `http://127.0.0.1:4173`, paste the scoped admin key, and confirm projects load:
 
 ```powershell
-$pair = "<ADMIN_UI_USERNAME>:<ADMIN_UI_PASSWORD>"
-$encoded = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
-Invoke-WebRequest -Uri "https://sheetflare-admin.pages.dev/" -Headers @{ Authorization = "Basic $encoded" } | Select-Object StatusCode
-Invoke-WebRequest -Uri "https://sheetflare-admin.pages.dev/docs" -Headers @{ Authorization = "Basic $encoded" } | Select-Object StatusCode
+npm run dev:admin
 ```
 
-Both should return `200`. If `/docs` fails while the raw Worker `/docs` succeeds, the Pages project runtime binding for `SHEETFLARE_API_BASE_URL` is the first thing to inspect.
-
-Optional: persist a smoke report artifact:
+4. Optionally persist smoke and load reports:
 
 ```powershell
 $env:SHEETFLARE_SMOKE_REPORT_PATH = "reports/smoke-$(Get-Date -Format yyyyMMdd-HHmmss).md"
 npm run smoke
-```
-
-3. Run the load harness and persist its report:
-
-```powershell
 $env:SHEETFLARE_LOAD_REPORT_PATH = "reports/load-$(Get-Date -Format yyyyMMdd-HHmmss).md"
 npm run load
 ```
 
-4. For each critical table, verify cache status:
+5. Check each critical table:
 
 ```powershell
 $env:SHEETFLARE_PROJECT = "demo"
 $env:SHEETFLARE_TABLE = "users"
 npm run ops:cache
-```
-
-5. For critical tables, run the synthetic cache health check:
-
-```powershell
 $env:SHEETFLARE_CACHE_HEALTH_TABLES_JSON = '[{"project":"demo","table":"users"}]'
 npm run ops:cache:health
 ```
+
+## Local Admin UI
+
+`npm run dev:admin` binds exactly to `127.0.0.1:4173` with strict port selection. The proxy target resolves in this order:
+
+1. non-blank `SHEETFLARE_API_BASE_URL`
+2. `apiUrl` in repo-root `.sheetflare.setup.local.json`
+3. `http://127.0.0.1:8787`
+
+Remote targets must use HTTPS because the proxy translates the browser's private credential header into bearer authorization. HTTP is accepted only for loopback Worker development. The browser and Vite proxy are same-origin, so normal admin use needs no Worker CORS configuration.
+
+Explicit local Worker override:
+
+```powershell
+$env:SHEETFLARE_API_BASE_URL = "http://127.0.0.1:8787"
+npm run dev:admin
+```
+
+Explicit staging override:
+
+```powershell
+$env:SHEETFLARE_API_BASE_URL = "https://your-staging-worker.example.workers.dev"
+npm run dev:admin
+```
+
+Never pass `--host 0.0.0.0`, use a LAN hostname, or expose port `4173` through a public tunnel. Paste a scoped admin key for routine work. The credential exists in browser memory for the current session only and is never written to storage, setup state, or the URL.
+
+## Legacy Configuration And State
+
+- Existing `sheetflare.setup.json` files may retain the legacy `deploy` section through the 14-day rollback window. Current setup ignores it; new configs omit it.
+- Legacy `adminUrl`, `adminUiUsername`, and `adminUiPassword` keys in `.sheetflare.setup.local.json` or `.sheetflare.staging.setup.local.json` are ignored on read and removed on the next state write.
+- Legacy UI username/password environment variables are not read.
 
 ## Required Smoke Variables
 
@@ -322,14 +271,22 @@ The smoke suite proves route-level behavior on top of `/ready`. It always checks
 
 ## Rollback
 
-At minimum, rollback means restoring the previous Worker deployment and then verifying the critical tables again.
+For a Worker release rollback, restore the previous Worker revision, run `npm run smoke`, check critical table cache status, and reindex any table affected by configuration or sheet-shape changes.
 
-Procedure:
+## Retired Pages Resource Window
 
-1. Redeploy the last known good version.
-2. Run `npm run smoke`.
-3. Re-check cache status on critical tables.
-4. If a rollout changed table config or sheet structure assumptions, run `npm run ops:reindex` on affected tables.
+The former Pages projects are not a supported admin path. Keep `sheetflare-admin` and `sheetflare-staging-admin` untouched for exactly 14 days after the local-admin cutover merge as a rollback safety window.
+
+During that window only, rollback the cutover by reverting its commit. If the setup config no longer contains the legacy section, restore `"deploy": { "api": true, "admin": true }`, then run the reverted `npm run setup -- --deploy`. Do not direct operators to the retained site or redeploy it except as part of this rollback.
+
+After day 14, decommission the retained resources:
+
+```powershell
+npx wrangler pages project delete sheetflare-admin
+npx wrangler pages project delete sheetflare-staging-admin
+```
+
+Then delete GitHub repository secrets `SHEETFLARE_STAGING_ADMIN_UI_USERNAME` and `SHEETFLARE_STAGING_ADMIN_UI_PASSWORD`. Replace or narrow `CLOUDFLARE_API_TOKEN` so it no longer grants Pages Write while retaining the Worker permissions required for deployment. Project deletion removes the project secrets. No Worker secret or admin API-key rotation is needed unless incident evidence indicates credential exposure.
 
 ## Durable Object Notes
 

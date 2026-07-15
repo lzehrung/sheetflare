@@ -9,9 +9,6 @@ const apiWranglerConfigPath = resolve('apps/api/wrangler.jsonc');
 const stagingApiWranglerConfigPath = resolve('apps/api/wrangler.staging.jsonc');
 
 type JsonObject = Record<string, unknown>;
-type PagesProjectListEntry = {
-  name: string;
-};
 
 function normalizeSetupProfile(profile: string) {
   return profile.trim().toLowerCase();
@@ -71,14 +68,6 @@ function extractWorkersDevUrl(output: string) {
   return match[match.length - 1]!;
 }
 
-function extractPagesDeploymentUrl(output: string) {
-  const match = output.match(/https:\/\/[a-z0-9.-]+\.pages\.dev/gi);
-  if (!match || match.length === 0) {
-    throw new ScriptError('Admin deploy did not report a pages.dev URL.');
-  }
-
-  return match[match.length - 1]!;
-}
 
 export function patchApiConfigForDeploy(config: JsonObject, googleClientEmail: string | null) {
   const next = structuredClone(config);
@@ -94,61 +83,11 @@ export function patchApiConfigForDeploy(config: JsonObject, googleClientEmail: s
   return next;
 }
 
-export function parsePagesProjectList(output: string) {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(output);
-  } catch {
-    throw new ScriptError('Wrangler pages project list must return valid JSON.');
-  }
-
-  if (!Array.isArray(parsed)) {
-    throw new ScriptError('Wrangler pages project list must return a JSON array.');
-  }
-
-  return parsed.map((entry, index) => {
-    if (typeof entry !== 'object' || entry === null || !('name' in entry) || typeof entry.name !== 'string' || entry.name.trim().length === 0) {
-      throw new ScriptError(`Wrangler pages project list entry ${index + 1} must include a non-empty name.`);
-    }
-
-    return {
-      name: entry.name.trim()
-    } satisfies PagesProjectListEntry;
-  });
-}
-
-export async function listPagesProjects(options: { debug?: boolean } = {}) {
-  const result = await runCommand(
-    getCommandName('npx'),
-    buildPagesProjectListCommand(),
-    {
-      cwd: resolve('.'),
-      echoStdout: Boolean(options.debug),
-      echoStderr: Boolean(options.debug)
-    }
-  );
-  if (result.code !== 0) {
-    throw new ScriptError('Failed to list Cloudflare Pages projects.');
-  }
-
-  return parsePagesProjectList(result.stdout);
-}
 
 export function buildApiDeployCommand(configPath: string) {
   return ['wrangler@4.85.0', 'deploy', '--config', configPath];
 }
 
-export function buildAdminDeployCommand(projectName: string) {
-  return ['wrangler@4.85.0', 'pages', 'deploy', '--project-name', projectName, '--branch', 'main'];
-}
-
-export function buildPagesProjectListCommand() {
-  return ['wrangler@4.85.0', 'pages', 'project', 'list', '--json'];
-}
-
-export function buildPagesProjectCreateCommand(projectName: string) {
-  return ['wrangler@4.85.0', 'pages', 'project', 'create', projectName, '--production-branch', 'main'];
-}
 
 export async function deployApiWorker(profile: string, googleClientEmail: string | null, options: { debug?: boolean } = {}) {
   return withPatchedJsonConfig(
@@ -176,77 +115,6 @@ export async function deployApiWorker(profile: string, googleClientEmail: string
   );
 }
 
-export async function ensurePagesProjectExists(projectName: string, options: { debug?: boolean } = {}) {
-  const existingProjects = await listPagesProjects(options);
-  if (existingProjects.some((project) => project.name === projectName)) {
-    return {
-      created: false,
-      projectName
-    };
-  }
-
-  const result = await runCommand(
-    getCommandName('npx'),
-    buildPagesProjectCreateCommand(projectName),
-    {
-      cwd: resolve('.'),
-      echoStdout: Boolean(options.debug),
-      echoStderr: Boolean(options.debug)
-    }
-  );
-  if (result.code !== 0) {
-    throw new ScriptError(`Failed to create Cloudflare Pages project ${projectName}.`);
-  }
-
-  return {
-    created: true,
-    projectName
-  };
-}
-
-export async function deployAdminPages(profile: string, options: { debug?: boolean } = {}) {
-  const projectName = getAdminPagesProjectName(profile);
-  const buildResult = await runCommand(
-    getCommandName('npm'),
-    ['run', 'build'],
-    {
-      cwd: resolve('apps/admin'),
-      echoStdout: Boolean(options.debug),
-      echoStderr: Boolean(options.debug)
-    }
-  );
-  if (buildResult.code !== 0) {
-    throw new ScriptError('Admin build failed.');
-  }
-
-  const result = await runCommand(
-    getCommandName('npx'),
-    buildAdminDeployCommand(projectName),
-    {
-      cwd: resolve('apps/admin'),
-      echoStdout: Boolean(options.debug),
-      echoStderr: Boolean(options.debug)
-    }
-  );
-  if (result.code !== 0) {
-    throw new ScriptError('Admin deploy failed.');
-  }
-
-  return {
-    deploymentUrl: extractPagesDeploymentUrl(result.stdout),
-    siteUrl: getAdminPagesSiteUrl(projectName),
-    stdout: result.stdout
-  };
-}
-
 export function getApiWranglerConfigPath(profile = 'production') {
   return isStagingProfile(profile) ? stagingApiWranglerConfigPath : apiWranglerConfigPath;
-}
-
-export function getAdminPagesProjectName(profile = 'production') {
-  return isStagingProfile(profile) ? 'sheetflare-staging-admin' : 'sheetflare-admin';
-}
-
-export function getAdminPagesSiteUrl(projectName = getAdminPagesProjectName()) {
-  return `https://${projectName}.pages.dev`;
 }

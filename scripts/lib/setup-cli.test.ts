@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './setup-cli';
+import { parseSetupArgs, renderSetupHelp, resolveSetupActions } from './setup-cli';
 
 describe('parseSetupArgs', () => {
   it('parses combined setup action flags', () => {
@@ -15,23 +15,16 @@ describe('parseSetupArgs', () => {
       'sheetflare-prod',
       '--google-service-account',
       'sheetflare-prod'
-    ]))
-      .toEqual({
-        configPath: 'configs/demo/sheetflare.setup.json',
-        help: false,
-        writeDefaultConfig: false,
-        applySecrets: true,
-        deploy: true,
-        bootstrap: false,
-        smoke: true,
-        verify: true,
-        showSecrets: false,
-        advanced: false,
-        debug: false,
-        provisionGoogle: true,
-        googleProjectId: 'sheetflare-prod',
-        googleServiceAccountName: 'sheetflare-prod'
-      });
+    ])).toMatchObject({
+      configPath: 'configs/demo/sheetflare.setup.json',
+      applySecrets: true,
+      deploy: true,
+      smoke: true,
+      verify: true,
+      provisionGoogle: true,
+      googleProjectId: 'sheetflare-prod',
+      googleServiceAccountName: 'sheetflare-prod'
+    });
   });
 
   it('parses advanced setup mode', () => {
@@ -138,43 +131,5 @@ describe('resolveSetupActions', () => {
     expect(resolveSetupActions(options, null)).toMatchObject({
       verifyNow: true
     });
-  });
-});
-
-describe('actionsRequireWranglerAuth', () => {
-  it('requires wrangler auth for deploy or secrets actions', () => {
-    expect(actionsRequireWranglerAuth({
-      applySecretsNow: false,
-      deployNow: false,
-      bootstrapNow: true,
-      smokeNow: true,
-      verifyNow: true
-    })).toBe(false);
-
-    expect(actionsRequireWranglerAuth({
-      applySecretsNow: true,
-      deployNow: false,
-      bootstrapNow: false,
-      smokeNow: false,
-      verifyNow: false
-    })).toBe(true);
-  });
-
-  it('requires wrangler auth for admin deployment verification', () => {
-    expect(actionsRequireWranglerAuth({
-      applySecretsNow: false,
-      deployNow: false,
-      bootstrapNow: false,
-      smokeNow: false,
-      verifyNow: true
-    }, { verifiesAdminPagesProject: true })).toBe(true);
-
-    expect(actionsRequireWranglerAuth({
-      applySecretsNow: false,
-      deployNow: false,
-      bootstrapNow: false,
-      smokeNow: false,
-      verifyNow: true
-    }, { verifiesAdminPagesProject: false })).toBe(false);
   });
 });

@@ -5,10 +5,6 @@ import { getSetupDoctorFailureMessage, runSetupDoctor } from './setup-doctor';
 
 const baseConfig: SetupConfig = {
   profile: 'production',
-  deploy: {
-    api: true,
-    admin: true
-  },
   privateProject: {
     slug: 'sheetflare-prod',
     name: 'Sheetflare Prod',
@@ -80,22 +76,11 @@ describe('runSetupDoctor', () => {
         googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
         namedGoogleCredentials: 'missing',
         apiUrl: 'https://sheetflare-api.example.workers.dev',
-        adminUrl: 'https://sheetflare-admin.pages.dev',
         adminBearerToken: 'bootstrap.secret',
-        adminUiUsername: 'admin',
-        adminUiPassword: 'password',
         adminApiKey: 'sfk_admin.secret',
         privateReadKey: 'sfk_read.secret',
         mutationKey: 'sfk_mutation.secret'
       },
-      prereqResults: [
-        {
-          name: 'Wrangler auth',
-          status: 'ready',
-          summary: 'Wrangler authentication is available for deploy steps.',
-          remediation: null
-        }
-      ]
     }, {
       fetchReady: vi.fn(async () => ({
         ok: true,
@@ -107,8 +92,6 @@ describe('runSetupDoctor', () => {
         },
         notes: []
       })),
-      listPagesProjects: vi.fn(async () => [{ name: 'sheetflare-admin' }]),
-      verifyAdminPagesDeployment: vi.fn(async () => {}),
       listDriveWatches: vi.fn(async () => [
         {
           spreadsheetId: 'sheet-1',
@@ -130,7 +113,11 @@ describe('runSetupDoctor', () => {
       listDriveWatchRetryAdvice: vi.fn(async () => activeRetryAdvice())
     });
 
-    expect(results.every((result) => result.status === 'ready')).toBe(true);
+    expect(results.map(({ name, status }) => ({ name, status }))).toEqual([
+      { name: 'Google credential', status: 'ready' },
+      { name: 'API readiness', status: 'ready' },
+      { name: 'Drive watch status', status: 'ready' }
+    ]);
   });
 
   it('blocks when the placeholder Google client email is still configured', async () => {
@@ -140,15 +127,11 @@ describe('runSetupDoctor', () => {
         googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
         namedGoogleCredentials: 'missing',
         apiUrl: null,
-        adminUrl: null,
         adminBearerToken: null,
-        adminUiUsername: null,
-        adminUiPassword: null,
         adminApiKey: null,
         privateReadKey: null,
         mutationKey: null
       },
-      prereqResults: []
     });
 
     expect(results).toEqual(
@@ -165,24 +148,16 @@ describe('runSetupDoctor', () => {
     const results = await runSetupDoctor({
       config: {
         ...baseConfig,
-        deploy: {
-          api: true,
-          admin: false
-        }
       },
       runtimeState: {
         googleClientEmail: null,
         namedGoogleCredentials: 'missing',
         apiUrl: 'https://sheetflare-api.example.workers.dev',
-        adminUrl: null,
         adminBearerToken: 'bootstrap.secret',
-        adminUiUsername: null,
-        adminUiPassword: null,
         adminApiKey: 'sfk_admin.secret',
         privateReadKey: null,
         mutationKey: null
       },
-      prereqResults: []
     }, {
       fetchReady: vi.fn(async () => ({
         ok: true,
@@ -238,15 +213,11 @@ describe('runSetupDoctor', () => {
         googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
         namedGoogleCredentials: 'missing',
         apiUrl: 'https://sheetflare-api.example.workers.dev',
-        adminUrl: 'https://sheetflare-admin.pages.dev',
         adminBearerToken: 'bootstrap.secret',
-        adminUiUsername: null,
-        adminUiPassword: null,
         adminApiKey: 'sfk_admin.secret',
         privateReadKey: null,
         mutationKey: null
       },
-      prereqResults: []
     }, {
       fetchReady: vi.fn(async () => ({
         ok: true,
@@ -258,8 +229,6 @@ describe('runSetupDoctor', () => {
         },
         notes: []
       })),
-      listPagesProjects: vi.fn(async () => []),
-      verifyAdminPagesDeployment: vi.fn(async () => {}),
       listDriveWatches: vi.fn(async () => []),
       listDriveWatchRetryAdvice: vi.fn(async (): Promise<SpreadsheetWatchRetryAdvice[]> => [
         {
@@ -298,22 +267,11 @@ describe('runSetupDoctor', () => {
         googleClientEmail: null,
         namedGoogleCredentials: 'configured',
         apiUrl: 'https://sheetflare-api.example.workers.dev',
-        adminUrl: 'https://sheetflare-admin.pages.dev',
         adminBearerToken: 'bootstrap.secret',
-        adminUiUsername: 'admin',
-        adminUiPassword: 'password',
         adminApiKey: 'sfk_admin.secret',
         privateReadKey: 'sfk_read.secret',
         mutationKey: 'sfk_mutation.secret'
       },
-      prereqResults: [
-        {
-          name: 'Wrangler auth',
-          status: 'ready',
-          summary: 'Wrangler authentication is available for deploy steps.',
-          remediation: null
-        }
-      ]
     }, {
       fetchReady: vi.fn(async () => ({
         ok: true,
@@ -325,8 +283,6 @@ describe('runSetupDoctor', () => {
         },
         notes: []
       })),
-      listPagesProjects: vi.fn(async () => [{ name: 'sheetflare-admin' }]),
-      verifyAdminPagesDeployment: vi.fn(async () => {}),
       listDriveWatches: vi.fn(async () => [
         {
           spreadsheetId: 'sheet-1',
@@ -375,18 +331,12 @@ describe('runSetupDoctor', () => {
         googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
         namedGoogleCredentials: 'missing',
         apiUrl: 'https://sheetflare-api.example.workers.dev',
-        adminUrl: null,
         adminBearerToken: null,
-        adminUiUsername: null,
-        adminUiPassword: null,
         adminApiKey: null,
         privateReadKey: null,
         mutationKey: null
       },
-      prereqResults: []
     }, {
-      listPagesProjects: vi.fn(async () => []),
-      verifyAdminPagesDeployment: vi.fn(async () => {}),
       listDriveWatches: vi.fn(async () => []),
       listDriveWatchRetryAdvice: vi.fn(async () => [])
     });
@@ -409,15 +359,11 @@ describe('runSetupDoctor', () => {
         googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
         namedGoogleCredentials: 'missing',
         apiUrl: 'https://sheetflare-api.example.workers.dev',
-        adminUrl: 'https://sheetflare-admin.pages.dev',
         adminBearerToken: 'bootstrap.secret',
-        adminUiUsername: null,
-        adminUiPassword: null,
         adminApiKey: 'sfk_admin.secret',
         privateReadKey: null,
         mutationKey: null
       },
-      prereqResults: []
     }, {
       fetchReady: vi.fn(async () => ({
         ok: true,
@@ -429,8 +375,6 @@ describe('runSetupDoctor', () => {
         },
         notes: []
       })),
-      listPagesProjects: vi.fn(async () => []),
-      verifyAdminPagesDeployment: vi.fn(async () => {}),
       listDriveWatches: vi.fn(async () => []),
       listDriveWatchRetryAdvice: vi.fn(async (): Promise<SpreadsheetWatchRetryAdvice[]> => [
         {
