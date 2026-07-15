@@ -60,22 +60,18 @@ import {
   type CreateProjectInput,
   type CreateRowInput,
   type CreateTableInput,
-  type CreateRowResult,
   type DeleteProjectResult,
   type DeleteTableResult,
   type GetTableCacheStatusResult,
   type ListRowsQuery,
   type ProjectAccessResult,
   type ProjectDoResponse,
-  type RefreshTableCacheResult,
   type ResolvedProjectTableResult,
   type ResolvedTableConfigSnapshot,
-  type ReindexTableResult,
   type RateLimitDoResponse,
   type TableDoResponse,
   TooManyRequestsError,
   type UpdateRowInput,
-  type UpdateRowResult,
   type UpsertTableResult
 } from '@sheetflare/contracts';
 import { ControlPlaneDO, DurableRpcError, ProjectDO, RateLimitDO, TableDO, doRpc } from '@sheetflare/cloudflare';
@@ -2506,11 +2502,13 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'admin.cache.refresh')
     });
 
-    const result = (response as { type: 'table.cache.refresh.result'; result: RefreshTableCacheResult }).result;
+    if (response.type !== 'table.cache.refresh.result') {
+      throw new ServiceUnavailableError('Unexpected table cache refresh response.');
+    }
     if (cacheStatusBeforeRefresh.status !== 'ready' || cacheStatusBeforeRefresh.stale) {
       await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
     }
-    return c.json(result);
+    return c.json(response.result);
   });
 
   app.openapi(reindexTableRoute, async (c) => {
@@ -2524,9 +2522,11 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'admin.cache.reindex')
     });
 
-    const result = (response as { type: 'table.reindex.result'; result: ReindexTableResult }).result;
+    if (response.type !== 'table.reindex.result') {
+      throw new ServiceUnavailableError('Unexpected table reindex response.');
+    }
     await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
-    return c.json(result);
+    return c.json(response.result);
   });
 
   app.openapi(registerSpreadsheetWatchesRoute, async (c) => {
@@ -2676,9 +2676,11 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'rows.create')
     });
 
-    const result = (response as { type: 'table.row.create.result'; result: CreateRowResult }).result;
+    if (response.type !== 'table.row.create.result') {
+      throw new ServiceUnavailableError('Unexpected table row create response.');
+    }
     await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
-    return c.json(result, 201);
+    return c.json(response.result, 201);
   });
 
   app.openapi(updateRowRoute, async (c) => {
@@ -2695,9 +2697,11 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'rows.update')
     });
 
-    const result = (response as { type: 'table.row.update.result'; result: UpdateRowResult }).result;
+    if (response.type !== 'table.row.update.result') {
+      throw new ServiceUnavailableError('Unexpected table row update response.');
+    }
     await invalidateAfterCommittedChange(c, () => invalidateCachedRow(project, table, id));
-    return c.json(result);
+    return c.json(response.result);
   });
 
   app.openapi(deleteRowRoute, async (c) => {
@@ -2712,12 +2716,11 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'rows.delete')
     });
 
-    const result = (response as {
-      type: 'table.row.delete.result';
-      result: { ok: true; deletedId: string };
-    }).result;
+    if (response.type !== 'table.row.delete.result') {
+      throw new ServiceUnavailableError('Unexpected table row delete response.');
+    }
     await invalidateAfterCommittedChange(c, () => invalidateCachedRow(project, table, id));
-    return c.json(result);
+    return c.json(response.result);
   });
 
   app.openapi(listApiKeysRoute, async (c) => {

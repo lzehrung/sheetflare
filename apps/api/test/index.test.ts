@@ -134,12 +134,20 @@ function buildApiKeyRecord(apiKeyId: string) {
   return null;
 }
 
+type UnexpectedTableResponseRequest =
+  | 'table.cache.refresh'
+  | 'table.reindex'
+  | 'table.row.create'
+  | 'table.row.update'
+  | 'table.row.delete';
+
 function createEnv(options?: {
   rateLimitAllowed?: boolean;
   defaultAuthMode?: 'private' | 'public-read';
   projectAccessStatus?: 200 | 404 | 500;
   tableCacheClearStatus?: 200 | 503;
   tableCacheGetUnexpectedResponse?: boolean;
+  tableUnexpectedResponseFor?: UnexpectedTableResponseRequest;
   controlProjectsListUnexpectedResponse?: boolean;
   tableRowsListStatus?: 200 | 503;
   tableCacheTtlSeconds?: number;
@@ -628,6 +636,14 @@ function createEnv(options?: {
       requestContext: body.requestContext
     });
     durableObjectRequests.push(body.type);
+    if (options?.tableUnexpectedResponseFor === body.type) {
+      const response = {
+        type: 'table.cache.clear.result',
+        result: { ok: true }
+      } satisfies TableDoResponse;
+      return Response.json(response);
+    }
+
 
     if (body.type === 'table.row.create') {
       return Response.json({
@@ -3241,6 +3257,106 @@ describe('api routes', () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+
+  it.each([
+    {
+      name: 'cache refresh',
+      requestType: 'table.cache.refresh',
+      path: '/v1/admin/projects/demo/tables/users/refresh',
+      init: {
+        method: 'POST',
+        headers: { authorization: 'Bearer secret' }
+      },
+      message: 'Unexpected table cache refresh response.',
+      requestTypes: ['table.cache.get', 'table.cache.refresh'],
+    },
+    {
+      name: 'table reindex',
+      requestType: 'table.reindex',
+      path: '/v1/admin/projects/demo/tables/users/reindex',
+      init: {
+        method: 'POST',
+        headers: { authorization: 'Bearer secret' }
+      },
+      message: 'Unexpected table reindex response.',
+      requestTypes: ['table.reindex'],
+    },
+    {
+      name: 'row create',
+      requestType: 'table.row.create',
+      path: '/v1/projects/demo/tables/users/rows',
+      init: {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ values: { name: 'Ada' } })
+      },
+      message: 'Unexpected table row create response.',
+      requestTypes: ['table.row.create'],
+    },
+    {
+      name: 'row update',
+      requestType: 'table.row.update',
+      path: '/v1/projects/demo/tables/users/rows/row-1',
+      init: {
+        method: 'PATCH',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ values: { name: 'Grace' } })
+      },
+      message: 'Unexpected table row update response.',
+      requestTypes: ['table.row.update'],
+    },
+    {
+      name: 'row delete',
+      requestType: 'table.row.delete',
+      path: '/v1/projects/demo/tables/users/rows/row-1',
+      init: {
+        method: 'DELETE',
+        headers: { authorization: 'Bearer secret' }
+      },
+      message: 'Unexpected table row delete response.',
+      requestTypes: ['table.row.delete'],
+    }
+  ] satisfies Array<{
+    name: string;
+    requestType: UnexpectedTableResponseRequest;
+    path: string;
+    init: RequestInit;
+    message: string;
+    requestTypes: string[];
+  }>)('rejects an unexpected TableDO response for $name before cache invalidation', async ({
+    requestType,
+    path,
+    init,
+    message,
+    requestTypes
+  }) => {
+    const app = createApp();
+    const env = createEnv({
+      tableUnexpectedResponseFor: requestType,
+      tableCacheStale: true,
+      tableCacheStaleReason: 'ttl-expired'
+    });
+    const response = await app.request(path, init, env);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'SERVICE_UNAVAILABLE',
+        message,
+        details: null
+      }
+    });
+    expect(Reflect.get(env, '__cachedReadPurgeCalls')).toEqual([]);
+    expect(Reflect.get(env, '__tableRequests')).toEqual(
+      requestTypes.map((type) => expect.objectContaining({ type }))
+    );
   });
 
   it('refreshes a table cache if it is stale for admin requests', async () => {
