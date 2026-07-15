@@ -20,7 +20,7 @@ Project policies: [LICENSE](./LICENSE)
 ## Get Started
 
 1. Create a sheet with a tab whose first row contains unique column names, including `_id`.
-2. Run:
+2. Ensure Node.js 22 or newer is installed, then run:
 
 ```powershell
 npm install
