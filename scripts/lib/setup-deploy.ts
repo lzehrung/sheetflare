@@ -4,19 +4,13 @@ import { basename, dirname, join, resolve } from 'node:path';
 import * as ts from 'typescript';
 import { getCommandName, runCommand } from './process';
 import { ScriptError } from './runtime';
+import type { SetupProfile } from './setup-config';
 
 const apiWranglerConfigPath = resolve('apps/api/wrangler.jsonc');
 const stagingApiWranglerConfigPath = resolve('apps/api/wrangler.staging.jsonc');
 
 type JsonObject = Record<string, unknown>;
 
-function normalizeSetupProfile(profile: string) {
-  return profile.trim().toLowerCase();
-}
-
-function isStagingProfile(profile: string) {
-  return normalizeSetupProfile(profile) === 'staging';
-}
 
 function parseJsonConfig(text: string, path: string) {
   let result: ReturnType<typeof ts.parseConfigFileTextToJson>;
@@ -85,11 +79,12 @@ export function patchApiConfigForDeploy(config: JsonObject, googleClientEmail: s
 
 
 export function buildApiDeployCommand(configPath: string) {
-  return ['wrangler@4.85.0', 'deploy', '--config', configPath];
+  return ['wrangler@4.107.0', 'deploy', '--config', configPath];
 }
 
 
-export async function deployApiWorker(profile: string, googleClientEmail: string | null, options: { debug?: boolean } = {}) {
+
+export async function deployApiWorker(profile: SetupProfile, googleClientEmail: string | null, options: { debug?: boolean } = {}) {
   return withPatchedJsonConfig(
     getApiWranglerConfigPath(profile),
     (config) => patchApiConfigForDeploy(config, googleClientEmail),
@@ -115,6 +110,6 @@ export async function deployApiWorker(profile: string, googleClientEmail: string
   );
 }
 
-export function getApiWranglerConfigPath(profile = 'production') {
-  return isStagingProfile(profile) ? stagingApiWranglerConfigPath : apiWranglerConfigPath;
+export function getApiWranglerConfigPath(profile: SetupProfile = 'production') {
+  return profile === 'staging' ? stagingApiWranglerConfigPath : apiWranglerConfigPath;
 }

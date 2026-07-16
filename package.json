@@ -32,6 +32,7 @@
     "e2e:browser": "tsx scripts/admin-browser-e2e.ts",
     "e2e:local": "tsx scripts/local-e2e.ts",
     "setup": "tsx scripts/setup.ts",
+    "setup:staging": "tsx scripts/setup.ts --profile staging --config sheetflare.staging.setup.json",
     "setup:verify": "tsx scripts/setup.ts --verify",
     "doctor": "npm run setup:verify",
     "deploy": "tsx scripts/setup.ts --deploy",
@@ -52,7 +53,7 @@
     "load:staging": "npm run load"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260418.0",
+    "@cloudflare/workers-types": "^4.20260702.1",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.9.1",
     "eslint": "^10.2.1",

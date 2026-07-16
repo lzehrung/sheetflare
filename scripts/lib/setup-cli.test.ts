@@ -15,16 +15,23 @@ describe('parseSetupArgs', () => {
       'sheetflare-prod',
       '--google-service-account',
       'sheetflare-prod'
-    ])).toMatchObject({
-      configPath: 'configs/demo/sheetflare.setup.json',
-      applySecrets: true,
-      deploy: true,
-      smoke: true,
-      verify: true,
-      provisionGoogle: true,
-      googleProjectId: 'sheetflare-prod',
-      googleServiceAccountName: 'sheetflare-prod'
-    });
+    ]))
+      .toMatchObject({
+        configPath: 'configs/demo/sheetflare.setup.json',
+        help: false,
+        writeDefaultConfig: false,
+        applySecrets: true,
+        deploy: true,
+        bootstrap: false,
+        smoke: true,
+        verify: true,
+        showSecrets: false,
+        advanced: false,
+        debug: false,
+        provisionGoogle: true,
+        googleProjectId: 'sheetflare-prod',
+        googleServiceAccountName: 'sheetflare-prod'
+      });
   });
 
   it('parses advanced setup mode', () => {
@@ -37,6 +44,16 @@ describe('parseSetupArgs', () => {
     expect(parseSetupArgs(['--debug'])).toMatchObject({
       debug: true
     });
+  });
+
+  it('parses an explicit setup profile', () => {
+    expect(parseSetupArgs(['--profile', 'staging'])).toMatchObject({
+      profile: 'staging'
+    });
+  });
+
+  it('rejects a profile flag without a value', () => {
+    expect(() => parseSetupArgs(['--profile'])).toThrow('Missing value for --profile.');
   });
 
   it('parses help flags without treating them as unknown arguments', () => {

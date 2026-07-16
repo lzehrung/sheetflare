@@ -4,13 +4,78 @@ import {
   getSetupConfigGoogleCredentialRefs,
   normalizeSpreadsheetId,
   parseSetupConfig,
-  setupConfigUsesDefaultGoogleCredential
+  setupConfigUsesDefaultGoogleCredential,
+  type SetupProfile
 } from './setup-config';
 
 describe('parseSetupConfig', () => {
-  it('accepts a legacy deploy block but removes it from the parsed config', () => {
+  it.each([
+    { input: ' PrOdUcTiOn ', expected: 'production' },
+    { input: ' StAgInG ', expected: 'staging' }
+  ] satisfies ReadonlyArray<{ input: string; expected: SetupProfile }>)('parses $input as the supported $expected profile', ({ input, expected }) => {
+    const inputConfig: Record<string, unknown> = JSON.parse(createDefaultSetupConfig(expected));
+    inputConfig.profile = input;
+
+    const profile: SetupProfile = parseSetupConfig(inputConfig).profile;
+
+    expect(profile).toBe(expected);
+  });
+
+  it('parses the legacy generated local setup config as canonical production without retaining deploy settings', () => {
+    const legacyGeneratedDefaultConfig = {
+      profile: ' LoCaL ',
+      deploy: {
+        api: true,
+        admin: true
+      },
+      privateProject: {
+        slug: 'demo',
+        name: 'Demo',
+        spreadsheetId: '<SPREADSHEET_ID>',
+        googleCredentialRef: 'default',
+        tables: [
+          {
+            tableSlug: 'users',
+            sheetTabName: 'Users',
+            idColumn: '_id',
+            indexedFields: ['name', 'status'],
+            cacheTtlSeconds: 60
+          }
+        ]
+      },
+      publicReadProject: null,
+      smoke: {
+        enabled: true,
+        privateTableSlug: 'users',
+        publicTableSlug: null,
+        adminKeyName: 'demo-admin',
+        privateReadKeyName: 'demo-read',
+        mutationKeyName: 'demo-mutation',
+        createValues: {
+          name: 'Smoke Row',
+          status: 'active'
+        },
+        updateValues: {
+          status: 'inactive'
+        }
+      }
+    };
+
+    const parsed = parseSetupConfig(legacyGeneratedDefaultConfig);
+    expect(parsed.profile).toBe('production');
+    expect(parsed).not.toHaveProperty('deploy');
+  });
+
+  it.each(['production-like', 'stage', 'localhost'])('rejects the unsupported %s profile instead of selecting a deployment fallback', (profile) => {
+    const inputConfig: Record<string, unknown> = JSON.parse(createDefaultSetupConfig('production'));
+    inputConfig.profile = profile;
+
+    expect(() => parseSetupConfig(inputConfig)).toThrow('profile must be production or staging.');
+  });
+
+  it('parses a legacy private-only setup config and removes deploy settings', () => {
     const config = parseSetupConfig({
-      profile: 'local',
+      profile: 'production',
       deploy: {
         api: true,
         admin: false
@@ -45,7 +110,7 @@ describe('parseSetupConfig', () => {
     });
 
     expect(config).toMatchObject({
-      profile: 'local',
+      profile: 'production',
       privateProject: {
         slug: 'demo'
       },
@@ -60,7 +125,7 @@ describe('parseSetupConfig', () => {
 
   it('rejects project-level defaultAuthMode in setup config', () => {
     expect(() => parseSetupConfig({
-      profile: 'local',
+      profile: 'production',
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -93,7 +158,7 @@ describe('parseSetupConfig', () => {
 
   it('parses a setup config with optional public-read coverage', () => {
     expect(parseSetupConfig({
-      profile: 'local',
+      profile: 'production',
       privateProject: {
         slug: 'demo-private',
         name: 'Demo Private',
@@ -142,7 +207,7 @@ describe('parseSetupConfig', () => {
 
   it('rejects duplicate smoke key names', () => {
     expect(() => parseSetupConfig({
-      profile: 'local',
+      profile: 'production',
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -174,7 +239,7 @@ describe('parseSetupConfig', () => {
 
   it('rejects a private smoke target that does not exist', () => {
     expect(() => parseSetupConfig({
-      profile: 'local',
+      profile: 'production',
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -206,7 +271,7 @@ describe('parseSetupConfig', () => {
 
   it('requires a public smoke table when public-read project is configured', () => {
     expect(() => parseSetupConfig({
-      profile: 'local',
+      profile: 'production',
       privateProject: {
         slug: 'demo-private',
         name: 'Demo Private',
@@ -248,7 +313,7 @@ describe('parseSetupConfig', () => {
 
   it('rejects smoke writes to the managed id column', () => {
     expect(() => parseSetupConfig({
-      profile: 'local',
+      profile: 'production',
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -281,7 +346,7 @@ describe('parseSetupConfig', () => {
 
   it('rejects smoke writes to read-only fields', () => {
     expect(() => parseSetupConfig({
-      profile: 'local',
+      profile: 'production',
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -314,7 +379,7 @@ describe('parseSetupConfig', () => {
 
   it('rejects smoke values outside the real row contract', () => {
     expect(() => parseSetupConfig({
-      profile: 'local',
+      profile: 'production',
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -350,7 +415,7 @@ describe('parseSetupConfig', () => {
 describe('setup credential refs', () => {
   it('detects default and named Google credential refs from configured projects', () => {
     const config = parseSetupConfig({
-      profile: 'local',
+      profile: 'production',
       privateProject: {
         slug: 'demo-private',
         name: 'Demo Private',
@@ -396,7 +461,7 @@ describe('setup credential refs', () => {
 
   it('detects named-only Google credential configs', () => {
     const config = parseSetupConfig({
-      profile: 'local',
+      profile: 'production',
       privateProject: {
         slug: 'demo',
         name: 'Demo',
@@ -455,7 +520,20 @@ describe('setup config serialization', () => {
 
     expect(parsed).not.toHaveProperty('deploy');
     expect(parseSetupConfig(parsed)).toMatchObject({
-      profile: 'local',
+      profile: 'production',
+      privateProject: {
+        slug: 'demo'
+      }
+    });
+  });
+
+  it('round-trips an explicit staging starter config without a deploy block', () => {
+    const serialized = createDefaultSetupConfig('staging');
+    const parsed: unknown = JSON.parse(serialized);
+
+    expect(parsed).not.toHaveProperty('deploy');
+    expect(parseSetupConfig(parsed)).toMatchObject({
+      profile: 'staging',
       privateProject: {
         slug: 'demo'
       }

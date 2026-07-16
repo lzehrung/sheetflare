@@ -1,6 +1,7 @@
 import { Scalar } from '@scalar/hono-api-reference';
 import type { Context } from 'hono';
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { WorkerEntrypoint, exports as workerExports } from 'cloudflare:workers';
 import {
   AppError,
   adminCreateApiKeyInputSchema,
@@ -59,24 +60,18 @@ import {
   type CreateProjectInput,
   type CreateRowInput,
   type CreateTableInput,
-  type CreateRowResult,
   type DeleteProjectResult,
   type DeleteTableResult,
-  type GetRowResult,
-  type GetSchemaResult,
   type GetTableCacheStatusResult,
   type ListRowsQuery,
-  type ListRowsResult,
   type ProjectAccessResult,
   type ProjectDoResponse,
-  type RefreshTableCacheResult,
   type ResolvedProjectTableResult,
-  type ReindexTableResult,
+  type ResolvedTableConfigSnapshot,
   type RateLimitDoResponse,
   type TableDoResponse,
   TooManyRequestsError,
   type UpdateRowInput,
-  type UpdateRowResult,
   type UpsertTableResult
 } from '@sheetflare/contracts';
 import { ControlPlaneDO, DurableRpcError, ProjectDO, RateLimitDO, TableDO, doRpc } from '@sheetflare/cloudflare';
@@ -293,7 +288,16 @@ const maxRecentApiKeyTouches = 10_000;
 const recentApiKeyTouches = new Map<string, number>();
 const corsAllowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
 const corsAllowedHeaders = 'Authorization, Content-Type';
-const corsExposedHeaders = 'X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset';
+const cacheStatusHeaderName = 'x-sheetflare-cache-status';
+const cacheInvalidationHeaderName = 'x-sheetflare-cache-invalidation';
+const corsExposedHeaders = [
+  'X-Request-Id',
+  'X-RateLimit-Limit',
+  'X-RateLimit-Remaining',
+  'X-RateLimit-Reset',
+  cacheStatusHeaderName,
+  cacheInvalidationHeaderName
+].join(', ');
 
 function pruneRecentApiKeyTouches(nowMs: number) {
   if (recentApiKeyTouches.size < maxRecentApiKeyTouches) {
@@ -967,6 +971,65 @@ async function clearTableCacheState(c: AppContext, projectSlug: string, tableSlu
   });
 }
 
+async function getTableCacheStatusData(c: AppContext, projectSlug: string, tableSlug: string) {
+  const response = await doRpc<TableDoResponse>(getTableStub(c.env, projectSlug, tableSlug), {
+    type: 'table.cache.get',
+    projectSlug,
+    tableSlug
+  });
+
+  if (response.type !== 'table.cache.get.result') {
+    throw new ServiceUnavailableError('Unexpected table cache status response.');
+  }
+
+  return response.result.data;
+}
+
+async function invalidateCachedProject(projectSlug: string) {
+  await workerExports.CachedTableReads.invalidateProject(projectSlug);
+}
+
+async function invalidateCachedTable(projectSlug: string, tableSlug: string) {
+  await workerExports.CachedTableReads.invalidateTable(projectSlug, tableSlug);
+}
+
+async function invalidateCachedRow(projectSlug: string, tableSlug: string, rowId: string) {
+  await workerExports.CachedTableReads.invalidateRow(projectSlug, tableSlug, rowId);
+}
+
+async function invalidateAfterCommittedChange(c: AppContext, invalidate: () => Promise<void>) {
+  try {
+    await invalidate();
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error);
+    c.header(cacheInvalidationHeaderName, 'failed');
+    console.error(JSON.stringify({
+      event: 'cache.invalidation.failed',
+      method: c.req.method,
+      path: c.req.path,
+      requestId: c.get('requestId'),
+      errorName: normalizedError instanceof Error ? normalizedError.name : 'UnknownError',
+      errorMessage: normalizedError instanceof Error ? normalizedError.message : String(normalizedError)
+    }));
+  }
+}
+
+async function invalidateCachedProjectsForSpreadsheet(c: AppContext, spreadsheetId: string) {
+  const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+    type: 'control.projects.list'
+  });
+  if (response.type !== 'control.projects.list.result') {
+    throw new ServiceUnavailableError('Unexpected control plane projects list response.');
+  }
+  const result = response.result;
+
+  for (const project of result.data) {
+    if (project.spreadsheetId === spreadsheetId) {
+      await invalidateAfterCommittedChange(c, () => invalidateCachedProject(project.slug));
+    }
+  }
+}
+
 async function getApiKeyRecord(c: { env: Env }, apiKeyId: string) {
   const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
     type: 'control.api-key.get',
@@ -1544,6 +1607,504 @@ const revokeApiKeyRoute = createRoute({
   }
 });
 
+const cachedTableReadPrefixSegments = ['internal', 'cache', 'v1', 'projects'] as const;
+
+type CachedTableReadOperation =
+  | { kind: 'listRows'; projectSlug: string; tableSlug: string; query: ListRowsQuery }
+  | { kind: 'getRow'; projectSlug: string; tableSlug: string; rowId: string }
+  | { kind: 'getSchema'; projectSlug: string; tableSlug: string };
+
+export type CachedTableReadProps = Readonly<{
+  resolvedConfig: ResolvedTableConfigSnapshot;
+}>;
+
+function noStoreJsonResponse(body: unknown, status = 200) {
+  return Response.json(body, {
+    status,
+    headers: {
+      'cache-control': 'no-store'
+    }
+  });
+}
+
+function applyDefaultGatewayCacheSafetyHeaders(response: Response) {
+  const cacheControl = response.headers.get('cache-control');
+  const hasNoStore = cacheControl?.split(',').some((directive) => directive.trim().toLowerCase() === 'no-store');
+  if (!hasNoStore) {
+    response.headers.set('cache-control', 'no-store');
+  }
+  response.headers.delete('cloudflare-cdn-cache-control');
+  response.headers.delete('cache-tag');
+}
+
+function noStoreErrorResponse(error: unknown) {
+  const normalizedError = normalizeRequestError(error);
+  const rpcErrorResponse = normalizedError instanceof DurableRpcError ? parseDurableRpcErrorResponse(normalizedError) : null;
+  const { status, body } = rpcErrorResponse ?? toErrorResponse(normalizedError);
+  return noStoreJsonResponse(body, status);
+}
+
+function decodeCachedPathSegment(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new BadRequestError('Malformed cached table read path.');
+  }
+}
+
+function parseListRowsQueryFromUrl(url: URL) {
+  return parseListRowsQuery({
+    req: {
+      query: (name) => url.searchParams.get(name) ?? undefined
+    }
+  });
+}
+
+function parseCachedTableReadRequest(request: Request): CachedTableReadOperation {
+  const url = new URL(request.url);
+  const segments = url.pathname.split('/').filter((segment) => segment.length > 0);
+  const hasPrefix = cachedTableReadPrefixSegments.every((segment, index) => segments[index] === segment);
+  if (!hasPrefix || segments[5] !== 'tables') {
+    throw new NotFoundError('Cached table read route is not configured.');
+  }
+
+  const projectSlug = decodeCachedPathSegment(segments[4] ?? '');
+  const tableSlug = decodeCachedPathSegment(segments[6] ?? '');
+
+  if (segments.length === 8 && segments[7] === 'schema') {
+    const params = adminProjectTableParamsSchema.parse({ project: projectSlug, table: tableSlug });
+    return { kind: 'getSchema', projectSlug: params.project, tableSlug: params.table };
+  }
+
+  if (segments.length === 8 && segments[7] === 'rows') {
+    const params = adminProjectTableParamsSchema.parse({ project: projectSlug, table: tableSlug });
+    return {
+      kind: 'listRows',
+      projectSlug: params.project,
+      tableSlug: params.table,
+      query: parseListRowsQueryFromUrl(url)
+    };
+  }
+
+  if (segments.length === 9 && segments[7] === 'rows') {
+    const rowId = decodeCachedPathSegment(segments[8] ?? '');
+    const params = rowParamsSchema.parse({ project: projectSlug, table: tableSlug, id: rowId });
+    return { kind: 'getRow', projectSlug: params.project, tableSlug: params.table, rowId: params.id };
+  }
+
+  throw new NotFoundError('Cached table read route is not configured.');
+}
+
+async function runCachedTableRead(
+  env: Env,
+  operation: CachedTableReadOperation,
+  resolvedConfig: ResolvedTableConfigSnapshot
+) {
+  if (operation.kind === 'listRows') {
+    const response = await doRpc<TableDoResponse>(getTableStub(env, operation.projectSlug, operation.tableSlug), {
+      type: 'table.rows.list',
+      projectSlug: operation.projectSlug,
+      tableSlug: operation.tableSlug,
+      query: operation.query,
+      resolvedConfig
+    });
+    if (response.type !== 'table.rows.list.result') {
+      throw new ServiceUnavailableError('Unexpected table rows list response.');
+    }
+
+    return response.result;
+  }
+
+  if (operation.kind === 'getRow') {
+    const response = await doRpc<TableDoResponse>(getTableStub(env, operation.projectSlug, operation.tableSlug), {
+      type: 'table.row.get',
+      projectSlug: operation.projectSlug,
+      tableSlug: operation.tableSlug,
+      rowId: operation.rowId,
+      resolvedConfig
+    });
+    if (response.type !== 'table.row.get.result') {
+      throw new ServiceUnavailableError('Unexpected table row get response.');
+    }
+
+    return response.result;
+  }
+
+  const response = await doRpc<TableDoResponse>(getTableStub(env, operation.projectSlug, operation.tableSlug), {
+    type: 'table.schema.get',
+    projectSlug: operation.projectSlug,
+    tableSlug: operation.tableSlug,
+    resolvedConfig
+  });
+  if (response.type !== 'table.schema.get.result') {
+    throw new ServiceUnavailableError('Unexpected table schema get response.');
+  }
+
+  return response.result;
+}
+
+async function getCachedTableReadCacheStatus(
+  env: Env,
+  operation: CachedTableReadOperation,
+  resolvedConfig: ResolvedTableConfigSnapshot
+) {
+  const response = await doRpc<TableDoResponse>(getTableStub(env, operation.projectSlug, operation.tableSlug), {
+    type: 'table.cache.get',
+    projectSlug: operation.projectSlug,
+    tableSlug: operation.tableSlug,
+    resolvedConfig
+  });
+  if (response.type !== 'table.cache.get.result') {
+    throw new ServiceUnavailableError('Unexpected table cache status response.');
+  }
+
+  return response.result.data;
+}
+
+function getExternalChangeDebounceSeconds(cacheStatus: GetTableCacheStatusResult['data']) {
+  if (!cacheStatus.externalChange.pending || !cacheStatus.externalChange.debounceUntil) {
+    return null;
+  }
+
+  const debounceUntilMs = Date.parse(cacheStatus.externalChange.debounceUntil);
+  if (!Number.isFinite(debounceUntilMs)) {
+    return null;
+  }
+
+  return Math.max(0, Math.floor((debounceUntilMs - Date.now()) / 1000));
+}
+
+function getCachedTableReadEdgeTtlSeconds(cacheStatus: GetTableCacheStatusResult['data']) {
+  if (cacheStatus.cacheTtlSeconds <= 0 || cacheStatus.status !== 'ready' || cacheStatus.stale) {
+    return 0;
+  }
+
+  const debounceSeconds = getExternalChangeDebounceSeconds(cacheStatus);
+  if (debounceSeconds === null) {
+    return cacheStatus.cacheTtlSeconds;
+  }
+
+  return Math.min(cacheStatus.cacheTtlSeconds, debounceSeconds);
+}
+
+function getCachedTableReadTags(operation: CachedTableReadOperation) {
+  const projectTag = getProjectCacheTag(operation.projectSlug);
+  const tableTag = getTableCacheTag(operation.projectSlug, operation.tableSlug);
+  if (operation.kind !== 'getRow') {
+    return [projectTag, tableTag];
+  }
+
+  return [
+    projectTag,
+    tableTag,
+    getRowCacheTag(operation.projectSlug, operation.tableSlug, operation.rowId)
+  ];
+}
+
+function cachedTableReadSuccessHeaders(operation: CachedTableReadOperation, cacheStatus: GetTableCacheStatusResult['data']) {
+  const edgeTtlSeconds = getCachedTableReadEdgeTtlSeconds(cacheStatus);
+  const cacheTags = serializeCacheTags(getCachedTableReadTags(operation));
+  const headers = new Headers({
+    'cache-control': 'private, no-store'
+  });
+
+  if (cacheTags !== null) {
+    headers.set('cache-tag', cacheTags);
+  }
+
+  headers.set(
+    'cloudflare-cdn-cache-control',
+    edgeTtlSeconds > 0 && cacheTags !== null
+      ? `public, max-age=${edgeTtlSeconds}, stale-if-error=0`
+      : 'no-store'
+  );
+
+  return headers;
+}
+
+async function cachedTableReadSuccessResponse(
+  env: Env,
+  operation: CachedTableReadOperation,
+  resolvedConfig: ResolvedTableConfigSnapshot
+) {
+  const result = await runCachedTableRead(env, operation, resolvedConfig);
+  const cacheStatus = await getCachedTableReadCacheStatus(env, operation, resolvedConfig);
+  return Response.json(result, {
+    headers: cachedTableReadSuccessHeaders(operation, cacheStatus)
+  });
+}
+
+function compareStableJsonKeys(left: string, right: string) {
+  if (left < right) {
+    return -1;
+  }
+  if (left > right) {
+    return 1;
+  }
+  return 0;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableJson(entry)).join(',')}]`;
+  }
+
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value).sort(([left], [right]) => compareStableJsonKeys(left, right));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(',')}}`;
+  }
+
+  return JSON.stringify(value) ?? 'null';
+}
+
+async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function canonicalListRowsSearch(query?: ListRowsQuery) {
+  if (!query) {
+    return '';
+  }
+
+  const params = new URLSearchParams();
+  if (query.limit !== undefined) {
+    params.set('limit', String(query.limit));
+  }
+  if (query.cursor) {
+    params.set('cursor', query.cursor);
+  }
+  if (query.sort) {
+    params.set('sort', query.sort);
+  }
+  if (query.fields && query.fields.length > 0) {
+    params.set('fields', query.fields.join(','));
+  }
+  if (query.filter) {
+    params.set('filter', stableJson(query.filter));
+  }
+
+  const search = params.toString();
+  return search ? `?${search}` : '';
+}
+
+async function buildCachedTableReadConfigVersion(tableAccess: ResolvedProjectTableResult) {
+  return sha256Hex(stableJson({
+    project: tableAccess.project,
+    table: tableAccess.table,
+    resolvedConfig: tableAccess.resolvedConfig
+  }));
+}
+
+type CachedTableReadFetchOptions = {
+  tableAccess: ResolvedProjectTableResult;
+  query?: ListRowsQuery;
+};
+
+function cachedTableReadBasePath(projectSlug: string, tableSlug: string) {
+  return `/internal/cache/v1/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}`;
+}
+
+function createCachedTableReadHeaders(request: Request) {
+  const headers = new Headers();
+  const accept = request.headers.get('accept');
+  if (accept) {
+    headers.set('accept', accept);
+  }
+
+  return headers;
+}
+
+async function createCachedTableReadRequest(c: AppContext, pathname: string, options: CachedTableReadFetchOptions) {
+  const url = new URL(pathname, c.req.url);
+  url.search = canonicalListRowsSearch(options.query);
+
+  const cacheKey = new URL(pathname, 'https://sheetflare-cache.internal');
+  cacheKey.search = url.search;
+  cacheKey.searchParams.set('__sf_auth', options.tableAccess.project.defaultAuthMode);
+  cacheKey.searchParams.set('__sf_config', await buildCachedTableReadConfigVersion(options.tableAccess));
+
+  return {
+    request: new Request(url, {
+      method: 'GET',
+      headers: createCachedTableReadHeaders(c.req.raw)
+    }),
+    cacheKey: cacheKey.toString()
+  };
+}
+
+async function fetchCachedTableRead(c: AppContext, pathname: string, options: CachedTableReadFetchOptions) {
+  const { request, cacheKey } = await createCachedTableReadRequest(c, pathname, options);
+  return workerExports.CachedTableReads({
+    props: {
+      resolvedConfig: options.tableAccess.resolvedConfig
+    }
+  }).fetch(request, {
+    cf: {
+      cacheKey
+    }
+  });
+}
+
+async function parseCachedTableReadResponse<TSchema extends z.ZodType>(
+  c: AppContext,
+  response: Response,
+  schema: TSchema
+): Promise<z.infer<TSchema>> {
+  const cacheControl = response.headers.get('cache-control');
+  if (cacheControl) {
+    c.header('cache-control', cacheControl);
+  }
+
+  const cacheStatus = response.headers.get('cf-cache-status')?.trim();
+  if (cacheStatus) {
+    c.header(cacheStatusHeaderName, cacheStatus);
+  }
+
+  const body: unknown = await response.json();
+  if (response.ok) {
+    return schema.parse(body);
+  }
+
+  const errorBody = errorResponseSchema.parse(body);
+  throw new AppError(errorBody.error.message, errorBody.error.code, response.status, errorBody.error.details);
+}
+
+async function fetchCachedTableReadJson<TSchema extends z.ZodType>(
+  c: AppContext,
+  schema: TSchema,
+  pathname: string,
+  options: CachedTableReadFetchOptions
+): Promise<z.infer<TSchema>> {
+  return parseCachedTableReadResponse(c, await fetchCachedTableRead(c, pathname, options), schema);
+}
+
+const maxPurgeCacheTagLength = 1024;
+const maxCacheTagHeaderLength = 16 * 1024;
+
+function encodeCacheTagPart(value: string) {
+  return encodeURIComponent(value);
+}
+
+function isPrintableAsciiCacheTag(value: string) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.charCodeAt(index);
+    if (codePoint < 0x21 || codePoint > 0x7e) {
+      return false;
+    }
+  }
+
+  return value.length > 0;
+}
+
+function isValidCacheTag(value: string) {
+  return value.length <= maxPurgeCacheTagLength && isPrintableAsciiCacheTag(value);
+}
+
+function serializeCacheTags(tags: string[]) {
+  let headerLength = 0;
+  let first = true;
+  for (const tag of tags) {
+    if (!isValidCacheTag(tag)) {
+      return null;
+    }
+
+    headerLength += tag.length;
+    if (!first) {
+      headerLength += 1;
+    }
+    first = false;
+    if (headerLength > maxCacheTagHeaderLength) {
+      return null;
+    }
+  }
+
+  return tags.join(',');
+}
+
+function getProjectCacheTag(projectSlug: string) {
+  return `project:${encodeCacheTagPart(projectSlug)}`;
+}
+
+function getTableCacheTag(projectSlug: string, tableSlug: string) {
+  return `table:${encodeCacheTagPart(projectSlug)}:${encodeCacheTagPart(tableSlug)}`;
+}
+
+function getRowCacheTag(projectSlug: string, tableSlug: string, rowId: string) {
+  return `row:${encodeCacheTagPart(projectSlug)}:${encodeCacheTagPart(tableSlug)}:${encodeCacheTagPart(rowId)}`;
+}
+
+export class CachedTableReads extends WorkerEntrypoint<Env, CachedTableReadProps> {
+  async fetch(request: Request): Promise<Response> {
+    if (request.method === 'HEAD') {
+      return new Response(null, {
+        status: 405,
+        headers: {
+          allow: 'GET',
+          'cache-control': 'no-store'
+        }
+      });
+    }
+
+    if (request.method !== 'GET') {
+      return noStoreJsonResponse(
+        {
+          error: {
+            code: 'METHOD_NOT_ALLOWED',
+            message: 'Cached table reads only support GET requests.',
+            details: null
+          }
+        },
+        405
+      );
+    }
+
+    try {
+      return await cachedTableReadSuccessResponse(
+        this.env,
+        parseCachedTableReadRequest(request),
+        this.ctx.props.resolvedConfig
+      );
+    } catch (error) {
+      return noStoreErrorResponse(error);
+    }
+  }
+
+  private async purgeTags(tags: string[]): Promise<void> {
+    const workerCache = this.ctx.cache;
+    if (!workerCache) {
+      throw new ServiceUnavailableError('Workers Cache purge API is unavailable.');
+    }
+
+    const result = await workerCache.purge({ tags });
+    if (!result.success) {
+      const failures = result.errors.map(({ code, message }) => `${code}: ${message}`).join('; ');
+      const suffix = failures ? `: ${failures}` : '.';
+      throw new Error(`Workers Cache purge was unsuccessful${suffix}`);
+    }
+  }
+
+  async invalidateProject(projectSlug: string): Promise<void> {
+    await this.purgeTags([getProjectCacheTag(projectSlug)]);
+  }
+
+  async invalidateTable(projectSlug: string, tableSlug: string): Promise<void> {
+    await this.purgeTags([getTableCacheTag(projectSlug, tableSlug)]);
+  }
+
+  async invalidateRow(projectSlug: string, tableSlug: string, rowId: string): Promise<void> {
+    const tags = [getTableCacheTag(projectSlug, tableSlug)];
+    const rowTag = getRowCacheTag(projectSlug, tableSlug, rowId);
+    if (isValidCacheTag(rowTag)) {
+      tags.push(rowTag);
+    }
+
+    await this.purgeTags(tags);
+  }
+}
+
 function createApp() {
   const app = new OpenAPIHono<{ Bindings: Env; Variables: AppVariables }>();
 
@@ -1558,6 +2119,7 @@ function createApp() {
       applyCorsHeaders(c.res, c.req.raw, c.env);
     }
 
+    applyDefaultGatewayCacheSafetyHeaders(c.res);
     c.res.headers.set('x-request-id', c.get('requestId'));
     const rateLimit = c.get('rateLimit');
     const rateLimitContext = c.get('rateLimitContext');
@@ -1758,6 +2320,9 @@ function createApp() {
       type: 'project.create.result';
       result: { data: AdminGetProjectResult; created: boolean };
     }).result;
+    if (!result.created) {
+      await invalidateAfterCommittedChange(c, () => invalidateCachedProject(result.data.project.slug));
+    }
     return c.json(result.data, result.created ? 201 : 200);
   });
 
@@ -1778,6 +2343,7 @@ function createApp() {
       type: 'project.delete.result';
       result: DeleteProjectResult;
     }).result;
+    await invalidateAfterCommittedChange(c, () => invalidateCachedProject(project));
 
     return c.json(result);
   });
@@ -1848,6 +2414,9 @@ function createApp() {
       type: 'project.table.create.result';
       result: { data: UpsertTableResult['data']; created: boolean };
     }).result;
+    if (!result.created) {
+      await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, result.data.tableSlug));
+    }
     return c.json(
       { data: result.data },
       result.created ? 201 : 200
@@ -1868,6 +2437,7 @@ function createApp() {
       type: 'project.table.delete.result';
       result: DeleteTableResult;
     }).result;
+    await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
 
     return c.json(result);
   });
@@ -1884,16 +2454,12 @@ function createApp() {
       assertProjectScope(auth, 'table:read', params.project);
     }
     const query = parseListRowsQuery(c);
-    const response = await doRpc<TableDoResponse>(getTableStub(c.env, params.project, params.table), {
-      type: 'table.rows.list',
-      projectSlug: params.project,
-      tableSlug: params.table,
-      query,
-      resolvedConfig: tableAccess.resolvedConfig,
-      requestContext: buildTableRequestContext(c, 'rows.list')
-    });
-
-    return c.json((response as { type: 'table.rows.list.result'; result: ListRowsResult }).result);
+    return c.json(await fetchCachedTableReadJson(
+      c,
+      listRowsResultSchema,
+      `${cachedTableReadBasePath(params.project, params.table)}/rows`,
+      { tableAccess, query }
+    ));
   });
 
   app.openapi(getSchemaRoute, async (c) => {
@@ -1907,34 +2473,28 @@ function createApp() {
     if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
       assertProjectScope(auth, 'table:read', params.project);
     }
-    const response = await doRpc<TableDoResponse>(getTableStub(c.env, params.project, params.table), {
-      type: 'table.schema.get',
-      projectSlug: params.project,
-      tableSlug: params.table,
-      resolvedConfig: tableAccess.resolvedConfig,
-      requestContext: buildTableRequestContext(c, 'rows.schema.get')
-    });
-
-    return c.json((response as { type: 'table.schema.get.result'; result: GetSchemaResult }).result);
+    return c.json(await fetchCachedTableReadJson(
+      c,
+      getSchemaResultSchema,
+      `${cachedTableReadBasePath(params.project, params.table)}/schema`,
+      { tableAccess }
+    ));
   });
 
   app.openapi(getCacheStatusRoute, async (c) => {
     const auth = await authenticateRequest(c);
     const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
     assertProjectScope(auth, 'admin:projects', project);
-    const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
-      type: 'table.cache.get',
-      projectSlug: project,
-      tableSlug: table
+    return c.json({
+      data: await getTableCacheStatusData(c, project, table)
     });
-
-    return c.json((response as { type: 'table.cache.get.result'; result: GetTableCacheStatusResult }).result);
   });
 
   app.openapi(refreshTableCacheRoute, async (c) => {
     const auth = await authenticateRequest(c);
     const { project, table } = parsePathParams(c, adminProjectTableParamsSchema);
     assertProjectScope(auth, 'admin:projects', project);
+    const cacheStatusBeforeRefresh = await getTableCacheStatusData(c, project, table);
     const response = await doRpc<TableDoResponse>(getTableStub(c.env, project, table), {
       type: 'table.cache.refresh',
       projectSlug: project,
@@ -1942,7 +2502,13 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'admin.cache.refresh')
     });
 
-    return c.json((response as { type: 'table.cache.refresh.result'; result: RefreshTableCacheResult }).result);
+    if (response.type !== 'table.cache.refresh.result') {
+      throw new ServiceUnavailableError('Unexpected table cache refresh response.');
+    }
+    if (cacheStatusBeforeRefresh.status !== 'ready' || cacheStatusBeforeRefresh.stale) {
+      await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
+    }
+    return c.json(response.result);
   });
 
   app.openapi(reindexTableRoute, async (c) => {
@@ -1956,7 +2522,11 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'admin.cache.reindex')
     });
 
-    return c.json((response as { type: 'table.reindex.result'; result: ReindexTableResult }).result);
+    if (response.type !== 'table.reindex.result') {
+      throw new ServiceUnavailableError('Unexpected table reindex response.');
+    }
+    await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
+    return c.json(response.result);
   });
 
   app.openapi(registerSpreadsheetWatchesRoute, async (c) => {
@@ -2054,7 +2624,7 @@ function createApp() {
     }
 
     c.set('authPrincipal', 'system:google-drive');
-    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+    const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
       type: 'control.spreadsheet-watch.notify',
       channelId,
       resourceId,
@@ -2063,6 +2633,13 @@ function createApp() {
       changedAt: new Date().toISOString(),
       channelExpiration: c.req.header('x-goog-channel-expiration')?.trim() ?? null
     });
+    if (response.type !== 'control.spreadsheet-watch.notify.result') {
+      throw new ServiceUnavailableError('Unexpected control plane spreadsheet watch notify response.');
+    }
+    const result = response.result;
+    if (result.accepted && result.spreadsheetId && result.debounceUntil) {
+      await invalidateCachedProjectsForSpreadsheet(c, result.spreadsheetId);
+    }
 
     return new Response(null, { status: 204 });
   });
@@ -2078,16 +2655,12 @@ function createApp() {
     if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
       assertProjectScope(auth, 'table:read', params.project);
     }
-    const response = await doRpc<TableDoResponse>(getTableStub(c.env, params.project, params.table), {
-      type: 'table.row.get',
-      projectSlug: params.project,
-      tableSlug: params.table,
-      rowId: params.id,
-      resolvedConfig: tableAccess.resolvedConfig,
-      requestContext: buildTableRequestContext(c, 'rows.get')
-    });
-
-    return c.json((response as { type: 'table.row.get.result'; result: GetRowResult }).result);
+    return c.json(await fetchCachedTableReadJson(
+      c,
+      getRowResultSchema,
+      `${cachedTableReadBasePath(params.project, params.table)}/rows/${encodeURIComponent(params.id)}`,
+      { tableAccess }
+    ));
   });
 
   app.openapi(createRowRoute, async (c) => {
@@ -2103,7 +2676,11 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'rows.create')
     });
 
-    return c.json((response as { type: 'table.row.create.result'; result: CreateRowResult }).result, 201);
+    if (response.type !== 'table.row.create.result') {
+      throw new ServiceUnavailableError('Unexpected table row create response.');
+    }
+    await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
+    return c.json(response.result, 201);
   });
 
   app.openapi(updateRowRoute, async (c) => {
@@ -2120,7 +2697,11 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'rows.update')
     });
 
-    return c.json((response as { type: 'table.row.update.result'; result: UpdateRowResult }).result);
+    if (response.type !== 'table.row.update.result') {
+      throw new ServiceUnavailableError('Unexpected table row update response.');
+    }
+    await invalidateAfterCommittedChange(c, () => invalidateCachedRow(project, table, id));
+    return c.json(response.result);
   });
 
   app.openapi(deleteRowRoute, async (c) => {
@@ -2135,12 +2716,11 @@ function createApp() {
       requestContext: buildTableRequestContext(c, 'rows.delete')
     });
 
-    return c.json(
-      (response as {
-        type: 'table.row.delete.result';
-        result: { ok: true; deletedId: string };
-      }).result
-    );
+    if (response.type !== 'table.row.delete.result') {
+      throw new ServiceUnavailableError('Unexpected table row delete response.');
+    }
+    await invalidateAfterCommittedChange(c, () => invalidateCachedRow(project, table, id));
+    return c.json(response.result);
   });
 
   app.openapi(listApiKeysRoute, async (c) => {

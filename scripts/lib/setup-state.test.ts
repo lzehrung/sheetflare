@@ -18,21 +18,27 @@ afterEach(async () => {
 });
 
 describe('setup local state', () => {
-  it('writes and reads Worker-only local state beside the config path', async () => {
+  it('keeps production and staging state separate in the same directory', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-state-'));
     tempDirs.push(dir);
-    const configPath = join(dir, 'sheetflare.setup.json');
+    const productionConfigPath = join(dir, 'sheetflare.setup.json');
+    const stagingConfigPath = join(dir, 'sheetflare.staging.setup.json');
 
-    await writeSetupLocalState(configPath, {
-      googleClientEmail: 'service-account@example.com',
-      apiUrl: 'https://example.workers.dev'
+    await writeSetupLocalState(productionConfigPath, {
+      apiUrl: 'https://api.example.com'
+    });
+    await writeSetupLocalState(stagingConfigPath, {
+      apiUrl: 'https://staging-api.example.com'
     });
 
-    expect(await readSetupLocalState(configPath)).toEqual({
-      googleClientEmail: 'service-account@example.com',
-      apiUrl: 'https://example.workers.dev'
+    expect(getSetupLocalStatePath(productionConfigPath)).toBe(join(dir, '.sheetflare.setup.local.json'));
+    expect(getSetupLocalStatePath(stagingConfigPath)).toBe(join(dir, '.sheetflare.staging.setup.local.json'));
+    expect(await readSetupLocalState(productionConfigPath)).toEqual({
+      apiUrl: 'https://api.example.com'
     });
-    expect(getSetupLocalStatePath(configPath)).toBe(join(dir, '.sheetflare.setup.local.json'));
+    expect(await readSetupLocalState(stagingConfigPath)).toEqual({
+      apiUrl: 'https://staging-api.example.com'
+    });
   });
 
   it('removes null update keys when merging local state updates', () => {

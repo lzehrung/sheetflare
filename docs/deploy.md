@@ -6,6 +6,7 @@ If this is your first deployment, start with [quickstart.md](./quickstart.md) in
 
 Use [google-service-accounts.md](./google-service-accounts.md) for the exact recommended Google credential model, secret layout, and rotation workflow.
 
+If you are maintaining this repository's shared staging environment, use [contributor-staging.md](../contributor-staging.md) for its asset names and setup command.
 
 ## Setup Flow
 
@@ -22,7 +23,17 @@ npm run setup
 
 Setup can write `sheetflare.setup.json`, keep non-credential deployment state in `.sheetflare.setup.local.json`, provision Google credentials, apply Worker secrets, deploy the API Worker, bootstrap projects and keys, run smoke validation, and verify Google credentials, Worker readiness, and Drive watch coverage.
 
-For reruns:
+The normal operator journey is one command: `npm run setup`. It collects credentials, applies Worker secrets, deploys the API Worker, pauses while you share the sheet with its service account, bootstraps the table and API keys, smoke-tests real reads and writes, and verifies the finished deployment.
+
+Repository staging uses the exact same orchestrator with isolated config and local state:
+
+```powershell
+npm run setup:staging
+```
+
+Use `npm run setup -- --advanced` only when the safe defaults do not fit. Use the rest of this guide for CI, recovery, and manual fallback—not for a normal first deployment.
+
+For reruns from an existing setup config:
 
 ```powershell
 npm run setup -- --apply-secrets
@@ -58,9 +69,8 @@ npm run setup -- --apply-secrets --provision-google
 
 Profile-derived defaults:
 
-- `production` or `prod` -> `sheetflare-prod`
+- `production` -> `sheetflare-prod`
 - `staging` -> `sheetflare-staging`
-- any other profile -> `sheetflare-<profile>`
 
 Explicit override example:
 

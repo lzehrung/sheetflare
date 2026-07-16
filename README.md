@@ -19,6 +19,9 @@ Project policies: [LICENSE](./LICENSE)
 
 ## Get Started
 
+1. Create a sheet with a tab whose first row contains unique column names, including `_id`.
+2. Ensure Node.js 22 or newer is installed, then run:
+
 ```powershell
 npm install
 npx wrangler login    # Cloudflare Worker deployment
@@ -26,9 +29,12 @@ gcloud auth login     # lets setup create Google credentials automatically; skip
 npm run setup
 ```
 
-`npm run setup` prompts for your Sheet URL and tab name, deploys the Worker, and bootstraps the first project and API keys. Launch the local admin UI separately when you need it. Full walkthrough: [docs/quickstart.md](./docs/quickstart.md).
+3. When setup prints a service-account email, share the sheet with it as **Editor**, then return to setup.
+4. Setup deploys and tests the API. Copy the generated API keys into your password manager when shown; they are shown once.
 
-Run `npm run setup -- --help` for all setup flags and rerun patterns.
+`npm run setup` prompts for your Sheet URL and tab name, deploys the Worker, and bootstraps the first project and API keys. Launch the local admin UI separately when you need it.
+
+Have a Google service-account JSON already? Skip `gcloud auth login`; setup will ask for its path. Full walkthrough: [docs/quickstart.md](./docs/quickstart.md).
 
 ## How It Works
 

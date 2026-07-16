@@ -1,15 +1,31 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it } from 'vitest';
 import {
+  deployApiWorker,
   buildApiDeployCommand,
   getApiWranglerConfigPath,
   patchApiConfigForDeploy,
   withPatchedJsonConfig
 } from './setup-deploy';
+import { createDefaultSetupConfig, parseSetupConfig, type SetupProfile } from './setup-config';
 
 const tempDirs: string[] = [];
+
+const profileAssets = [
+  {
+    profile: 'production',
+    apiWranglerConfigPath: resolve('apps/api/wrangler.jsonc')
+  },
+  {
+    profile: 'staging',
+    apiWranglerConfigPath: resolve('apps/api/wrangler.staging.jsonc')
+  }
+] satisfies ReadonlyArray<{
+  profile: SetupProfile;
+  apiWranglerConfigPath: string;
+}>;
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((path) => rm(path, { force: true, recursive: true })));
@@ -18,16 +34,25 @@ afterEach(async () => {
 describe('setup deploy command builders', () => {
   it('builds the pinned API deploy command', () => {
     expect(buildApiDeployCommand('wrangler.setup.jsonc')).toEqual([
-      'wrangler@4.85.0',
+      'wrangler@4.107.0',
       'deploy',
       '--config',
       'wrangler.setup.jsonc'
     ]);
   });
 
-  it('uses the correct API wrangler config path for each profile', () => {
-    expect(getApiWranglerConfigPath('production').replace(/\\/g, '/')).toContain('apps/api/wrangler.jsonc');
-    expect(getApiWranglerConfigPath('staging').replace(/\\/g, '/')).toContain('apps/api/wrangler.staging.jsonc');
+  it('restricts profile-aware deployment helpers to SetupProfile inputs', () => {
+    expectTypeOf<Parameters<typeof deployApiWorker>[0]>().toEqualTypeOf<SetupProfile>();
+    expectTypeOf<NonNullable<Parameters<typeof getApiWranglerConfigPath>[0]>>().toEqualTypeOf<SetupProfile>();
+  });
+
+  it.each(profileAssets)('maps a parsed $profile profile to its exact Worker deployment config', ({
+    profile: inputProfile,
+    apiWranglerConfigPath
+  }) => {
+    const profile: SetupProfile = parseSetupConfig(JSON.parse(createDefaultSetupConfig(inputProfile))).profile;
+
+    expect(getApiWranglerConfigPath(profile)).toBe(apiWranglerConfigPath);
   });
 
   it('writes a temporary patched config and removes it after success', async () => {

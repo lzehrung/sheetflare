@@ -4,7 +4,7 @@ import type { SetupConfig } from './setup-config';
 import { ScriptError } from './runtime';
 
 const privateConfig: SetupConfig = {
-  profile: 'local',
+  profile: 'production',
   privateProject: {
     slug: 'demo',
     name: 'Demo',

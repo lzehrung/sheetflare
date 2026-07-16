@@ -5,7 +5,9 @@ import {
   normalizeProjectSlug,
   normalizeTableSlug,
   parseSetupConfig,
-  type SetupConfig
+  parseSetupProfile,
+  type SetupConfig,
+  type SetupProfile
 } from './setup-config';
 import { ScriptError } from './runtime';
 
@@ -53,6 +55,7 @@ export type SetupPromptOptions = {
   mode: SetupPromptMode;
   googleCredentialAvailable: boolean;
   provisionGoogleRequested?: boolean;
+  profile?: SetupProfile | null;
 };
 
 export type SetupPrompter = {
@@ -291,11 +294,21 @@ async function promptForBeginnerSetup(
   };
 }
 
-export async function promptForAdvancedSetup(prompter: SetupPrompter): Promise<SetupPromptResult> {
-  const profile = await prompter.text({
+export async function promptForAdvancedSetup(
+  prompter: SetupPrompter,
+  options: Pick<SetupPromptOptions, 'profile'> = {}
+): Promise<SetupPromptResult> {
+  const profile = options.profile ?? await prompter.text({
     message: 'Setup profile',
-    defaultValue: 'local',
-    validate: (value) => value.trim().length > 0 ? null : 'Profile must not be blank.'
+    defaultValue: 'production',
+    validate: (value) => {
+      try {
+        parseSetupProfile(value);
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }
   });
   const spreadsheetIdOrUrl = await prompter.text({
     message: 'Google Sheet URL or spreadsheet ID',
@@ -472,7 +485,7 @@ export async function promptForSetup(
     return promptForBeginnerSetup(prompter, options);
   }
 
-  return promptForAdvancedSetup(prompter);
+  return promptForAdvancedSetup(prompter, options);
 }
 
 export function createConsolePrompter(): SetupPrompter {

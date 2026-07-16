@@ -10,7 +10,7 @@ import {
 import type { SetupConfig } from './setup-config';
 
 const baseConfig: SetupConfig = {
-  profile: 'local',
+  profile: 'production',
   privateProject: {
     slug: 'demo',
     name: 'Demo',
