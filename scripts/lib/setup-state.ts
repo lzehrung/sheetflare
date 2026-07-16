@@ -1,5 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { ScriptError } from './runtime';
 
 export type SetupLocalState = {
@@ -25,7 +25,9 @@ function isMissingFileError(error: unknown) {
 }
 
 export function getSetupLocalStatePath(configPath: string) {
-  return join(dirname(resolve(configPath)), '.sheetflare.setup.local.json');
+  const resolvedConfigPath = resolve(configPath);
+  const configName = basename(resolvedConfigPath, extname(resolvedConfigPath));
+  return join(dirname(resolvedConfigPath), `.${configName}.local.json`);
 }
 
 export async function readSetupLocalState(configPath: string) {

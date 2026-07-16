@@ -7,6 +7,9 @@ Thumbs.db
 *.log
 *.tsbuildinfo
 .sheetflare.setup.local.json
+.sheetflare.*.setup.local.json
+sheetflare.setup.json
+sheetflare.*.setup.json
 .wrangler-staging-secrets.json
 *.setup-*.jsonc
 *.env

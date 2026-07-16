@@ -67,17 +67,15 @@ Beginner setup then uses safe defaults:
 - public-read API: disabled
 - setup actions: apply secrets, deploy, bootstrap, smoke-test, verify
 
-When setup prints the service-account email, share your Google Sheet with that email as `Editor`. If setup pauses or fails before bootstrap because the sheet is not shared yet, share the sheet and rerun bootstrap, smoke, and verification together:
+When setup prints the service-account email, share your Google Sheet with that email as `Editor`, return to the terminal, and confirm. Setup then continues automatically.
 
-```powershell
-npm run setup -- --bootstrap --smoke --verify
-```
+Generated API keys are shown once and are not written to local setup state. Copy them into your password manager before closing the terminal.
 
 ## 4. What Setup Creates
 
-Setup writes `sheetflare.setup.json` at the repo root. This checked, non-secret file describes the Sheetflare project, table, and smoke-test shape.
+Setup writes `sheetflare.setup.json` at the repo root. This gitignored, non-secret file describes the Sheetflare project, table, and smoke-test shape.
 
-When setup applies secrets, deploys, or bootstraps, it also creates or updates `.sheetflare.setup.local.json`. That file is gitignored local operator state. It can contain deployment URLs and admin-site Basic Auth material, so keep it on your machine.
+When setup applies secrets, deploys, or bootstraps, it also creates or updates `.sheetflare.setup.local.json`. That gitignored file contains deployment URLs and may contain admin-site Basic Auth material. Keep it on your machine.
 
 Setup can create or update:
 

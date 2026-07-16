@@ -1,8 +1,15 @@
 {
   "name": "sheetflare-api",
   "main": "src/index.ts",
-  "compatibility_date": "2026-04-26",
+  "compatibility_date": "2026-07-07",
   "workers_dev": true,
+  "cache": {
+    "enabled": true
+  },
+  "exports": {
+    "default": { "type": "worker", "cache": { "enabled": false } },
+    "CachedTableReads": { "type": "worker", "cache": { "enabled": true } }
+  },
   "durable_objects": {
     "bindings": [
       { "name": "CONTROL_PLANE_DO", "class_name": "ControlPlaneDO" },

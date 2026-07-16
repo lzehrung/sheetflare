@@ -1,9 +1,11 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it } from 'vitest';
 import {
   buildAdminDeployCommand,
+  deployAdminPages,
+  deployApiWorker,
   buildApiDeployCommand,
   buildPagesProjectCreateCommand,
   buildPagesProjectListCommand,
@@ -14,8 +16,26 @@ import {
   patchApiConfigForDeploy,
   withPatchedJsonConfig
 } from './setup-deploy';
+import { createDefaultSetupConfig, parseSetupConfig, type SetupProfile } from './setup-config';
 
 const tempDirs: string[] = [];
+
+const profileAssets = [
+  {
+    profile: 'production',
+    apiWranglerConfigPath: resolve('apps/api/wrangler.jsonc'),
+    adminPagesProjectName: 'sheetflare-admin'
+  },
+  {
+    profile: 'staging',
+    apiWranglerConfigPath: resolve('apps/api/wrangler.staging.jsonc'),
+    adminPagesProjectName: 'sheetflare-staging-admin'
+  }
+] satisfies ReadonlyArray<{
+  profile: SetupProfile;
+  apiWranglerConfigPath: string;
+  adminPagesProjectName: string;
+}>;
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((path) => rm(path, { force: true, recursive: true })));
@@ -24,7 +44,7 @@ afterEach(async () => {
 describe('setup deploy command builders', () => {
   it('builds the pinned API deploy command', () => {
     expect(buildApiDeployCommand('wrangler.setup.jsonc')).toEqual([
-      'wrangler@4.85.0',
+      'wrangler@4.107.0',
       'deploy',
       '--config',
       'wrangler.setup.jsonc'
@@ -33,7 +53,7 @@ describe('setup deploy command builders', () => {
 
   it('builds the pinned admin pages deploy command', () => {
     expect(buildAdminDeployCommand('sheetflare-admin')).toEqual([
-      'wrangler@4.85.0',
+      'wrangler@4.107.0',
       'pages',
       'deploy',
       '--project-name',
@@ -45,7 +65,7 @@ describe('setup deploy command builders', () => {
 
   it('builds the pinned pages project list command', () => {
     expect(buildPagesProjectListCommand()).toEqual([
-      'wrangler@4.85.0',
+      'wrangler@4.107.0',
       'pages',
       'project',
       'list',
@@ -55,7 +75,7 @@ describe('setup deploy command builders', () => {
 
   it('builds the pinned pages project create command', () => {
     expect(buildPagesProjectCreateCommand('sheetflare-admin')).toEqual([
-      'wrangler@4.85.0',
+      'wrangler@4.107.0',
       'pages',
       'project',
       'create',
@@ -65,14 +85,22 @@ describe('setup deploy command builders', () => {
     ]);
   });
 
-  it('uses the generic public Pages project name', () => {
-    expect(getAdminPagesProjectName()).toBe('sheetflare-admin');
-    expect(getAdminPagesProjectName('staging')).toBe('sheetflare-staging-admin');
+  it('restricts profile-aware deployment helpers to SetupProfile inputs', () => {
+    expectTypeOf<Parameters<typeof deployApiWorker>[0]>().toEqualTypeOf<SetupProfile>();
+    expectTypeOf<Parameters<typeof deployAdminPages>[0]>().toEqualTypeOf<SetupProfile>();
+    expectTypeOf<NonNullable<Parameters<typeof getApiWranglerConfigPath>[0]>>().toEqualTypeOf<SetupProfile>();
+    expectTypeOf<NonNullable<Parameters<typeof getAdminPagesProjectName>[0]>>().toEqualTypeOf<SetupProfile>();
   });
 
-  it('uses the correct API wrangler config path for each profile', () => {
-    expect(getApiWranglerConfigPath().replace(/\\/g, '/')).toContain('apps/api/wrangler.jsonc');
-    expect(getApiWranglerConfigPath('staging').replace(/\\/g, '/')).toContain('apps/api/wrangler.staging.jsonc');
+  it.each(profileAssets)('maps a parsed $profile profile to its exact deployment assets', ({
+    profile: inputProfile,
+    apiWranglerConfigPath,
+    adminPagesProjectName
+  }) => {
+    const profile: SetupProfile = parseSetupConfig(JSON.parse(createDefaultSetupConfig(inputProfile))).profile;
+
+    expect(getApiWranglerConfigPath(profile)).toBe(apiWranglerConfigPath);
+    expect(getAdminPagesProjectName(profile)).toBe(adminPagesProjectName);
   });
 
   it('derives the canonical Pages site URL from the project name', () => {

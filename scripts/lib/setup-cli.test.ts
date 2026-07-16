@@ -16,7 +16,7 @@ describe('parseSetupArgs', () => {
       '--google-service-account',
       'sheetflare-prod'
     ]))
-      .toEqual({
+      .toMatchObject({
         configPath: 'configs/demo/sheetflare.setup.json',
         help: false,
         writeDefaultConfig: false,
@@ -44,6 +44,16 @@ describe('parseSetupArgs', () => {
     expect(parseSetupArgs(['--debug'])).toMatchObject({
       debug: true
     });
+  });
+
+  it('parses an explicit setup profile', () => {
+    expect(parseSetupArgs(['--profile', 'staging'])).toMatchObject({
+      profile: 'staging'
+    });
+  });
+
+  it('rejects a profile flag without a value', () => {
+    expect(() => parseSetupArgs(['--profile'])).toThrow('Missing value for --profile.');
   });
 
   it('parses help flags without treating them as unknown arguments', () => {

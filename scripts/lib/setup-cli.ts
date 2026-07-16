@@ -1,8 +1,10 @@
+import { parseSetupProfile, type SetupProfile } from './setup-config';
 import type { SetupPromptActions } from './setup-prompts';
 import { ScriptError } from './runtime';
 
 export type SetupCliOptions = {
   configPath: string;
+  profile: SetupProfile | null;
   help: boolean;
   writeDefaultConfig: boolean;
   applySecrets: boolean;
@@ -21,6 +23,7 @@ export type SetupCliOptions = {
 export function createDefaultSetupCliOptions(): SetupCliOptions {
   return {
     configPath: 'sheetflare.setup.json',
+    profile: null,
     help: false,
     writeDefaultConfig: false,
     applySecrets: false,
@@ -53,6 +56,16 @@ export function parseSetupArgs(argv: string[]): SetupCliOptions {
         throw new ScriptError('Missing value for --config.');
       }
       options.configPath = nextValue;
+      index += 1;
+      continue;
+    }
+
+    if (argument === '--profile') {
+      const nextValue = argv[index + 1];
+      if (!nextValue) {
+        throw new ScriptError('Missing value for --profile.');
+      }
+      options.profile = parseSetupProfile(nextValue, '--profile');
       index += 1;
       continue;
     }
@@ -146,6 +159,7 @@ configuration.
 Common flows:
   npm run setup
   npm run setup -- --advanced
+  npm run setup:staging
   npm run setup -- --apply-secrets
   npm run setup -- --apply-secrets --provision-google
   npm run setup -- --deploy --bootstrap --smoke --verify
@@ -155,6 +169,7 @@ Common flows:
 Options:
   -h, --help                         Show this help.
   --config <path>                    Use a setup config path. Default: sheetflare.setup.json.
+  --profile <name>                   Select production or staging; must match existing config.
   --write-default-config             Write a starter setup config and exit.
   --apply-secrets                    Apply Worker and admin Pages secrets.
   --deploy                           Deploy the API Worker and admin Pages site.
