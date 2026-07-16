@@ -115,7 +115,7 @@ const contentSecurityPolicy = [
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
-  "connect-src 'self' ws: wss:",
+  "connect-src 'self' ws://127.0.0.1:4173",
   "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'",
