@@ -74,10 +74,23 @@ export function resolveAdminApiTarget(
   return defaultAdminApiTarget;
 }
 
+const forwardedRequestHeaderNames: Readonly<Record<string, true>> = {
+  accept: true,
+  'content-length': true,
+  'content-type': true,
+  host: true
+};
+
 export function rewriteAdminProxyRequest(
   proxyRequest: Pick<ClientRequest, 'setHeader' | 'removeHeader'>,
   request: Pick<IncomingMessage, 'headers'>
 ): void {
+  for (const headerName of Object.keys(request.headers)) {
+    if (!forwardedRequestHeaderNames[headerName]) {
+      proxyRequest.removeHeader(headerName);
+    }
+  }
+
   proxyRequest.removeHeader('authorization');
   proxyRequest.removeHeader(adminCredentialHeaderName);
 
@@ -85,6 +98,11 @@ export function rewriteAdminProxyRequest(
   if (typeof credential === 'string' && credential.length > 0) {
     proxyRequest.setHeader('authorization', `Bearer ${credential}`);
   }
+}
+
+export function rewriteAdminProxyResponse(response: Pick<IncomingMessage, 'headers'>): void {
+  response.headers['cache-control'] = 'no-store';
+  delete response.headers['set-cookie'];
 }
 
 const contentSecurityPolicy = [
@@ -101,6 +119,7 @@ const contentSecurityPolicy = [
 
 export const adminResponseHeaders = Object.freeze({
   'Content-Security-Policy': contentSecurityPolicy,
+  'Cache-Control': 'no-store',
   'X-Frame-Options': 'DENY',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',

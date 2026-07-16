@@ -6,7 +6,8 @@ import {
   adminPort,
   adminResponseHeaders,
   resolveAdminApiTarget,
-  rewriteAdminProxyRequest
+  rewriteAdminProxyRequest,
+  rewriteAdminProxyResponse
 } from './vite-proxy';
 
 const localStatePath = fileURLToPath(new URL('../../.sheetflare.setup.local.json', import.meta.url));
@@ -24,8 +25,10 @@ console.log(`[sheetflare-admin] proxying API requests to ${apiTarget}`);
 function createApiProxyOptions(): ProxyOptions {
   return {
     target: apiTarget,
+    changeOrigin: true,
     configure(proxy) {
       proxy.on('proxyReq', rewriteAdminProxyRequest);
+      proxy.on('proxyRes', rewriteAdminProxyResponse);
     }
   };
 }

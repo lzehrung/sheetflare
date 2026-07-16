@@ -1,15 +1,34 @@
 // @vitest-environment node
 
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from 'node:http';
+import type { ConfigEnv, UserConfig, UserConfigExport } from 'vite';
 import { describe, expect, it } from 'vitest';
+import viteConfig from './vite.config';
 import { adminCredentialHeaderName } from './src/auth';
 import {
   adminResponseHeaders,
   resolveAdminApiTarget,
-  rewriteAdminProxyRequest
+  rewriteAdminProxyRequest,
+  rewriteAdminProxyResponse
 } from './vite-proxy';
 
 type ProxyHeaderValue = Parameters<ClientRequest['setHeader']>[1];
+const apiProxyRoutes = ['/v1', '/health', '/ready', '/doc', '/docs'];
+const configEnv: ConfigEnv = {
+  command: 'serve',
+  mode: 'test',
+  isSsrBuild: false,
+  isPreview: false
+};
+
+async function evaluateViteConfig(config: UserConfigExport): Promise<UserConfig> {
+  if (typeof config === 'function') {
+    return config(configEnv);
+  }
+
+  return config;
+}
+
 
 function createProxyRequest(initialHeaders: Readonly<Record<string, ProxyHeaderValue>>) {
   const headers = new Map<string, ProxyHeaderValue>(
@@ -36,6 +55,27 @@ function createProxyRequest(initialHeaders: Readonly<Record<string, ProxyHeaderV
 function createIncomingRequest(headers: IncomingHttpHeaders): Pick<IncomingMessage, 'headers'> {
   return { headers };
 }
+
+describe('Vite config', () => {
+  it('uses the target origin for every API proxy route', async () => {
+    const config = await evaluateViteConfig(viteConfig);
+    const proxy = config.server?.proxy;
+
+    expect(proxy).toBeDefined();
+    if (proxy === undefined) {
+      throw new TypeError('Expected the Vite dev server proxy configuration');
+    }
+
+    expect(Object.keys(proxy).sort()).toEqual([...apiProxyRoutes].sort());
+    for (const [route, proxyOptions] of Object.entries(proxy)) {
+      if (typeof proxyOptions === 'string') {
+        throw new TypeError(`Expected proxy options for ${route}`);
+      }
+
+      expect(proxyOptions.changeOrigin, `${route} must change the proxy origin`).toBe(true);
+    }
+  });
+});
 
 describe('resolveAdminApiTarget', () => {
   it('prefers a trimmed environment target over persisted local state', () => {
@@ -115,18 +155,40 @@ describe('resolveAdminApiTarget', () => {
 });
 
 describe('rewriteAdminProxyRequest', () => {
-  it('replaces inbound authorization with a bearer credential and removes the private header', () => {
-    const { headers, proxyRequest } = createProxyRequest({
-      authorization: 'Basic attacker-controlled',
+  it('forwards only required request headers and synthesized bearer authorization', () => {
+    const browserHeaders = {
+      host: '127.0.0.1:4173',
+      accept: 'application/json',
+      'content-type': 'application/json',
+      'content-length': '17',
+      'transfer-encoding': 'chunked',
+      connection: 'upgrade',
+      upgrade: 'websocket',
+      forwarded: 'for=attacker;host=attacker.example',
+      'x-forwarded-for': '203.0.113.10',
+      'x-forwarded-host': 'attacker.example',
+      'x-forwarded-proto': 'https',
+      cookie: 'session=browser-secret',
+      origin: 'http://127.0.0.1:4173',
+      referer: 'http://127.0.0.1:4173/admin',
+      'x-arbitrary-client-header': 'untrusted',
+      authorization: 'Basic caller-controlled',
       [adminCredentialHeaderName]: 'admin-secret'
+    } satisfies IncomingHttpHeaders;
+    const { headers, proxyRequest } = createProxyRequest({
+      ...browserHeaders,
+      host: 'api.example.test'
     });
 
-    rewriteAdminProxyRequest(
-      proxyRequest,
-      createIncomingRequest({ [adminCredentialHeaderName]: 'admin-secret' })
-    );
+    rewriteAdminProxyRequest(proxyRequest, createIncomingRequest(browserHeaders));
 
-    expect(Object.fromEntries(headers)).toEqual({ authorization: 'Bearer admin-secret' });
+    expect(Object.fromEntries(headers)).toEqual({
+      host: 'api.example.test',
+      accept: 'application/json',
+      'content-type': 'application/json',
+      'content-length': '17',
+      authorization: 'Bearer admin-secret'
+    });
   });
 
   it.each([
@@ -148,11 +210,31 @@ describe('rewriteAdminProxyRequest', () => {
   );
 });
 
+describe('rewriteAdminProxyResponse', () => {
+  it('removes upstream cookies and replaces cache policy with no-store', () => {
+    const response = {
+      headers: {
+        'cache-control': 'public, max-age=3600',
+        'set-cookie': ['session=secret; HttpOnly'],
+        'x-upstream': 'kept'
+      }
+    } satisfies Pick<IncomingMessage, 'headers'>;
+
+    rewriteAdminProxyResponse(response);
+
+    expect(response.headers).toEqual({
+      'cache-control': 'no-store',
+      'x-upstream': 'kept'
+    });
+  });
+});
+
 describe('adminResponseHeaders', () => {
   it('enforces the local admin security-header contract', () => {
     expect(adminResponseHeaders).toEqual({
       'Content-Security-Policy':
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+      'Cache-Control': 'no-store',
       'X-Frame-Options': 'DENY',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
