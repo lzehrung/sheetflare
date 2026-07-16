@@ -90,7 +90,7 @@ export function rewriteAdminProxyRequest(
 const contentSecurityPolicy = [
   "default-src 'self'",
   "script-src 'self'",
-  "style-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "connect-src 'self' ws: wss:",
   "object-src 'none'",
