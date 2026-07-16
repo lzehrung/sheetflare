@@ -149,6 +149,7 @@ function createEnv(options?: {
   tableCacheGetUnexpectedResponse?: boolean;
   tableUnexpectedResponseFor?: UnexpectedTableResponseRequest;
   controlProjectsListUnexpectedResponse?: boolean;
+  controlSpreadsheetWatchNotifyUnexpectedResponse?: boolean;
   tableRowsListStatus?: 200 | 503;
   tableCacheTtlSeconds?: number;
   tableCacheStatus?: 'idle' | 'syncing' | 'ready' | 'error';
@@ -339,6 +340,14 @@ function createEnv(options?: {
           ]
         }
       });
+    }
+
+    if (body.type === 'control.spreadsheet-watch.notify' && options?.controlSpreadsheetWatchNotifyUnexpectedResponse === true) {
+      const response = {
+        type: 'control.project.upsert.result',
+        result: { ok: true }
+      } satisfies ControlPlaneDoResponse;
+      return Response.json(response);
     }
 
     if (body.type === 'control.spreadsheet-watch.notify') {
@@ -1901,6 +1910,83 @@ describe('api routes', () => {
         requestId,
         errorName: 'ServiceUnavailableError',
         errorMessage: 'Unexpected control plane projects list response.'
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('returns a controlled service unavailable error before project lookup when a Drive notification gets an unexpected notify response', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const app = createApp();
+    const path = '/v1/system/google/drive/notifications';
+    const env = createEnv({
+      controlSpreadsheetWatchNotifyUnexpectedResponse: true
+    }) as Env & {
+      __controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }>;
+      __cachedReadPurgeCalls: CachePurgeCall[];
+    };
+
+    try {
+      const response = await app.request(
+        path,
+        {
+          method: 'POST',
+          headers: {
+            'x-goog-channel-id': 'channel-1',
+            'x-goog-resource-id': 'resource-1',
+            'x-goog-resource-state': 'update',
+            'x-goog-message-number': '2',
+            'x-goog-channel-token': 'drive-secret'
+          }
+        },
+        env
+      );
+
+      expect(response.status).toBe(503);
+      const responseBody: unknown = await response.json();
+      expect(responseBody).toEqual({
+        error: {
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'Unexpected control plane spreadsheet watch notify response.',
+          details: null
+        }
+      });
+
+      expect(env.__controlPlaneRequests).not.toContainEqual(expect.objectContaining({
+        type: 'control.projects.list'
+      }));
+      expect(env.__cachedReadPurgeCalls).toEqual([]);
+
+      const requestId = response.headers.get('x-request-id');
+      expect(requestId).toEqual(expect.any(String));
+      if (requestId === null) {
+        throw new Error('Expected the response to include a request ID.');
+      }
+      const matchingEvents = errorSpy.mock.calls.flatMap(([errorLog]) => {
+        if (typeof errorLog !== 'string') {
+          return [];
+        }
+        try {
+          const event: unknown = JSON.parse(errorLog);
+          const identity = z.object({
+            event: z.literal('request.error'),
+            path: z.literal(path),
+            requestId: z.literal(requestId)
+          }).safeParse(event);
+          return identity.success ? [event] : [];
+        } catch {
+          return [];
+        }
+      });
+      expect(matchingEvents).toHaveLength(1);
+      expect(matchingEvents[0]).toMatchObject({
+        event: 'request.error',
+        method: 'POST',
+        path,
+        requestId,
+        errorName: 'ServiceUnavailableError',
+        errorMessage: 'Unexpected control plane spreadsheet watch notify response.'
       });
     } finally {
       errorSpy.mockRestore();

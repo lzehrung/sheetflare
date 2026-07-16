@@ -356,7 +356,7 @@ describe('promptForSetup', () => {
 
   it('rejects an unsupported advanced profile', async () => {
     const { prompter } = createFakePrompter({
-      textResponses: ['local']
+      textResponses: ['localhost']
     });
 
     await expect(promptForSetup(prompter, {

@@ -22,7 +22,53 @@ describe('parseSetupConfig', () => {
     expect(profile).toBe(expected);
   });
 
-  it.each(['production-like', 'stage', 'local'])('rejects the unsupported %s profile instead of selecting a deployment fallback', (profile) => {
+  it('parses the legacy generated local setup config as canonical production', () => {
+    const legacyGeneratedDefaultConfig = {
+      profile: ' LoCaL ',
+      deploy: {
+        api: true,
+        admin: true
+      },
+      privateProject: {
+        slug: 'demo',
+        name: 'Demo',
+        spreadsheetId: '<SPREADSHEET_ID>',
+        googleCredentialRef: 'default',
+        tables: [
+          {
+            tableSlug: 'users',
+            sheetTabName: 'Users',
+            idColumn: '_id',
+            indexedFields: ['name', 'status'],
+            cacheTtlSeconds: 60
+          }
+        ]
+      },
+      publicReadProject: null,
+      smoke: {
+        enabled: true,
+        privateTableSlug: 'users',
+        publicTableSlug: null,
+        adminKeyName: 'demo-admin',
+        privateReadKeyName: 'demo-read',
+        mutationKeyName: 'demo-mutation',
+        createValues: {
+          name: 'Smoke Row',
+          status: 'active'
+        },
+        updateValues: {
+          status: 'inactive'
+        }
+      }
+    };
+
+    expect(parseSetupConfig(legacyGeneratedDefaultConfig)).toEqual({
+      ...legacyGeneratedDefaultConfig,
+      profile: 'production'
+    });
+  });
+
+  it.each(['production-like', 'stage', 'localhost'])('rejects the unsupported %s profile instead of selecting a deployment fallback', (profile) => {
     const inputConfig: Record<string, unknown> = JSON.parse(createDefaultSetupConfig('production'));
     inputConfig.profile = profile;
 

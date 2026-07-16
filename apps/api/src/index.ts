@@ -2633,10 +2633,10 @@ function createApp() {
       changedAt: new Date().toISOString(),
       channelExpiration: c.req.header('x-goog-channel-expiration')?.trim() ?? null
     });
-    const result = (response as {
-      type: 'control.spreadsheet-watch.notify.result';
-      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
-    }).result;
+    if (response.type !== 'control.spreadsheet-watch.notify.result') {
+      throw new ServiceUnavailableError('Unexpected control plane spreadsheet watch notify response.');
+    }
+    const result = response.result;
     if (result.accepted && result.spreadsheetId && result.debounceUntil) {
       await invalidateCachedProjectsForSpreadsheet(c, result.spreadsheetId);
     }

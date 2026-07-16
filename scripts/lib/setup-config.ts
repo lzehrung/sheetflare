@@ -105,6 +105,10 @@ function parseProjectSection(input: unknown, label: 'privateProject' | 'publicRe
 
 export function parseSetupProfile(input: unknown, path = 'profile'): SetupProfile {
   const profile = parseRequiredString(input, path).toLowerCase();
+  if (profile === 'local') {
+    return 'production';
+  }
+
   if (profile !== 'production' && profile !== 'staging') {
     throw new ScriptError(`${path} must be production or staging.`);
   }
