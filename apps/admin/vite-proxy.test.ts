@@ -112,12 +112,24 @@ describe('resolveAdminApiTarget', () => {
   });
 
   it.each([
-    { name: 'remote HTTPS', target: 'https://api.example.test' },
+    { name: 'remote HTTPS with a base path', target: 'https://api.example.test/base' },
     { name: 'localhost HTTP', target: 'http://localhost:8787' },
     { name: 'IPv4 loopback HTTP', target: 'http://127.0.0.1:8787' },
     { name: 'IPv6 loopback HTTP', target: 'http://[::1]:8787' }
   ])('accepts $name targets', ({ target }) => {
     expect(resolveAdminApiTarget(target, null)).toBe(target);
+  });
+
+  it.each([
+    { name: 'a username', target: 'https://admin@api.example.test' },
+    { name: 'a password', target: 'https://:secret@api.example.test' },
+    { name: 'a query string', target: 'https://api.example.test?tenant=one' },
+    { name: 'a fragment', target: 'https://api.example.test/#admin' }
+  ])('rejects a target containing $name from every source', ({ target }) => {
+    const expectedMessage = 'credentials, query strings, and fragments are not allowed';
+
+    expect(() => resolveAdminApiTarget(target, null)).toThrow(expectedMessage);
+    expect(() => resolveAdminApiTarget(undefined, JSON.stringify({ apiUrl: target }))).toThrow(expectedMessage);
   });
 
   it.each([

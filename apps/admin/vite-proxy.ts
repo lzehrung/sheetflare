@@ -28,6 +28,11 @@ function validateAdminApiTarget(value: string, source: string): string {
       `Invalid admin API target from ${source} (${JSON.stringify(value)}): remote targets require HTTPS because the proxy forwards the admin credential as Bearer.`
     );
   }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error(
+      `Invalid admin API target from ${source} (${JSON.stringify(value)}): credentials, query strings, and fragments are not allowed.`
+    );
+  }
 
   return value;
 }
