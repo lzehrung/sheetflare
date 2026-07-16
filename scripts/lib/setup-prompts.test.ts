@@ -283,7 +283,7 @@ describe('promptForSetup', () => {
         'Smoke Row',
         'Smoke Row Updated'
       ],
-      confirmResponses: [true, false, true, false, true, false]
+      confirmResponses: [false, true, false, true, false]
     });
 
     const result = await promptForSetup(prompter, {

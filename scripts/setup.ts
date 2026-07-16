@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setupConfigUsesDefaultGoogleCredential, type SetupProfile } from './lib/setup-config';
+import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setupConfigUsesDefaultGoogleCredential } from './lib/setup-config';
 import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
 import { confirmSheetShared, createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, recordPrereqResult, type SetupPrereqResult } from './lib/setup-prereqs';
