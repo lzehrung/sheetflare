@@ -1920,12 +1920,12 @@ describe('api routes', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const app = createApp();
     const path = '/v1/system/google/drive/notifications';
-    const env = createEnv({
+    const env: Env & {
+      __controlPlaneRequests?: Array<{ type: string; body: Record<string, unknown> }>;
+      __cachedReadPurgeCalls?: CachePurgeCall[];
+    } = createEnv({
       controlSpreadsheetWatchNotifyUnexpectedResponse: true
-    }) as Env & {
-      __controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }>;
-      __cachedReadPurgeCalls: CachePurgeCall[];
-    };
+    });
 
     try {
       const response = await app.request(
