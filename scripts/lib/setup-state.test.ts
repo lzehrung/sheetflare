@@ -8,7 +8,6 @@ import {
   getSetupLocalStatePath,
   mergeSetupLocalState,
   readSetupLocalState,
-  redactSetupLocalState,
   writeSetupLocalState
 } from './setup-state';
 
@@ -54,27 +53,13 @@ describe('setup local state', () => {
     });
   });
 
-  it('redacts secret values for terminal summaries', () => {
-    expect(redactSetupLocalState({
-      googleClientEmail: 'service-account@example.iam.gserviceaccount.com',
-      adminUiPassword: 'supersecret'
-    })).toEqual({
-      googleClientEmail: 'service-account@example.iam.gserviceaccount.com',
-      apiUrl: null,
-      adminUrl: null,
-      adminUiUsername: null,
-      adminUiPassword: 'supe...cret'
-    });
-  });
 
-  it('omits undefined and blank values when building local state updates', () => {
+  it('omits blank values when building local state updates', () => {
     expect(createSetupLocalState({
-      apiUrl: 'https://example.workers.dev',
-      adminUrl: '',
-      adminUiUsername: 'operator@example.com'
+      googleClientEmail: '',
+      apiUrl: 'https://example.workers.dev'
     })).toEqual({
-      apiUrl: 'https://example.workers.dev',
-      adminUiUsername: 'operator@example.com'
+      apiUrl: 'https://example.workers.dev'
     });
   });
 
@@ -103,13 +88,21 @@ describe('setup local state', () => {
     }, 'state.json')).toThrow('state.json.apiUrl must be a string.');
   });
 
-  it('rejects unknown local state keys from disk', () => {
-    expect(() => createSetupLocalStateFromUnknown({
-      unexpected: 'value'
-    }, 'state.json')).toThrow('state.json contains unknown key unexpected.');
+  it('tombstones exactly the three removed local-admin keys', () => {
+    expect(createSetupLocalStateFromUnknown({
+      googleClientEmail: 'service-account@example.com',
+      apiUrl: 'https://example.workers.dev',
+      adminUrl: 'https://legacy-admin.example',
+      adminUiUsername: 'operator',
+      adminUiPassword: 'secret'
+    }, 'state.json')).toEqual({
+      googleClientEmail: 'service-account@example.com',
+      apiUrl: 'https://example.workers.dev'
+    });
   });
 
-  it('rejects legacy persisted live credentials from disk', () => {
+
+  it('rejects a removed live credential that is not one of the three tombstones', () => {
     expect(() => createSetupLocalStateFromUnknown({
       adminBearerToken: 'bootstrap.secret'
     }, 'state.json')).toThrow('state.json contains unknown key adminBearerToken.');

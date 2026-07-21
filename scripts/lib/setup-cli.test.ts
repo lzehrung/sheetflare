@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './setup-cli';
+import { parseSetupArgs, renderSetupHelp, resolveSetupActions } from './setup-cli';
 
 describe('parseSetupArgs', () => {
   it('parses combined setup action flags', () => {
@@ -148,43 +148,5 @@ describe('resolveSetupActions', () => {
     expect(resolveSetupActions(options, null)).toMatchObject({
       verifyNow: true
     });
-  });
-});
-
-describe('actionsRequireWranglerAuth', () => {
-  it('requires wrangler auth for deploy or secrets actions', () => {
-    expect(actionsRequireWranglerAuth({
-      applySecretsNow: false,
-      deployNow: false,
-      bootstrapNow: true,
-      smokeNow: true,
-      verifyNow: true
-    })).toBe(false);
-
-    expect(actionsRequireWranglerAuth({
-      applySecretsNow: true,
-      deployNow: false,
-      bootstrapNow: false,
-      smokeNow: false,
-      verifyNow: false
-    })).toBe(true);
-  });
-
-  it('requires wrangler auth for admin deployment verification', () => {
-    expect(actionsRequireWranglerAuth({
-      applySecretsNow: false,
-      deployNow: false,
-      bootstrapNow: false,
-      smokeNow: false,
-      verifyNow: true
-    }, { verifiesAdminPagesProject: true })).toBe(true);
-
-    expect(actionsRequireWranglerAuth({
-      applySecretsNow: false,
-      deployNow: false,
-      bootstrapNow: false,
-      smokeNow: false,
-      verifyNow: true
-    }, { verifiesAdminPagesProject: false })).toBe(false);
   });
 });

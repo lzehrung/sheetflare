@@ -1,26 +1,16 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setupConfigUsesDefaultGoogleCredential, type SetupProfile } from './lib/setup-config';
+import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setupConfigUsesDefaultGoogleCredential } from './lib/setup-config';
 import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
 import { confirmSheetShared, createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, recordPrereqResult, type SetupPrereqResult } from './lib/setup-prereqs';
 import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput, redactBootstrapResultMarker } from './lib/setup-bootstrap';
-import {
-  deployAdminPages,
-  deployApiWorker,
-  ensurePagesProjectExists,
-  getApiWranglerConfigPath,
-  getAdminPagesProjectName
-} from './lib/setup-deploy';
+import { deployApiWorker, getApiWranglerConfigPath } from './lib/setup-deploy';
 import { listDriveWatches, registerDriveWatches } from './lib/setup-drive-watches';
 import {
-  applyAdminApiBaseUrl,
-  applyAdminSecrets,
   applyApiSecrets,
-  collectAdminSiteSecrets,
   collectSetupSecrets,
-  hasDefaultGoogleCredentialEnvironment,
-  requireAdminSiteSecrets
+  hasDefaultGoogleCredentialEnvironment
 } from './lib/setup-secrets';
 import { createSmokeEnv } from './lib/setup-smoke';
 import {
@@ -42,14 +32,12 @@ import {
 import { getSetupDoctorFailureMessage, runSetupDoctor } from './lib/setup-doctor';
 import { checkGcloudAuthPrereq, isPlaceholderGoogleClientEmail } from './lib/setup-google';
 import { formatBeginnerSetupNextSteps, formatSheetShareInstruction } from './lib/setup-next-steps';
-import { verifyAdminPagesDeployment } from './lib/setup-verify';
 import { getCommandName, runCommand } from './lib/process';
 import { ScriptError, getEnv, logSetupStep as logStep, logSetupSuccess as logSuccess } from './lib/runtime';
 
 type SetupExecutionSummary = {
   configPath: string;
   apiUrl: string | null;
-  adminUrl: string | null;
 } & SetupSecretsSummary;
 
 async function readConfigFile(path: string) {
@@ -233,44 +221,7 @@ async function registerDriveWatchesIfPossible(options: {
   }
 }
 
-async function ensureAdminPagesProjectReady(profile: SetupProfile, options: { debug?: boolean } = {}) {
-  const pagesProjectName = getAdminPagesProjectName(profile);
-  const result = await ensurePagesProjectExists(pagesProjectName, options);
-  if (result.created) {
-    logSuccess(`Created Cloudflare Pages project ${pagesProjectName}`);
-  }
 
-  return pagesProjectName;
-}
-
-async function applyAdminPagesConfiguration(options: {
-  adminUiPassword: string;
-  adminUiUsername: string;
-  apiUrl?: string | null;
-  debug?: boolean;
-  pagesProjectName: string;
-}) {
-  logStep('Saving admin site sign-in secrets');
-  await applyAdminSecrets({
-    debug: Boolean(options.debug),
-    pagesProjectName: options.pagesProjectName,
-    username: options.adminUiUsername,
-    password: options.adminUiPassword
-  });
-  logSuccess('Admin site sign-in secrets saved');
-
-  if (!options.apiUrl) {
-    return;
-  }
-
-  logStep('Connecting the admin site to the API');
-  await applyAdminApiBaseUrl({
-    apiBaseUrl: options.apiUrl,
-    debug: Boolean(options.debug),
-    pagesProjectName: options.pagesProjectName
-  });
-  logSuccess('Admin site API URL saved');
-}
 
 async function main() {
   const options = parseSetupArgs(process.argv.slice(2));
@@ -293,7 +244,7 @@ async function main() {
 
   logStep('Checking your computer');
   const prereqResults = await checkSetupPrereqsWithOptions({
-    includeWranglerAuth: options.applySecrets || options.deploy || options.verify,
+    includeWranglerAuth: options.applySecrets || options.deploy,
     includeGcloudAuth: provisionGoogle,
     debug: options.debug
   });
@@ -365,9 +316,7 @@ async function main() {
       return;
     }
 
-    const wranglerAuthRequired = actionsRequireWranglerAuth(actions, {
-      verifiesAdminPagesProject: config.deploy.admin
-    });
+    const wranglerAuthRequired = actionsRequireWranglerAuth(actions);
     let wranglerResult = prereqResults.find((result) => result.name === 'Wrangler auth') ?? null;
     if (wranglerAuthRequired && !wranglerResult) {
       wranglerResult = await checkWranglerAuthPrereq();
@@ -381,10 +330,7 @@ async function main() {
 
     const resolvedRuntimeState = resolveSetupRuntimeState(localState);
     let apiUrl: string | null = resolvedRuntimeState.apiUrl;
-    let adminUrl: string | null = resolvedRuntimeState.adminUrl;
     let adminBearerToken: string | null = resolvedRuntimeState.adminBearerToken;
-    let adminUiUsername: string | null = resolvedRuntimeState.adminUiUsername;
-    let adminUiPassword: string | null = resolvedRuntimeState.adminUiPassword;
     let adminApiKey: string | null = resolvedRuntimeState.adminApiKey;
     let privateReadKey: string | null = resolvedRuntimeState.privateReadKey;
     let mutationKey: string | null = resolvedRuntimeState.mutationKey;
@@ -394,9 +340,6 @@ async function main() {
       logStep('Preparing credentials');
       setupSecrets = await collectSetupSecrets({
         prompter,
-        includeAdminUiSecrets: config.deploy.admin,
-        defaultAdminUiUsername: adminUiUsername,
-        defaultAdminUiPassword: adminUiPassword,
         googleProvisioning: {
           enabled: provisionGoogle,
           profile: config.profile,
@@ -408,8 +351,6 @@ async function main() {
         }
       });
       adminBearerToken = setupSecrets.adminBearerToken;
-      adminUiUsername = setupSecrets.adminUiUsername;
-      adminUiPassword = setupSecrets.adminUiPassword;
 
       logStep('Saving API secrets to Cloudflare');
       await applyApiSecrets({
@@ -423,27 +364,11 @@ async function main() {
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
-          googleClientEmail: setupSecrets.googleClientEmail,
-          adminUiUsername: setupSecrets.adminUiUsername,
-          adminUiPassword: setupSecrets.adminUiPassword
+          googleClientEmail: setupSecrets.googleClientEmail
         })
       });
       localStateWritten = true;
 
-      if (config.deploy.admin && adminUiUsername && adminUiPassword && !actions.deployNow) {
-        const adminSiteSecrets = requireAdminSiteSecrets({
-          adminUiUsername,
-          adminUiPassword
-        });
-        const pagesProjectName = await ensureAdminPagesProjectReady(config.profile, { debug: options.debug });
-        await applyAdminPagesConfiguration({
-          adminUiPassword: adminSiteSecrets.adminUiPassword,
-          adminUiUsername: adminSiteSecrets.adminUiUsername,
-          apiUrl,
-          debug: options.debug,
-          pagesProjectName,
-        });
-      }
     }
 
     if (actions.deployNow) {
@@ -458,51 +383,11 @@ async function main() {
       apiUrl = apiDeploy.url;
       logSuccess(`API is live at ${apiUrl}`);
 
-      if (config.deploy.admin) {
-        const pagesProjectName = await ensureAdminPagesProjectReady(config.profile, { debug: options.debug });
-        if (!adminUiUsername || !adminUiPassword) {
-          const adminSiteSecrets = await collectAdminSiteSecrets({
-            prompter,
-            defaultAdminUiUsername: adminUiUsername,
-            defaultAdminUiPassword: adminUiPassword
-          });
-          adminUiUsername = adminSiteSecrets.adminUiUsername;
-          adminUiPassword = adminSiteSecrets.adminUiPassword;
-        }
-
-        const adminSiteSecrets = requireAdminSiteSecrets({
-          adminUiUsername,
-          adminUiPassword
-        });
-        await applyAdminPagesConfiguration({
-          adminUiPassword: adminSiteSecrets.adminUiPassword,
-          adminUiUsername: adminSiteSecrets.adminUiUsername,
-          apiUrl,
-          debug: options.debug,
-          pagesProjectName,
-        });
-
-        logStep('Deploying the admin site');
-        const adminDeploy = await deployAdminPages(config.profile, { debug: options.debug });
-        adminUrl = adminDeploy.siteUrl;
-        logSuccess(`Admin site is live at ${adminUrl}`);
-
-        logStep('Checking the admin site');
-        await verifyAdminPagesDeployment({
-          password: adminSiteSecrets.adminUiPassword,
-          siteUrl: adminDeploy.siteUrl,
-          username: adminSiteSecrets.adminUiUsername
-        });
-        logSuccess('Admin site is reachable');
-      }
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
           googleClientEmail: googleClientEmail ?? null,
-          apiUrl,
-          adminUrl,
-          adminUiUsername,
-          adminUiPassword
+          apiUrl
         })
       });
       localStateWritten = true;
@@ -624,13 +509,10 @@ async function main() {
     printExecutionSummary({
       configPath: resolvedConfigPath,
       apiUrl,
-      adminUrl,
       ...summarizeSetupSecrets({
         showSecrets: options.showSecrets,
         localStatePath: localStateWritten ? localStatePath : null,
         adminBearerToken,
-        adminUiUsername,
-        adminUiPassword,
         adminApiKey,
         privateReadKey,
         mutationKey
@@ -644,18 +526,14 @@ async function main() {
           ?? localState?.googleClientEmail
           ?? resolvedRuntimeState.googleClientEmail,
         apiUrl,
-        adminUrl,
         adminBearerToken,
-        adminUiUsername,
-        adminUiPassword,
         adminApiKey,
         privateReadKey,
         mutationKey
       });
       const verificationResults = await runSetupDoctor({
         config,
-        runtimeState: verificationRuntimeState,
-        prereqResults
+        runtimeState: verificationRuntimeState
       });
       renderPrereqSummary(verificationResults);
 
@@ -674,7 +552,6 @@ async function main() {
           ?? localState?.googleClientEmail
           ?? resolvedRuntimeState.googleClientEmail,
         apiUrl,
-        adminUrl
       })) {
         console.log(line);
       }

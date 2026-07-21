@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 describe('resolveSetupRuntimeState', () => {
-  it('prefers local setup state over environment fallbacks', () => {
+  it('prefers local setup state over environment values', () => {
     process.env.GOOGLE_CLIENT_EMAIL = 'env-service-account@example.com';
     process.env.SHEETFLARE_BASE_URL = 'https://env.workers.dev';
     process.env.SHEETFLARE_ADMIN_CREDENTIAL = 'sfk_env.secret';
@@ -24,35 +24,16 @@ describe('resolveSetupRuntimeState', () => {
 
     expect(resolveSetupRuntimeState({
       googleClientEmail: 'local-service-account@example.com',
-      apiUrl: 'https://local.workers.dev',
-      adminUiUsername: 'operator@example.com'
+      apiUrl: 'https://local.workers.dev'
     })).toMatchObject({
       googleClientEmail: 'local-service-account@example.com',
       namedGoogleCredentials: 'missing',
       apiUrl: 'https://local.workers.dev',
       adminBearerToken: 'sfk_env.secret',
-      adminUiUsername: 'operator@example.com',
       privateReadKey: 'sfk_env.read'
     });
   });
 
-  it('falls back to environment values when local setup state is missing', () => {
-    process.env.GOOGLE_CLIENT_EMAIL = 'env-service-account@example.com';
-    process.env.SHEETFLARE_BASE_URL = 'https://env.workers.dev';
-    process.env.SHEETFLARE_ADMIN_CREDENTIAL = 'sfk_env.secret';
-    process.env.SHEETFLARE_PRIVATE_READ_KEY = 'sfk_env.read';
-    process.env.SHEETFLARE_MUTATION_KEY = 'sfk_env.mutation';
-
-    expect(resolveSetupRuntimeState(null)).toMatchObject({
-      googleClientEmail: 'env-service-account@example.com',
-      namedGoogleCredentials: 'missing',
-      apiUrl: 'https://env.workers.dev',
-      adminBearerToken: 'sfk_env.secret',
-      adminApiKey: 'sfk_env.secret',
-      privateReadKey: 'sfk_env.read',
-      mutationKey: 'sfk_env.mutation'
-    });
-  });
 
   it('reports named Google credentials when GOOGLE_CREDENTIALS_JSON is valid', () => {
     process.env.GOOGLE_CREDENTIALS_JSON = JSON.stringify({
@@ -85,19 +66,15 @@ describe('resolvePreferredAdminCredential', () => {
 });
 
 describe('mergeSetupRuntimeState', () => {
-  it('enriches persisted runtime state with fresh setup credentials without replacing stable fields with blanks', () => {
+  it('merges fresh Worker credentials into resolved runtime state', () => {
     const base = resolveSetupRuntimeState({
       googleClientEmail: 'persisted@example.com',
-      apiUrl: 'https://persisted.workers.dev',
-      adminUrl: 'https://persisted.pages.dev',
-      adminUiUsername: 'operator',
-      adminUiPassword: 'password'
+      apiUrl: 'https://persisted.workers.dev'
     });
 
     expect(mergeSetupRuntimeState(base, {
       googleClientEmail: 'fresh@example.com',
       apiUrl: 'https://fresh.workers.dev',
-      adminUrl: '',
       adminBearerToken: 'bootstrap.secret',
       adminApiKey: 'sfk_admin.secret',
       privateReadKey: 'sfk_read.secret',
@@ -105,31 +82,24 @@ describe('mergeSetupRuntimeState', () => {
     })).toMatchObject({
       googleClientEmail: 'fresh@example.com',
       apiUrl: 'https://fresh.workers.dev',
-      adminUrl: 'https://persisted.pages.dev',
       adminBearerToken: 'bootstrap.secret',
       adminApiKey: 'sfk_admin.secret',
       privateReadKey: 'sfk_read.secret',
-      mutationKey: 'sfk_mutation.secret',
-      adminUiUsername: 'operator',
-      adminUiPassword: 'password'
+      mutationKey: 'sfk_mutation.secret'
     });
   });
 });
 
 describe('summarizeSetupSecrets', () => {
-  it('redacts sensitive values by default', () => {
+  it('omits every credential when secret display is disabled', () => {
     expect(summarizeSetupSecrets({
       showSecrets: false,
       localStatePath: 'E:/repo/.sheetflare.setup.local.json',
-      adminBearerToken: 'abcdefghijklmno',
-      adminUiUsername: 'operator@example.com',
-      adminUiPassword: 'supersecret',
+      adminBearerToken: 'bearer.secret',
       adminApiKey: 'sfk_admin.secret',
       privateReadKey: 'sfk_read.secret',
       mutationKey: 'sfk_mutation.secret'
     })).toEqual({
-      adminUiUsername: 'operator@example.com',
-      adminUiPassword: 'supe...cret',
       localStatePath: 'E:/repo/.sheetflare.setup.local.json'
     });
   });
@@ -139,15 +109,11 @@ describe('summarizeSetupSecrets', () => {
       showSecrets: true,
       localStatePath: 'E:/repo/.sheetflare.setup.local.json',
       adminBearerToken: 'bearer.secret',
-      adminUiUsername: 'operator@example.com',
-      adminUiPassword: 'supersecret',
       adminApiKey: 'sfk_admin.secret',
       privateReadKey: 'sfk_read.secret',
       mutationKey: 'sfk_mutation.secret'
     })).toEqual({
       adminBearerToken: 'bearer.secret',
-      adminUiUsername: 'operator@example.com',
-      adminUiPassword: 'supersecret',
       adminApiKey: 'sfk_admin.secret',
       privateReadKey: 'sfk_read.secret',
       mutationKey: 'sfk_mutation.secret',
@@ -159,29 +125,12 @@ describe('summarizeSetupSecrets', () => {
     expect(summarizeSetupSecrets({
       showSecrets: false,
       localStatePath: null,
-      adminBearerToken: 'abcdefghijklmno',
-      adminUiUsername: 'operator@example.com',
-      adminUiPassword: 'supersecret',
+      adminBearerToken: 'bearer.secret',
       adminApiKey: 'sfk_admin.secret',
       privateReadKey: 'sfk_read.secret',
       mutationKey: 'sfk_mutation.secret'
     })).toEqual({
-      adminUiUsername: 'operator@example.com',
-      adminUiPassword: 'supe...cret',
       localStatePath: null
     });
-  });
-
-  it('does not include runtime api keys in the default terminal summary', () => {
-    expect(summarizeSetupSecrets({
-      showSecrets: false,
-      localStatePath: 'E:/repo/.sheetflare.setup.local.json',
-      adminBearerToken: 'bearer.secret',
-      adminUiUsername: 'operator@example.com',
-      adminUiPassword: 'supersecret',
-      adminApiKey: 'sfk_admin.secret',
-      privateReadKey: 'sfk_read.secret',
-      mutationKey: 'sfk_mutation.secret'
-    })).not.toHaveProperty('adminBearerToken');
   });
 });

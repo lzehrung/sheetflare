@@ -5,10 +5,6 @@ import { ScriptError } from './runtime';
 
 const privateConfig: SetupConfig = {
   profile: 'production',
-  deploy: {
-    api: true,
-    admin: false
-  },
   privateProject: {
     slug: 'demo',
     name: 'Demo',

@@ -13,7 +13,6 @@ import { ScriptError } from './runtime';
 
 export type SetupAnswers = {
   profile: string;
-  deployAdmin: boolean;
   spreadsheetIdOrUrl: string;
   privateProjectSlug: string;
   privateProjectName: string;
@@ -142,10 +141,6 @@ export function buildBeginnerSetupConfigFromAnswers(answers: BeginnerSetupAnswer
 
   return parseSetupConfig({
     profile: 'production',
-    deploy: {
-      api: true,
-      admin: true
-    },
     privateProject: {
       slug: 'main',
       name: 'Main',
@@ -206,10 +201,6 @@ export function buildSetupConfigFromAnswers(answers: SetupAnswers): SetupConfig 
 
   return parseSetupConfig({
     profile: answers.profile.trim(),
-    deploy: {
-      api: true,
-      admin: answers.deployAdmin
-    },
     privateProject: {
       slug: privateProjectSlug,
       name: answers.privateProjectName.trim(),
@@ -318,10 +309,6 @@ export async function promptForAdvancedSetup(
         return error instanceof Error ? error.message : String(error);
       }
     }
-  });
-  const deployAdmin = await prompter.confirm({
-    message: 'Configure admin UI deploy now',
-    defaultValue: true
   });
   const spreadsheetIdOrUrl = await prompter.text({
     message: 'Google Sheet URL or spreadsheet ID',
@@ -444,7 +431,6 @@ export async function promptForAdvancedSetup(
 
   const config = buildSetupConfigFromAnswers({
     profile,
-    deployAdmin,
     spreadsheetIdOrUrl,
     privateProjectSlug,
     privateProjectName,

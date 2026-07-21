@@ -2,10 +2,8 @@ import { getSetupConfigGoogleCredentialRefs, type SetupConfig } from './setup-co
 import type { SetupPrereqResult } from './setup-prereqs';
 import type { ResolvedSetupRuntimeState } from './setup-runtime';
 import { listDriveWatchRetryAdvice, listDriveWatches } from './setup-drive-watches';
-import { getAdminPagesProjectName, getAdminPagesSiteUrl, listPagesProjects } from './setup-deploy';
 import { isPlaceholderGoogleClientEmail } from './setup-google';
 import { requestJson, ScriptError } from './runtime';
-import { verifyAdminPagesDeployment } from './setup-verify';
 
 type ReadyResponse = {
   ok: boolean;
@@ -20,8 +18,6 @@ type ReadyResponse = {
 
 type SetupDoctorDependencies = {
   fetchReady?: (apiUrl: string) => Promise<ReadyResponse>;
-  listPagesProjects?: typeof listPagesProjects;
-  verifyAdminPagesDeployment?: typeof verifyAdminPagesDeployment;
   listDriveWatches?: typeof listDriveWatches;
   listDriveWatchRetryAdvice?: typeof listDriveWatchRetryAdvice;
 };
@@ -130,14 +126,9 @@ function describeReadyCredentialSummary(ready: ReadyResponse['checks']) {
 export async function runSetupDoctor(options: {
   config: SetupConfig;
   runtimeState: ResolvedSetupRuntimeState;
-  prereqResults: SetupPrereqResult[];
 }, dependencies: SetupDoctorDependencies = {}) {
   const results: SetupPrereqResult[] = [];
-  const prereqByName = new Map(options.prereqResults.map((result) => [result.name, result] as const));
-  const wranglerResult = prereqByName.get('Wrangler auth') ?? null;
   const fetchReady = dependencies.fetchReady ?? fetchReadyStatus;
-  const listPagesProjectsImpl = dependencies.listPagesProjects ?? listPagesProjects;
-  const verifyAdminPagesDeploymentImpl = dependencies.verifyAdminPagesDeployment ?? verifyAdminPagesDeployment;
   const listDriveWatchesImpl = dependencies.listDriveWatches ?? listDriveWatches;
   const listDriveWatchRetryAdviceImpl = dependencies.listDriveWatchRetryAdvice ?? listDriveWatchRetryAdvice;
 
@@ -266,74 +257,6 @@ export async function runSetupDoctor(options: {
     ));
   }
 
-  if (options.config.deploy.admin) {
-    if (wranglerResult?.status === 'ready') {
-      try {
-        const projects = await listPagesProjectsImpl();
-        const projectName = getAdminPagesProjectName(options.config.profile);
-        if (projects.some((project) => project.name === projectName)) {
-          results.push(createResult(
-            'Admin Pages project',
-            'ready',
-            `Cloudflare Pages project ${projectName} exists.`,
-            null
-          ));
-        } else {
-          results.push(createResult(
-            'Admin Pages project',
-            'blocked',
-            `Cloudflare Pages project ${projectName} does not exist.`,
-            'Run npm run setup -- --deploy to create it automatically, or create it manually with wrangler pages project create.'
-          ));
-        }
-      } catch (error) {
-        results.push(createResult(
-          'Admin Pages project',
-          'warning',
-          'Cloudflare Pages project existence could not be verified.',
-          error instanceof Error ? error.message : String(error)
-        ));
-      }
-    } else {
-      results.push(createResult(
-        'Admin Pages project',
-        'warning',
-        'Cloudflare Pages project existence was not checked because Wrangler auth is unavailable.',
-        'Run npx wrangler login, then rerun npm run setup -- --verify.'
-      ));
-    }
-
-    const adminUrl = options.runtimeState.adminUrl ?? getAdminPagesSiteUrl(getAdminPagesProjectName(options.config.profile));
-    if (!options.runtimeState.adminUiUsername || !options.runtimeState.adminUiPassword) {
-      results.push(createResult(
-        'Admin Pages verification',
-        'warning',
-        `Admin site verification was skipped because ADMIN_UI_USERNAME or ADMIN_UI_PASSWORD was not available for ${adminUrl}.`,
-        'Run npm run setup -- --apply-secrets, or set ADMIN_UI_USERNAME and ADMIN_UI_PASSWORD before verification.'
-      ));
-    } else {
-      try {
-        await verifyAdminPagesDeploymentImpl({
-          siteUrl: adminUrl,
-          username: options.runtimeState.adminUiUsername,
-          password: options.runtimeState.adminUiPassword
-        });
-        results.push(createResult(
-          'Admin Pages verification',
-          'ready',
-          `Verified the protected admin root plus proxied /ready, /docs, and /v1/admin/projects at ${adminUrl}.`,
-          null
-        ));
-      } catch (error) {
-        results.push(createResult(
-          'Admin Pages verification',
-          'blocked',
-          `Failed to verify the protected admin site at ${adminUrl}.`,
-          error instanceof Error ? error.message : String(error)
-        ));
-      }
-    }
-  }
 
   if (!options.runtimeState.apiUrl || !options.runtimeState.adminApiKey && !options.runtimeState.adminBearerToken) {
     results.push(createResult(

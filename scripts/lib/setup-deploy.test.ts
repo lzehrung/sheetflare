@@ -3,16 +3,9 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, expectTypeOf, it } from 'vitest';
 import {
-  buildAdminDeployCommand,
-  deployAdminPages,
   deployApiWorker,
   buildApiDeployCommand,
-  buildPagesProjectCreateCommand,
-  buildPagesProjectListCommand,
   getApiWranglerConfigPath,
-  getAdminPagesProjectName,
-  getAdminPagesSiteUrl,
-  parsePagesProjectList,
   patchApiConfigForDeploy,
   withPatchedJsonConfig
 } from './setup-deploy';
@@ -23,18 +16,15 @@ const tempDirs: string[] = [];
 const profileAssets = [
   {
     profile: 'production',
-    apiWranglerConfigPath: resolve('apps/api/wrangler.jsonc'),
-    adminPagesProjectName: 'sheetflare-admin'
+    apiWranglerConfigPath: resolve('apps/api/wrangler.jsonc')
   },
   {
     profile: 'staging',
-    apiWranglerConfigPath: resolve('apps/api/wrangler.staging.jsonc'),
-    adminPagesProjectName: 'sheetflare-staging-admin'
+    apiWranglerConfigPath: resolve('apps/api/wrangler.staging.jsonc')
   }
 ] satisfies ReadonlyArray<{
   profile: SetupProfile;
   apiWranglerConfigPath: string;
-  adminPagesProjectName: string;
 }>;
 
 afterEach(async () => {
@@ -51,61 +41,18 @@ describe('setup deploy command builders', () => {
     ]);
   });
 
-  it('builds the pinned admin pages deploy command', () => {
-    expect(buildAdminDeployCommand('sheetflare-admin')).toEqual([
-      'wrangler@4.107.0',
-      'pages',
-      'deploy',
-      '--project-name',
-      'sheetflare-admin',
-      '--branch',
-      'main'
-    ]);
-  });
-
-  it('builds the pinned pages project list command', () => {
-    expect(buildPagesProjectListCommand()).toEqual([
-      'wrangler@4.107.0',
-      'pages',
-      'project',
-      'list',
-      '--json'
-    ]);
-  });
-
-  it('builds the pinned pages project create command', () => {
-    expect(buildPagesProjectCreateCommand('sheetflare-admin')).toEqual([
-      'wrangler@4.107.0',
-      'pages',
-      'project',
-      'create',
-      'sheetflare-admin',
-      '--production-branch',
-      'main'
-    ]);
-  });
-
   it('restricts profile-aware deployment helpers to SetupProfile inputs', () => {
     expectTypeOf<Parameters<typeof deployApiWorker>[0]>().toEqualTypeOf<SetupProfile>();
-    expectTypeOf<Parameters<typeof deployAdminPages>[0]>().toEqualTypeOf<SetupProfile>();
     expectTypeOf<NonNullable<Parameters<typeof getApiWranglerConfigPath>[0]>>().toEqualTypeOf<SetupProfile>();
-    expectTypeOf<NonNullable<Parameters<typeof getAdminPagesProjectName>[0]>>().toEqualTypeOf<SetupProfile>();
   });
 
-  it.each(profileAssets)('maps a parsed $profile profile to its exact deployment assets', ({
+  it.each(profileAssets)('maps a parsed $profile profile to its exact Worker deployment config', ({
     profile: inputProfile,
-    apiWranglerConfigPath,
-    adminPagesProjectName
+    apiWranglerConfigPath
   }) => {
     const profile: SetupProfile = parseSetupConfig(JSON.parse(createDefaultSetupConfig(inputProfile))).profile;
 
     expect(getApiWranglerConfigPath(profile)).toBe(apiWranglerConfigPath);
-    expect(getAdminPagesProjectName(profile)).toBe(adminPagesProjectName);
-  });
-
-  it('derives the canonical Pages site URL from the project name', () => {
-    expect(getAdminPagesSiteUrl()).toBe('https://sheetflare-admin.pages.dev');
-    expect(getAdminPagesSiteUrl('sheetflare-staging-admin')).toBe('https://sheetflare-staging-admin.pages.dev');
   });
 
   it('writes a temporary patched config and removes it after success', async () => {
@@ -227,27 +174,5 @@ describe('setup deploy command builders', () => {
       (config) => config,
       async () => null
     )).rejects.toThrow('must contain valid JSONC for setup orchestration');
-  });
-});
-
-describe('parsePagesProjectList', () => {
-  it('parses the wrangler json payload into trimmed project names', () => {
-    expect(parsePagesProjectList(JSON.stringify([
-      { name: 'sheetflare-admin' },
-      { name: ' sheetflare-staging-admin ' }
-    ]))).toEqual([
-      { name: 'sheetflare-admin' },
-      { name: 'sheetflare-staging-admin' }
-    ]);
-  });
-
-  it('rejects non-json output with a clear error', () => {
-    expect(() => parsePagesProjectList('not json')).toThrow('Wrangler pages project list must return valid JSON.');
-  });
-
-  it('rejects malformed project entries with a clear error', () => {
-    expect(() => parsePagesProjectList(JSON.stringify([
-      { name: '' }
-    ]))).toThrow('Wrangler pages project list entry 1 must include a non-empty name.');
   });
 });

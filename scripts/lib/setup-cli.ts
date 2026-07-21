@@ -171,8 +171,8 @@ Options:
   --config <path>                    Use a setup config path. Default: sheetflare.setup.json.
   --profile <name>                   Select production or staging; must match existing config.
   --write-default-config             Write a starter setup config and exit.
-  --apply-secrets                    Apply Worker and admin Pages secrets.
-  --deploy                           Deploy the API Worker and admin Pages site.
+  --apply-secrets                    Apply Worker secrets.
+  --deploy                           Deploy the API Worker.
   --bootstrap                        Bootstrap projects, tables, and API keys.
   --smoke                            Run smoke validation after setup/bootstrap.
   --verify                           Run setup verification/doctor checks.
@@ -208,11 +208,6 @@ export function resolveSetupActions(
   };
 }
 
-export function actionsRequireWranglerAuth(
-  actions: SetupPromptActions,
-  options: { verifiesAdminPagesProject?: boolean } = {}
-) {
-  return actions.applySecretsNow
-    || actions.deployNow
-    || Boolean(actions.verifyNow && options.verifiesAdminPagesProject);
+export function actionsRequireWranglerAuth(actions: SetupPromptActions) {
+  return actions.applySecretsNow || actions.deployNow;
 }

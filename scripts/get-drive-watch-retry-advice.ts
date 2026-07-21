@@ -3,7 +3,7 @@ import { logStep, requestJson, requireAdminCredential, requireEnv } from './lib/
 async function main() {
   const baseUrl = requireEnv(
     'SHEETFLARE_BASE_URL',
-    'Set SHEETFLARE_BASE_URL to the deployed API Worker URL, not the admin Pages URL.'
+    'Set SHEETFLARE_BASE_URL to the deployed API Worker URL.'
   );
   const bearer = requireAdminCredential();
 

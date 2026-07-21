@@ -3,7 +3,6 @@ import { isPlaceholderGoogleClientEmail } from './setup-google';
 export type BeginnerSetupNextStepsInput = {
   googleClientEmail: string | null;
   apiUrl: string | null;
-  adminUrl: string | null;
 };
 
 function getUsableGoogleClientEmail(value: string | null) {
@@ -37,10 +36,8 @@ export function formatBeginnerSetupNextSteps(input: BeginnerSetupNextStepsInput)
     stepNumber += 1;
   }
 
-  if (input.adminUrl) {
-    lines.push(`${stepNumber}. Admin URL: ${input.adminUrl}`);
-    stepNumber += 1;
-  }
+  lines.push(`${stepNumber}. Launch the admin UI any time with npm run dev:admin (loopback-only, http://127.0.0.1:4173; it targets your deployed API automatically).`);
+  stepNumber += 1;
 
   lines.push(`${stepNumber}. Run npm run doctor any time you want to re-check this deployment.`);
   return lines;
