@@ -1,8 +1,10 @@
+import type { SetupAdminUi } from './setup-config';
 import { isPlaceholderGoogleClientEmail } from './setup-google';
 
 export type BeginnerSetupNextStepsInput = {
   googleClientEmail: string | null;
   apiUrl: string | null;
+  adminUi: SetupAdminUi;
 };
 
 function getUsableGoogleClientEmail(value: string | null) {
@@ -36,7 +38,11 @@ export function formatBeginnerSetupNextSteps(input: BeginnerSetupNextStepsInput)
     stepNumber += 1;
   }
 
-  lines.push(`${stepNumber}. Launch the admin UI any time with npm run dev:admin (loopback-only, http://127.0.0.1:4173; it targets your deployed API automatically).`);
+  if (input.apiUrl && input.adminUi === 'enabled') {
+    lines.push(`${stepNumber}. Admin UI: ${input.apiUrl}/admin/ (sign in with a scoped admin API key).`);
+  } else {
+    lines.push(`${stepNumber}. Launch the admin UI locally with npm run dev:admin (loopback-only, http://127.0.0.1:4173).`);
+  }
   stepNumber += 1;
 
   lines.push(`${stepNumber}. Run npm run doctor any time you want to re-check this deployment.`);

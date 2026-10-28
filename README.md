@@ -32,7 +32,7 @@ npm run setup
 3. When setup prints a service-account email, share the sheet with it as **Editor**, then return to setup.
 4. Setup deploys and tests the API. Copy the generated API keys into your password manager when shown; they are shown once.
 
-`npm run setup` prompts for your Sheet URL and tab name, deploys the Worker, and bootstraps the first project and API keys. Launch the local admin UI separately when you need it.
+`npm run setup` prompts for your Sheet URL and tab name, deploys the Worker, and bootstraps the first project and API keys. It then prints your API URL and the admin UI at `<your-worker>/admin/`.
 
 Have a Google service-account JSON already? Skip `gcloud auth login`; setup will ask for its path. Full walkthrough: [docs/quickstart.md](./docs/quickstart.md).
 
@@ -46,8 +46,8 @@ The `setup` command manages the full first-run lifecycle: Google credential prov
 
 | Workspace | Role |
 | --- | --- |
-| `apps/api` | Cloudflare Worker, Durable Object entrypoints |
-| `apps/admin` | React admin UI (local, loopback-only Vite server) |
+| `apps/api` | Cloudflare Worker, Durable Object entrypoints, hosted admin assets |
+| `apps/admin` | React admin UI (served by the Worker at `/admin/`, or locally by Vite) |
 | `packages/contracts` | Shared request/response/RPC/error types |
 | `packages/domain` | Row, pagination, and schema utilities |
 | `packages/google-sheets` | Google Sheets service-account client |
@@ -60,7 +60,7 @@ npm install        # install all workspace dependencies
 npm run check      # lint + typecheck + test + build
 npm run setup      # guided first-time deploy and configuration
 npm run dev:api    # local API Worker dev server
-npm run dev:admin  # local admin UI dev server
+npm run dev:admin  # optional loopback admin UI against any deployment
 npm run deploy     # deploy the API Worker
 npm run smoke      # smoke test against a live deployment
 npm run load       # load harness against a live deployment
@@ -118,7 +118,7 @@ npm run ops:watch:drive:stop          # stop known watches
 
 **Queries** - Filters are AND-only. Sort is single-field with keyset pagination cursors. Indexed fields (declared in `indexedFields`) use fast cache lookups. The `contains` operator is scan-heavy and is blocked above `TABLE_MAX_FULL_SCAN_ROWS`. Passing a filter or sort on a non-indexed field is rejected rather than silently doing a full scan. The interactive API reference at `/docs` documents all filter operators and query parameters.
 
-**CORS** - The admin UI runs locally and calls the API through its same-origin loopback Vite proxy, so no CORS setup is needed for normal admin use. If you intentionally call the Worker API from another browser origin, set `SHEETFLARE_ALLOWED_ORIGINS` to a comma-separated list of allowed origins.
+**CORS** - The admin UI is served from the Worker's own origin (or the local loopback proxy), so no CORS setup is needed for normal admin use. If you intentionally call the Worker API from another browser origin, set `SHEETFLARE_ALLOWED_ORIGINS` to a comma-separated list of allowed origins.
 
 **Starting envelope** - Conservative defaults before you have staging data: `TABLE_MAX_FULL_SCAN_ROWS` defaults to 10,000; keep `cacheTtlSeconds` between 15–60 seconds; keep `indexedFields` lean (hard limit: 32 including the ID column). Replace these with measured limits from [docs/benchmarking.md](./docs/benchmarking.md).
 
@@ -133,8 +133,10 @@ The docs reflect the full HTTP surface: auth requirements, path and query parame
 
 ## Admin UI
 
-Run `npm run dev:admin`, then open `http://127.0.0.1:4173`. The server binds only to loopback and uses that fixed port. Its Worker target resolves in this order: `SHEETFLARE_API_BASE_URL`, `apiUrl` in `.sheetflare.setup.local.json`, then the local Worker at `http://127.0.0.1:8787`. Remote targets must use HTTPS because the proxy forwards the admin credential as bearer authorization.
+Open `https://<your-worker>/admin/` from any browser and sign in with a scoped admin API key; `npm run setup` prints the exact URL after deploy. Use the bootstrap token only as break-glass. The key stays in browser memory for the session, and password managers can save it for the Worker's origin. The Worker serves only static files at `/admin/`; every action still goes through the authenticated `/v1/admin/*` API.
 
-Never pass `--host 0.0.0.0`, use a LAN hostname, or expose port `4173` through a public tunnel. Set `SHEETFLARE_ADMIN_CREDENTIAL` to a scoped admin API key before `npm run dev:admin` to load without pasting; the local server attaches it upstream and the browser never receives it. Otherwise paste a scoped key; the UI keeps it in memory for the current session only. See [Local Admin UI](docs/deploy.md#admin-credential) for precedence and password-manager guidance.
+Set `"adminUi": "disabled"` in `sheetflare.setup.json` and redeploy to remove the hosted admin. Optional hardening with Cloudflare Access is in [docs/deploy.md](./docs/deploy.md#admin-ui).
+
+For development, or to use a CLI-held credential, run `npm run dev:admin` and open `http://127.0.0.1:4173`. That loopback server targets `SHEETFLARE_API_BASE_URL`, then `apiUrl` in `.sheetflare.setup.local.json`, then `http://127.0.0.1:8787`, and can attach `SHEETFLARE_ADMIN_CREDENTIAL` server-side. See [Local Admin UI](./docs/deploy.md#local-admin-ui).
 
 The admin UI covers the full control plane: create and delete projects and tables, create and revoke API keys, inspect cache status, and trigger reindex. Drafts are validated before submitting. Deleting a table clears its local cache before removing table metadata. Deleting a project clears table caches, revokes that project's API keys, and stops Drive watches for spreadsheets no remaining project uses. Delete operations are idempotent.

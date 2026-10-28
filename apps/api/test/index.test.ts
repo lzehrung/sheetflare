@@ -2328,7 +2328,8 @@ describe('api routes', () => {
         defaultGoogleCredential: 'configured',
         namedGoogleCredentials: 'missing',
         googleDriveWebhookSecret: 'configured',
-        bootstrapAdmin: 'configured'
+        bootstrapAdmin: 'configured',
+        adminUi: 'disabled'
       },
       notes: [
         'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
@@ -2418,7 +2419,8 @@ describe('api routes', () => {
         defaultGoogleCredential: 'missing',
         namedGoogleCredentials: 'missing',
         googleDriveWebhookSecret: 'configured',
-        bootstrapAdmin: 'configured'
+        bootstrapAdmin: 'configured',
+        adminUi: 'disabled'
       },
       notes: [
         'Neither the default Google service-account credential nor named GOOGLE_CREDENTIALS_JSON entries are configured.',
@@ -2450,7 +2452,8 @@ describe('api routes', () => {
         defaultGoogleCredential: 'missing',
         namedGoogleCredentials: 'configured',
         googleDriveWebhookSecret: 'configured',
-        bootstrapAdmin: 'configured'
+        bootstrapAdmin: 'configured',
+        adminUi: 'disabled'
       },
       notes: [
         'Default Google service-account credential is not configured, but named GOOGLE_CREDENTIALS_JSON entries are available for project-specific refs.',
@@ -2500,7 +2503,8 @@ describe('api routes', () => {
         defaultGoogleCredential: 'missing',
         namedGoogleCredentials: 'invalid',
         googleDriveWebhookSecret: 'configured',
-        bootstrapAdmin: 'configured'
+        bootstrapAdmin: 'configured',
+        adminUi: 'disabled'
       },
       notes: [
         'GOOGLE_CREDENTIALS_JSON is present but invalid. Each named credential must include non-empty client_email/private_key or clientEmail/privateKey fields.',
@@ -4189,5 +4193,129 @@ describe('api routes', () => {
     const html = await response.text();
     expect(html).toContain('Sheetflare API Docs');
     expect(html).toContain('/doc');
+  });
+});
+
+describe('hosted admin UI', () => {
+  const hostedCsp =
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+
+  function createAdminEnv(adminUi: string | undefined, withAssets = true) {
+    const assetPaths: string[] = [];
+    const assets = {
+      async fetch(request: Request) {
+        const path = new URL(request.url).pathname;
+        assetPaths.push(path);
+        if (path === '/admin/' || path === '/admin/index.html') {
+          return new Response('<!doctype html><title>Sheetflare Admin</title>', {
+            headers: {
+              'content-type': 'text/html; charset=utf-8',
+              'cache-control': 'public, max-age=0, must-revalidate',
+              etag: '"admin-index"'
+            }
+          });
+        }
+        return new Response(null, { status: 404 });
+      }
+    };
+    const env: Env = {
+      ...createEnv(),
+      ...(adminUi === undefined ? {} : { ADMIN_UI: adminUi }),
+      ...(withAssets ? { ASSETS: assets } : {})
+    };
+    return { env, assetPaths };
+  }
+
+  it('serves admin assets with the hosted security headers', async () => {
+    const { env, assetPaths } = createAdminEnv('enabled');
+    const response = await createApp().request('/admin/', {}, env);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('Sheetflare Admin');
+    expect(assetPaths).toEqual(['/admin/']);
+    expect(response.headers.get('content-security-policy')).toBe(hostedCsp);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('x-frame-options')).toBe('DENY');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(response.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+    expect(response.headers.get('etag')).toBe('"admin-index"');
+  });
+
+  it('keeps security headers on missing admin assets', async () => {
+    const { env } = createAdminEnv('enabled');
+    const response = await createApp().request('/admin/missing.js', {}, env);
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get('content-security-policy')).toBe(hostedCsp);
+  });
+
+  it('redirects the bare admin path to the trailing-slash entry point', async () => {
+    const { env, assetPaths } = createAdminEnv('enabled');
+    const response = await createApp().request('/admin', {}, env);
+
+    expect(response.status).toBe(308);
+    expect(response.headers.get('location')).toBe('/admin/');
+    expect(assetPaths).toEqual([]);
+  });
+
+  it.each([
+    { name: 'unset', adminUi: undefined },
+    { name: 'disabled', adminUi: 'disabled' }
+  ])('returns the standard not-found error without reading assets when ADMIN_UI is $name', async ({ adminUi }) => {
+    const { env, assetPaths } = createAdminEnv(adminUi);
+    const response = await createApp().request('/admin/', {}, env);
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: 'NOT_FOUND' } });
+    expect(assetPaths).toEqual([]);
+  });
+
+  it.each([
+    { name: 'ADMIN_UI is invalid', adminUi: 'on', withAssets: true, status: 'invalid', note: 'ADMIN_UI must be "enabled" or "disabled". The hosted admin UI returns 503 until it is fixed.' },
+    { name: 'assets are missing', adminUi: 'enabled', withAssets: false, status: 'assets-missing', note: 'ADMIN_UI is enabled but the ASSETS binding is missing. Build the admin UI and redeploy.' }
+  ])('fails clearly and reports readiness when $name', async ({ adminUi, withAssets, status, note }) => {
+    const { env, assetPaths } = createAdminEnv(adminUi, withAssets);
+    const app = createApp();
+
+    const adminResponse = await app.request('/admin/', {}, env);
+    expect(adminResponse.status).toBe(503);
+    expect(await adminResponse.json()).toMatchObject({ error: { code: 'SERVICE_UNAVAILABLE' } });
+    expect(assetPaths).toEqual([]);
+
+    const readyResponse = await app.request('/ready', {}, env);
+    const ready = z.object({ ok: z.boolean(), checks: z.object({ adminUi: z.string() }), notes: z.array(z.string()) }).parse(await readyResponse.json());
+    expect(ready.ok).toBe(true);
+    expect(ready.checks.adminUi).toBe(status);
+    expect(ready.notes).toContain(note);
+  });
+
+  it('reports an enabled admin UI in readiness', async () => {
+    const { env } = createAdminEnv('enabled');
+    const response = await createApp().request('/ready', {}, env);
+
+    expect(await response.json()).toMatchObject({ checks: { adminUi: 'enabled' } });
+  });
+
+  it('tells the admin UI that the Worker holds no server credential', async () => {
+    const { env } = createAdminEnv('enabled');
+    const response = await createApp().request('/__sheetflare/admin-session', {}, env);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({ serverCredential: false });
+  });
+
+  it.each([
+    { name: 'a write to the admin path', path: '/admin/', init: { method: 'POST' } },
+    { name: 'a root asset path', path: '/index.html', init: {} },
+    { name: 'a root assets directory path', path: '/assets/index.js', init: {} },
+    { name: 'a path that only starts with admin', path: '/administrator', init: {} }
+  ])('never reads assets for $name', async ({ path, init }) => {
+    const { env, assetPaths } = createAdminEnv('enabled');
+    const response = await createApp().request(path, init, env);
+
+    expect(response.status).toBe(404);
+    expect(assetPaths).toEqual([]);
   });
 });

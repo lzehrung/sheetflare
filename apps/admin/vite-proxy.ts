@@ -1,5 +1,6 @@
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from 'node:http';
-import { adminRequestHeaderName, adminSessionPath, normalizeAdminCredential } from './src/auth';
+import { adminSessionPath, buildAdminUiHeaders, type AdminSessionResponse } from '@sheetflare/contracts';
+import { adminRequestHeaderName, normalizeAdminCredential } from './src/auth';
 
 export const adminHost = '127.0.0.1';
 export const adminPort = 4173;
@@ -141,7 +142,7 @@ export function rewriteAdminProxyRequest(
   }
 }
 
-type AdminSessionResponse = {
+type SessionHttpResponse = {
   statusCode: number;
   setHeader(name: string, value: string): unknown;
   end(body?: string): unknown;
@@ -149,7 +150,7 @@ type AdminSessionResponse = {
 
 export function handleAdminSessionRequest(
   request: Pick<IncomingMessage, 'method' | 'url'>,
-  response: AdminSessionResponse,
+  response: SessionHttpResponse,
   serverCredentialAvailable: boolean
 ): boolean {
   if (request.url !== adminSessionPath) {
@@ -164,9 +165,10 @@ export function handleAdminSessionRequest(
     return true;
   }
 
+  const body: AdminSessionResponse = { serverCredential: serverCredentialAvailable };
   response.statusCode = 200;
   response.setHeader('content-type', 'application/json');
-  response.end(JSON.stringify({ serverCredential: serverCredentialAvailable }));
+  response.end(JSON.stringify(body));
   return true;
 }
 
@@ -175,23 +177,4 @@ export function rewriteAdminProxyResponse(response: Pick<IncomingMessage, 'heade
   delete response.headers['set-cookie'];
 }
 
-const contentSecurityPolicy = [
-  "default-src 'self'",
-  "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data:",
-  "connect-src 'self' ws://127.0.0.1:4173",
-  "object-src 'none'",
-  "base-uri 'none'",
-  "frame-ancestors 'none'",
-  "form-action 'none'"
-].join('; ');
-
-export const adminResponseHeaders = Object.freeze({
-  'Content-Security-Policy': contentSecurityPolicy,
-  'Cache-Control': 'no-store',
-  'X-Frame-Options': 'DENY',
-  'X-Content-Type-Options': 'nosniff',
-  'Referrer-Policy': 'no-referrer',
-  'X-Robots-Tag': 'noindex, nofollow'
-});
+export const adminResponseHeaders = buildAdminUiHeaders({ hotReloadOrigin: `ws://${adminHost}:${adminPort}` });

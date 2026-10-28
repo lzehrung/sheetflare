@@ -122,7 +122,7 @@ describe('setup deploy command builders', () => {
       vars: {
         RATE_LIMIT_MAX_REQUESTS: '300'
       }
-    }, 'service-account@example.com')).toMatchObject({
+    }, 'service-account@example.com', 'enabled')).toMatchObject({
       vars: {
         GOOGLE_CLIENT_EMAIL: 'service-account@example.com',
         RATE_LIMIT_MAX_REQUESTS: '300'
@@ -135,12 +135,30 @@ describe('setup deploy command builders', () => {
         GOOGLE_CLIENT_EMAIL: 'stale-default@example.com',
         RATE_LIMIT_MAX_REQUESTS: '300'
       }
-    }, null);
+    }, null, 'enabled');
 
     expect(namedOnlyConfig.vars).toMatchObject({
       RATE_LIMIT_MAX_REQUESTS: '300'
     });
     expect((namedOnlyConfig.vars as Record<string, unknown>).GOOGLE_CLIENT_EMAIL).toBeUndefined();
+  });
+
+  it('ships admin assets only when the hosted admin UI is enabled', () => {
+    const config = {
+      name: 'sheetflare-api',
+      assets: { directory: '../admin/dist', binding: 'ASSETS', run_worker_first: true },
+      vars: { ADMIN_UI: 'enabled' }
+    };
+
+    expect(patchApiConfigForDeploy(config, null, 'enabled')).toMatchObject({
+      assets: config.assets,
+      vars: { ADMIN_UI: 'enabled' }
+    });
+
+    const disabled = patchApiConfigForDeploy(config, null, 'disabled');
+    expect(disabled.assets).toBeUndefined();
+    expect(disabled.vars).toMatchObject({ ADMIN_UI: 'disabled' });
+    expect(config.assets).toEqual({ directory: '../admin/dist', binding: 'ASSETS', run_worker_first: true });
   });
 
   it('removes the temporary patched config after failure', async () => {

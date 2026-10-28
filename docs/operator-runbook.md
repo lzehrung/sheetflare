@@ -32,9 +32,15 @@ Post-deploy verification path:
 npm run setup -- --verify
 ```
 
-That re-checks the resolved Google credential source, Worker `/ready`, and Drive watch coverage for the spreadsheets declared in the setup config. Verification is Worker-only and does not require Wrangler authentication.
+That re-checks the resolved Google credential source, Worker `/ready`, the hosted admin UI state, and Drive watch coverage for the spreadsheets declared in the setup config. Verification is Worker-only and does not require Wrangler authentication.
 
-## Run The Admin UI Locally
+## Use The Admin UI
+
+Open `https://<your-worker>/admin/` and sign in with a scoped admin API key. The hosted UI needs no local tooling and calls the same authenticated `/v1/admin/*` routes as the CLI. If `/admin/` returns `404`, the deployment has `adminUi` disabled; if it returns `503`, run `npm run doctor` and redeploy. Switch, headers, and optional Cloudflare Access hardening are in [deploy.md](./deploy.md#admin-ui).
+
+### Run The Admin UI Locally
+
+Optional, for UI development, a disabled hosted admin, or CLI-held credentials:
 
 ```powershell
 npm run dev:admin

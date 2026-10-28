@@ -379,9 +379,12 @@ async function main() {
         : null;
 
       logStep('Deploying the API');
-      const apiDeploy = await deployApiWorker(config.profile, googleClientEmail, { debug: options.debug });
+      const apiDeploy = await deployApiWorker(config.profile, googleClientEmail, config.adminUi, { debug: options.debug });
       apiUrl = apiDeploy.url;
       logSuccess(`API is live at ${apiUrl}`);
+      if (config.adminUi === 'enabled') {
+        logSuccess(`Admin UI is live at ${apiUrl}/admin/`);
+      }
 
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
@@ -552,6 +555,7 @@ async function main() {
           ?? localState?.googleClientEmail
           ?? resolvedRuntimeState.googleClientEmail,
         apiUrl,
+        adminUi: config.adminUi
       })) {
         console.log(line);
       }

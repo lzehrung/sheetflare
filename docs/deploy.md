@@ -44,9 +44,9 @@ npm run setup -- --verify
 ```
 
 - `--apply-secrets` applies Worker secrets only.
-- `--deploy` deploys the API Worker only.
+- `--deploy` deploys the API Worker, including the hosted admin UI unless `adminUi` is `disabled`.
 - `--smoke` accepts a scoped admin API key or bootstrap credential through `SHEETFLARE_ADMIN_CREDENTIAL` or an interactive prompt; setup does not persist either credential.
-- `--verify` and `npm run doctor` check the resolved Google credential, Worker `/ready`, and Drive watches. Verify-only runs do not require Wrangler authentication.
+- `--verify` and `npm run doctor` check the resolved Google credential, Worker `/ready`, the hosted admin UI state, and Drive watches. Verify-only runs do not require Wrangler authentication.
 - `.sheetflare.setup.local.json` stores the deployed `apiUrl` and resolved Google service-account email, not admin credentials.
 
 Use the rest of this document for CI, token scopes, Worker deployment, and post-deploy verification.
@@ -181,11 +181,7 @@ npm run doctor
 npm run smoke
 ```
 
-3. Launch the local admin UI in the same shell, open `http://127.0.0.1:4173`, and confirm projects load without pasting a credential:
-
-```powershell
-npm run dev:admin
-```
+3. Open `https://<your-worker>/admin/`, sign in with the scoped admin key, and confirm projects load.
 
 4. Optionally persist smoke and load reports:
 
@@ -206,7 +202,21 @@ $env:SHEETFLARE_CACHE_HEALTH_TABLES_JSON = '[{"project":"demo","table":"users"}]
 npm run ops:cache:health
 ```
 
+## Admin UI
+
+The API Worker serves the admin UI at `https://<your-worker>/admin/` from its own static assets. There is no separate deployment: every Worker deploy ships the matching admin build.
+
+- **Sign-in**: paste a scoped admin API key. It stays in browser memory for the session; password managers can save it for the Worker's origin. Use the bootstrap token only as break-glass.
+- **Authorization**: the admin pages are static files. Every action calls the same authenticated `/v1/admin/*` routes as the CLI, with the same scopes and rate limits.
+- **Headers**: admin responses carry a strict CSP (`connect-src 'self'`), frame denial, `nosniff`, `no-referrer`, `noindex`, and `Cache-Control: no-store`.
+- **Switch**: `"adminUi": "enabled" | "disabled"` in `sheetflare.setup.json` (default `enabled`). `disabled` deploys no admin assets, and `/admin/` returns `404`. Setup configs that set the legacy `deploy.admin` to `false` default to `disabled`.
+- **Status**: `/ready` reports `checks.adminUi` as `enabled`, `disabled`, `invalid`, or `assets-missing`. `npm run doctor` compares it with setup config. `invalid` and `assets-missing` make `/admin/` return `503`; rerun `npm run setup -- --deploy` to fix them.
+
+Optional hardening: serve the Worker on a custom domain and add a [Cloudflare Access self-hosted application](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) for the `/admin` path, so only your identity provider's users can load the pages. Do not protect `/v1/*`, because API clients need it. Access for [`workers.dev`](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/) protects the whole Worker URL, API included, so set `workers_dev` to `false` once the custom domain serves traffic.
+
 ## Local Admin UI
+
+The loopback admin UI is optional. Use it for UI development, to manage a deployment with the hosted admin disabled, or to keep the admin credential out of the browser.
 
 `npm run dev:admin` binds exactly to `127.0.0.1:4173` with strict port selection. The proxy target resolves in this order:
 
@@ -253,7 +263,7 @@ Sheetflare never writes credentials to browser storage, setup state, or the URL.
 
 ## Legacy Configuration And State
 
-- Existing `sheetflare.setup.json` files may retain the legacy `deploy` section through the 14-day rollback window. Current setup ignores it; new configs omit it.
+- Existing `sheetflare.setup.json` files may retain the legacy `deploy` section through the 14-day rollback window. Setup reads only `deploy.admin: false`, as the default for `adminUi`; new configs omit the section.
 - Legacy `adminUrl`, `adminUiUsername`, and `adminUiPassword` keys in `.sheetflare.setup.local.json` or `.sheetflare.staging.setup.local.json` are ignored on read and removed on the next state write.
 - Legacy UI username/password environment variables are not read.
 

@@ -5,6 +5,7 @@ import { getSetupDoctorFailureMessage, runSetupDoctor } from './setup-doctor';
 
 const baseConfig: SetupConfig = {
   profile: 'production',
+  adminUi: 'enabled',
   privateProject: {
     slug: 'sheetflare-prod',
     name: 'Sheetflare Prod',
@@ -88,7 +89,8 @@ describe('runSetupDoctor', () => {
           defaultGoogleCredential: 'configured' as const,
           namedGoogleCredentials: 'missing' as const,
           googleDriveWebhookSecret: 'configured' as const,
-          bootstrapAdmin: 'configured' as const
+          bootstrapAdmin: 'configured' as const,
+          adminUi: 'enabled' as const
         },
         notes: []
       })),
@@ -116,8 +118,43 @@ describe('runSetupDoctor', () => {
     expect(results.map(({ name, status }) => ({ name, status }))).toEqual([
       { name: 'Google credential', status: 'ready' },
       { name: 'API readiness', status: 'ready' },
+      { name: 'Admin UI', status: 'ready' },
       { name: 'Drive watch status', status: 'ready' }
     ]);
+  });
+
+  it.each([
+    { name: 'matches a disabled config', configured: 'disabled' as const, deployed: 'disabled' as const, status: 'ready', summary: 'Hosted admin UI is disabled by setup config.' },
+    { name: 'differs from the config', configured: 'disabled' as const, deployed: 'enabled' as const, status: 'warning', summary: 'The deployed Worker has the hosted admin UI enabled, but setup config sets adminUi to disabled.' },
+    { name: 'is missing its assets', configured: 'enabled' as const, deployed: 'assets-missing' as const, status: 'blocked', summary: 'API /ready reports the hosted admin UI as assets-missing.' },
+    { name: 'is not reported by an older Worker', configured: 'enabled' as const, deployed: undefined, status: 'warning', summary: 'The deployed Worker predates the hosted admin UI.' }
+  ])('reports the admin UI when the deployed state $name', async ({ configured, deployed, status, summary }) => {
+    const results = await runSetupDoctor({
+      config: { ...baseConfig, adminUi: configured },
+      runtimeState: {
+        googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+        namedGoogleCredentials: 'missing',
+        apiUrl: 'https://sheetflare-api.example.workers.dev',
+        adminBearerToken: null,
+        adminApiKey: null,
+        privateReadKey: null,
+        mutationKey: null
+      },
+    }, {
+      fetchReady: vi.fn(async () => ({
+        ok: true,
+        checks: {
+          defaultGoogleCredential: 'configured' as const,
+          namedGoogleCredentials: 'missing' as const,
+          googleDriveWebhookSecret: 'configured' as const,
+          bootstrapAdmin: 'configured' as const,
+          ...(deployed === undefined ? {} : { adminUi: deployed })
+        },
+        notes: []
+      }))
+    });
+
+    expect(results.find((result) => result.name === 'Admin UI')).toMatchObject({ status, summary });
   });
 
   it('blocks when the placeholder Google client email is still configured', async () => {
@@ -165,7 +202,8 @@ describe('runSetupDoctor', () => {
           defaultGoogleCredential: 'configured' as const,
           namedGoogleCredentials: 'missing' as const,
           googleDriveWebhookSecret: 'configured' as const,
-          bootstrapAdmin: 'configured' as const
+          bootstrapAdmin: 'configured' as const,
+          adminUi: 'enabled' as const
         },
         notes: []
       })),
@@ -225,7 +263,8 @@ describe('runSetupDoctor', () => {
           defaultGoogleCredential: 'configured' as const,
           namedGoogleCredentials: 'missing' as const,
           googleDriveWebhookSecret: 'configured' as const,
-          bootstrapAdmin: 'configured' as const
+          bootstrapAdmin: 'configured' as const,
+          adminUi: 'enabled' as const
         },
         notes: []
       })),
@@ -279,7 +318,8 @@ describe('runSetupDoctor', () => {
           defaultGoogleCredential: 'missing' as const,
           namedGoogleCredentials: 'configured' as const,
           googleDriveWebhookSecret: 'configured' as const,
-          bootstrapAdmin: 'configured' as const
+          bootstrapAdmin: 'configured' as const,
+          adminUi: 'enabled' as const
         },
         notes: []
       })),
@@ -371,7 +411,8 @@ describe('runSetupDoctor', () => {
           defaultGoogleCredential: 'configured' as const,
           namedGoogleCredentials: 'missing' as const,
           googleDriveWebhookSecret: 'configured' as const,
-          bootstrapAdmin: 'configured' as const
+          bootstrapAdmin: 'configured' as const,
+          adminUi: 'enabled' as const
         },
         notes: []
       })),

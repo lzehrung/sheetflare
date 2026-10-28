@@ -15,7 +15,8 @@ import type {
   RefreshTableCacheResult,
   ReindexTableResult
 } from '@sheetflare/contracts';
-import { adminSessionPath, buildAdminHeaders, type AdminAccess } from './auth';
+import { adminSessionPath, type AdminSessionResponse } from '@sheetflare/contracts';
+import { buildAdminHeaders, type AdminAccess } from './auth';
 
 type ApiErrorResponse = {
   error?: {
@@ -112,11 +113,7 @@ async function requestAdminJson<T>(
   return parsed as T;
 }
 
-export type AdminSession = {
-  serverCredential: boolean;
-};
-
-export async function getAdminSession(): Promise<AdminSession> {
+export async function getAdminSession(): Promise<AdminSessionResponse> {
   const response = await fetch(adminSessionPath, {
     headers: { accept: 'application/json' }
   });

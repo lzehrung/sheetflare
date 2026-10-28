@@ -35,7 +35,7 @@ function getCredentialSourceMessage(source: CredentialPanelProps['credentialSour
     case 'browser':
       return 'Using the credential entered for this session.';
     case null:
-      return 'Enter a scoped admin API key, or start the admin server with SHEETFLARE_ADMIN_CREDENTIAL set.';
+      return 'Enter a scoped admin API key for this session.';
   }
 }
 
