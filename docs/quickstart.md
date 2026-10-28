@@ -107,7 +107,7 @@ Launch the admin UI after the Worker passes verification:
 npm run dev:admin
 ```
 
-Open `http://127.0.0.1:4173`. The fixed-port server is loopback-only and automatically targets `apiUrl` from `.sheetflare.setup.local.json`. Paste a scoped admin API key for routine work; the UI keeps it in memory only for the current session. Use the bootstrap token only for break-glass access.
+Open `http://127.0.0.1:4173`. The fixed-port server is loopback-only and automatically targets `apiUrl` from `.sheetflare.setup.local.json`. If `SHEETFLARE_ADMIN_CREDENTIAL` holds a scoped admin API key in the shell that starts the server, the UI loads without a prompt. Otherwise paste a scoped key; the UI keeps it in memory only for the current session. Use the bootstrap token only for break-glass access.
 
 Use these when you only want one step:
 

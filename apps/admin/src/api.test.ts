@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { adminCredentialHeaderName } from './auth';
+import { adminRequestHeaderName, type AdminAccess } from './auth';
 import { deleteProject, deleteTable, inspectSpreadsheetTab, listApiKeys, listProjects, listSpreadsheetTabs, listSpreadsheetWatches, refreshTableCache, revokeApiKey } from './api';
+
+const browserAccess: AdminAccess = { source: 'browser', credential: 'secret' };
 
 describe('admin api helpers', () => {
   afterEach(() => {
@@ -20,7 +22,7 @@ describe('admin api helpers', () => {
       )
     );
 
-    await expect(listProjects('secret')).rejects.toThrow(
+    await expect(listProjects(browserAccess)).rejects.toThrow(
       'Request failed: 503 requestId=req-123 body=<html>upstream unavailable</html>'
     );
   });
@@ -38,7 +40,7 @@ describe('admin api helpers', () => {
       )
     );
 
-    await expect(listProjects('secret')).rejects.toThrow(
+    await expect(listProjects(browserAccess)).rejects.toThrow(
       'Request returned an invalid JSON response. requestId=req-200 body=<html>ok?</html>'
     );
   });
@@ -63,7 +65,7 @@ describe('admin api helpers', () => {
       )
     );
 
-    await expect(listApiKeys('secret', 'demo')).resolves.toEqual({
+    await expect(listApiKeys(browserAccess, 'demo')).resolves.toEqual({
       data: [
         expect.objectContaining({
           id: 'key-1',
@@ -77,13 +79,14 @@ describe('admin api helpers', () => {
     const fetchMock = vi.fn(async () => Response.json({ ok: true }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(revokeApiKey('secret', 'key-1')).resolves.toEqual({ ok: true });
+    await expect(revokeApiKey(browserAccess, 'key-1')).resolves.toEqual({ ok: true });
     expect(fetchMock).toHaveBeenCalledWith(
       '/v1/admin/keys/key-1',
       expect.objectContaining({
         method: 'DELETE',
         headers: {
-          [adminCredentialHeaderName]: 'secret'
+          [adminRequestHeaderName]: '1',
+          authorization: 'Bearer secret'
         }
       })
     );
@@ -97,7 +100,7 @@ describe('admin api helpers', () => {
     }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(deleteProject('secret', 'demo')).resolves.toEqual({
+    await expect(deleteProject(browserAccess, 'demo')).resolves.toEqual({
       ok: true,
       deletedProject: 'demo',
       deletedTables: ['users']
@@ -107,7 +110,8 @@ describe('admin api helpers', () => {
       expect.objectContaining({
         method: 'DELETE',
         headers: {
-          [adminCredentialHeaderName]: 'secret'
+          [adminRequestHeaderName]: '1',
+          authorization: 'Bearer secret'
         }
       })
     );
@@ -120,7 +124,7 @@ describe('admin api helpers', () => {
     }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(deleteTable('secret', 'demo', 'users')).resolves.toEqual({
+    await expect(deleteTable(browserAccess, 'demo', 'users')).resolves.toEqual({
       ok: true,
       deletedTable: 'users'
     });
@@ -129,7 +133,8 @@ describe('admin api helpers', () => {
       expect.objectContaining({
         method: 'DELETE',
         headers: {
-          [adminCredentialHeaderName]: 'secret'
+          [adminRequestHeaderName]: '1',
+          authorization: 'Bearer secret'
         }
       })
     );
@@ -166,7 +171,7 @@ describe('admin api helpers', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(refreshTableCache('secret', 'demo', 'users')).resolves.toMatchObject({
+    await expect(refreshTableCache(browserAccess, 'demo', 'users')).resolves.toMatchObject({
       ok: true,
       rowCount: 3
     });
@@ -175,7 +180,8 @@ describe('admin api helpers', () => {
       expect.objectContaining({
         method: 'POST',
         headers: {
-          [adminCredentialHeaderName]: 'secret'
+          [adminRequestHeaderName]: '1',
+          authorization: 'Bearer secret'
         }
       })
     );
@@ -194,7 +200,7 @@ describe('admin api helpers', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(listSpreadsheetTabs('secret', 'demo')).resolves.toEqual({
+    await expect(listSpreadsheetTabs(browserAccess, 'demo')).resolves.toEqual({
       data: [
         {
           title: 'Users',
@@ -206,7 +212,8 @@ describe('admin api helpers', () => {
       '/v1/admin/projects/demo/spreadsheet/tabs',
       expect.objectContaining({
         headers: {
-          [adminCredentialHeaderName]: 'secret'
+          [adminRequestHeaderName]: '1',
+          authorization: 'Bearer secret'
         }
       })
     );
@@ -237,7 +244,7 @@ describe('admin api helpers', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(listSpreadsheetWatches('secret')).resolves.toEqual({
+    await expect(listSpreadsheetWatches(browserAccess)).resolves.toEqual({
       data: [
         expect.objectContaining({
           spreadsheetId: 'sheet-1',
@@ -249,7 +256,8 @@ describe('admin api helpers', () => {
       '/v1/admin/system/google/drive/watches',
       expect.objectContaining({
         headers: {
-          [adminCredentialHeaderName]: 'secret'
+          [adminRequestHeaderName]: '1',
+          authorization: 'Bearer secret'
         }
       })
     );
@@ -270,7 +278,7 @@ describe('admin api helpers', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(inspectSpreadsheetTab('secret', 'demo', 'Users', 3)).resolves.toEqual({
+    await expect(inspectSpreadsheetTab(browserAccess, 'demo', 'Users', 3)).resolves.toEqual({
       data: {
         tab: {
           title: 'Users',
@@ -284,7 +292,8 @@ describe('admin api helpers', () => {
       '/v1/admin/projects/demo/spreadsheet/tabs/Users?headerRow=3',
       expect.objectContaining({
         headers: {
-          [adminCredentialHeaderName]: 'secret'
+          [adminRequestHeaderName]: '1',
+          authorization: 'Bearer secret'
         }
       })
     );
@@ -312,7 +321,7 @@ describe('admin api helpers', () => {
       )
     );
 
-    await expect(listSpreadsheetWatches('secret')).rejects.toThrow(
+    await expect(listSpreadsheetWatches(browserAccess)).rejects.toThrow(
       'This operation requires a global admin key. requestId=req-401'
     );
   });

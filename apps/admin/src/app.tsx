@@ -26,6 +26,7 @@ import {
   createTable,
   deleteProject,
   deleteTable,
+  getAdminSession,
   getCacheStatus,
   getProject,
   inspectSpreadsheetTab,
@@ -39,7 +40,8 @@ import {
 } from './api';
 import {
   adminCredentialStorageKey,
-  normalizeAdminCredential
+  normalizeAdminCredential,
+  type AdminAccess
 } from './auth';
 import { ApiKeyPanel } from './components/api-key-panel';
 import { CredentialPanel } from './components/credential-panel';
@@ -170,9 +172,11 @@ function countTableHealth(
   );
 }
 
-function getCredentialStatus(credential: string | null, state: LoadState) {
-  if (!credential) {
-    return 'required' as const;
+type ServerCredentialState = 'checking' | 'available' | 'unavailable';
+
+function getCredentialStatus(access: AdminAccess | null, serverCredentialState: ServerCredentialState, state: LoadState) {
+  if (!access) {
+    return serverCredentialState === 'checking' ? 'checking' as const : 'required' as const;
   }
 
   if (state.status === 'loading') {
@@ -191,7 +195,8 @@ function getCredentialStatus(credential: string | null, state: LoadState) {
 }
 
 export function App() {
-  const [credential, setCredential] = useState<string | null>(null);
+  const [access, setAccess] = useState<AdminAccess | null>(null);
+  const [serverCredentialState, setServerCredentialState] = useState<ServerCredentialState>('checking');
   const [draftCredential, setDraftCredential] = useState<string>('');
   const [state, setState] = useState<LoadState>({
     status: 'idle',
@@ -253,7 +258,35 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!credential) {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const session = await getAdminSession();
+        if (cancelled) {
+          return;
+        }
+
+        if (session.serverCredential) {
+          setServerCredentialState('available');
+          setAccess((current) => current ?? { source: 'local-server' });
+        } else {
+          setServerCredentialState('unavailable');
+        }
+      } catch {
+        if (!cancelled) {
+          setServerCredentialState('unavailable');
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!access) {
       setState({
         status: 'idle',
         message: 'Enter a bootstrap admin token or scoped admin API key to load the control plane.'
@@ -266,7 +299,7 @@ export function App() {
 
     void (async () => {
       try {
-        const body = await listProjects(credential);
+        const body = await listProjects(access);
         if (!cancelled) {
           setState({ status: 'ready', data: body.data });
           setSelectedProjectSlug((current) => getSelectedProjectSlug(body.data, current));
@@ -286,14 +319,14 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [credential]);
+  }, [access]);
 
   useEffect(() => {
     setCreatedKey(null);
   }, [selectedProjectSlug]);
 
   useEffect(() => {
-    if (!credential || !selectedProjectSlug) {
+    if (!access || !selectedProjectSlug) {
       setProjectDetailState({
         status: 'idle',
         message: 'Select a project to inspect tables, cache state, and keys.'
@@ -314,7 +347,7 @@ export function App() {
 
     void (async () => {
       try {
-        const detail = await getProject(credential, selectedProjectSlug);
+        const detail = await getProject(access, selectedProjectSlug);
         if (!cancelled) {
           setProjectDetailState({
             status: 'ready',
@@ -335,10 +368,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [credential, selectedProjectSlug]);
+  }, [access, selectedProjectSlug]);
 
   useEffect(() => {
-    if (!credential || !selectedProjectSlug) {
+    if (!access || !selectedProjectSlug) {
       setSpreadsheetWatchState({
         status: 'idle',
         message: 'Select a project to inspect spreadsheet watch status.'
@@ -356,7 +389,7 @@ export function App() {
 
     void (async () => {
       try {
-        const result = await listSpreadsheetWatches(credential);
+        const result = await listSpreadsheetWatches(access);
         const watch = result.data.find((entry) => entry.spreadsheetId === projectDetailState.project.spreadsheetId) ?? null;
         if (!cancelled) {
           setSpreadsheetWatchState({
@@ -378,14 +411,14 @@ export function App() {
       cancelled = true;
     };
   }, [
-    credential,
+    access,
     selectedProjectSlug,
     projectDetailState.status,
     projectDetailState.status === 'ready' ? projectDetailState.project.spreadsheetId : null
   ]);
 
   useEffect(() => {
-    if (!credential || !selectedProjectSlug || projectDetailState.status !== 'ready' || !tableSetupOpen) {
+    if (!access || !selectedProjectSlug || projectDetailState.status !== 'ready' || !tableSetupOpen) {
       setSpreadsheetTabsState({
         status: 'idle',
         message: !selectedProjectSlug ? 'Select a project to load spreadsheet tabs.' : 'Open table setup to load spreadsheet tabs.'
@@ -398,7 +431,7 @@ export function App() {
 
     void (async () => {
       try {
-        const result = await listSpreadsheetTabs(credential, selectedProjectSlug);
+        const result = await listSpreadsheetTabs(access, selectedProjectSlug);
         if (!cancelled) {
           setSpreadsheetTabsState({
             status: 'ready',
@@ -418,10 +451,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [credential, selectedProjectSlug, projectDetailState.status, tableSetupOpen]);
+  }, [access, selectedProjectSlug, projectDetailState.status, tableSetupOpen]);
 
   useEffect(() => {
-    if (!credential || !selectedProjectSlug || !tableSetupOpen) {
+    if (!access || !selectedProjectSlug || !tableSetupOpen) {
       setTabInspectionState({
         status: 'idle',
         message: 'Choose a sheet tab to preview its headers.'
@@ -448,7 +481,7 @@ export function App() {
 
     void (async () => {
       try {
-        const result = await inspectSpreadsheetTab(credential, selectedProjectSlug, tabName, headerRow);
+        const result = await inspectSpreadsheetTab(access, selectedProjectSlug, tabName, headerRow);
         if (cancelled) {
           return;
         }
@@ -485,10 +518,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [credential, selectedProjectSlug, createTableDraft.sheetTabName, createTableDraft.headerRow, tableSetupOpen]);
+  }, [access, selectedProjectSlug, createTableDraft.sheetTabName, createTableDraft.headerRow, tableSetupOpen]);
 
   useEffect(() => {
-    if (!credential) {
+    if (!access) {
       setGlobalKeysState({
         status: 'idle',
         message: 'Load a global admin credential to inspect global keys.'
@@ -501,7 +534,7 @@ export function App() {
 
     void (async () => {
       try {
-        const result = await listApiKeys(credential);
+        const result = await listApiKeys(access);
         if (!cancelled) {
           setGlobalKeysState({
             status: 'ready',
@@ -523,10 +556,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [credential]);
+  }, [access]);
 
   useEffect(() => {
-    if (!credential || !selectedProjectSlug) {
+    if (!access || !selectedProjectSlug) {
       setProjectKeysState({
         status: 'idle',
         message: 'Select a project to inspect and manage scoped API keys.'
@@ -539,7 +572,7 @@ export function App() {
 
     void (async () => {
       try {
-        const result = await listApiKeys(credential, selectedProjectSlug);
+        const result = await listApiKeys(access, selectedProjectSlug);
         if (!cancelled) {
           setProjectKeysState({
             status: 'ready',
@@ -559,10 +592,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [credential, selectedProjectSlug]);
+  }, [access, selectedProjectSlug]);
 
   useEffect(() => {
-    if (!credential || projectDetailState.status !== 'ready' || projectDetailState.tables.length === 0) {
+    if (!access || projectDetailState.status !== 'ready' || projectDetailState.tables.length === 0) {
       return;
     }
 
@@ -585,7 +618,7 @@ export function App() {
       const results = await Promise.all(
         tableEntries.map(async (entry) => {
           try {
-            const response = await getCacheStatus(credential, entry.table.projectSlug, entry.table.tableSlug);
+            const response = await getCacheStatus(access, entry.table.projectSlug, entry.table.tableSlug);
             return {
               cache: response.data,
               cacheKey: entry.cacheKey,
@@ -624,7 +657,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [credential, projectDetailState]);
+  }, [access, projectDetailState]);
 
   useEffect(() => {
     if (state.status === 'ready' && state.data.length === 0) {
@@ -638,14 +671,14 @@ export function App() {
     }
   }, [projectDetailState]);
 
-  async function refreshProjects(credentialValue: string) {
-    const body = await listProjects(credentialValue);
+  async function refreshProjects(requestAccess: AdminAccess) {
+    const body = await listProjects(requestAccess);
     setState({ status: 'ready', data: body.data });
     setSelectedProjectSlug((current) => getSelectedProjectSlug(body.data, current));
   }
 
   async function refreshProjectDetail(
-    credentialValue: string,
+    requestAccess: AdminAccess,
     projectSlug: string,
     options?: { showLoading?: boolean }
   ) {
@@ -653,7 +686,7 @@ export function App() {
       setProjectDetailState({ status: 'loading' });
     }
 
-    const detail = await getProject(credentialValue, projectSlug);
+    const detail = await getProject(requestAccess, projectSlug);
     setProjectDetailState({
       status: 'ready',
       project: detail.project,
@@ -662,7 +695,7 @@ export function App() {
   }
 
   async function refreshProjectKeys(
-    credentialValue: string,
+    requestAccess: AdminAccess,
     projectSlug: string,
     options?: { showLoading?: boolean }
   ) {
@@ -670,7 +703,7 @@ export function App() {
       setProjectKeysState({ status: 'loading' });
     }
 
-    const result = await listApiKeys(credentialValue, projectSlug);
+    const result = await listApiKeys(requestAccess, projectSlug);
     setProjectKeysState({
       status: 'ready',
       data: result.data
@@ -678,14 +711,14 @@ export function App() {
   }
 
   async function refreshGlobalKeys(
-    credentialValue: string,
+    requestAccess: AdminAccess,
     options?: { showLoading?: boolean }
   ) {
     if (options?.showLoading) {
       setGlobalKeysState({ status: 'loading' });
     }
 
-    const result = await listApiKeys(credentialValue);
+    const result = await listApiKeys(requestAccess);
     setGlobalKeysState({
       status: 'ready',
       data: result.data.filter((apiKey) => apiKey.projectSlug === null)
@@ -715,9 +748,13 @@ export function App() {
     }
   }
 
+  function getDefaultAccess(): AdminAccess | null {
+    return serverCredentialState === 'available' ? { source: 'local-server' } : null;
+  }
+
   function saveCredential() {
     const normalized = normalizeAdminCredential(draftCredential);
-    setCredential(normalized);
+    setAccess(normalized ? { source: 'browser', credential: normalized } : getDefaultAccess());
     setCacheStateByTable({});
     setCreatedKey(null);
     setDraftCredential(normalized ?? '');
@@ -751,12 +788,12 @@ export function App() {
     }));
   }
 
-  async function fetchCacheStatusForTable(credentialValue: string, projectSlug: string, tableSlug: string) {
+  async function fetchCacheStatusForTable(requestAccess: AdminAccess, projectSlug: string, tableSlug: string) {
     setCacheStatusLoading(projectSlug, tableSlug, true);
     setCacheStatusError(projectSlug, tableSlug, null);
 
     try {
-      const response = await getCacheStatus(credentialValue, projectSlug, tableSlug);
+      const response = await getCacheStatus(requestAccess, projectSlug, tableSlug);
       setCacheStatusValue(projectSlug, tableSlug, response.data);
       return response.data;
     } catch (error) {
@@ -769,7 +806,7 @@ export function App() {
   }
 
   function clearCredential() {
-    setCredential(null);
+    setAccess(getDefaultAccess());
     setCacheStateByTable({});
     setCacheStatusErrorByTable({});
     setCacheStatusLoadingByTable({});
@@ -810,33 +847,33 @@ export function App() {
   }
 
   async function handleCreateProject() {
-    if (!credential || !createProjectValidation.value) return;
+    if (!access || !createProjectValidation.value) return;
     const input = createProjectValidation.value;
 
     await runAction(`Saving project ${input.slug}`, async () => {
-      await createProject(credential, input);
+      await createProject(access, input);
       setCreateProjectDraft(initialCreateProjectDraft);
       setProjectSetupOpen(false);
-      await refreshProjects(credential);
+      await refreshProjects(access);
       setSelectedProjectSlug(input.slug);
     });
   }
 
   async function handleCreateTable() {
-    if (!credential || !selectedProjectSlug || !createTableValidation.value) return;
+    if (!access || !selectedProjectSlug || !createTableValidation.value) return;
     const input = createTableValidation.value;
 
     await runAction(`Saving table ${selectedProjectSlug}/${input.tableSlug}`, async () => {
-      await createTable(credential, selectedProjectSlug, input);
+      await createTable(access, selectedProjectSlug, input);
       setCreateTableDraft(initialCreateTableDraft);
       setTableSetupOpen(false);
-      await refreshProjects(credential);
-      await refreshProjectDetail(credential, selectedProjectSlug);
+      await refreshProjects(access);
+      await refreshProjectDetail(access, selectedProjectSlug);
     });
   }
 
   async function handleCreateKey() {
-    if (!credential || !createKeyValidation.value) return;
+    if (!access || !createKeyValidation.value) return;
     const validatedInput = createKeyValidation.value;
     const input = {
       name: validatedInput.name,
@@ -845,32 +882,32 @@ export function App() {
     };
 
     await runAction(`Creating API key ${input.name}`, async () => {
-      const response = await createApiKey(credential, input);
+      const response = await createApiKey(access, input);
       setCreatedKey(response.apiKey);
       if (selectedProjectSlug) {
-        await refreshProjectKeys(credential, selectedProjectSlug);
+        await refreshProjectKeys(access, selectedProjectSlug);
       }
       if (!input.projectSlug) {
-        await refreshGlobalKeys(credential);
+        await refreshGlobalKeys(access);
       }
     });
   }
 
   async function handleLoadCache(tableSlug: string) {
-    if (!credential || !selectedProjectSlug) return;
+    if (!access || !selectedProjectSlug) return;
     await runAction(`Getting cache status for ${selectedProjectSlug}/${tableSlug}`, async () => {
-      await fetchCacheStatusForTable(credential, selectedProjectSlug, tableSlug);
+      await fetchCacheStatusForTable(access, selectedProjectSlug, tableSlug);
     });
   }
 
   async function handleRefreshIfStale(tableSlug: string) {
-    if (!credential || !selectedProjectSlug) return;
+    if (!access || !selectedProjectSlug) return;
     setCacheStatusLoading(selectedProjectSlug, tableSlug, true);
     setCacheStatusError(selectedProjectSlug, tableSlug, null);
 
     await runAction(`Refreshing cache for ${selectedProjectSlug}/${tableSlug} if stale`, async () => {
       try {
-        const response = await refreshTableCache(credential, selectedProjectSlug, tableSlug);
+        const response = await refreshTableCache(access, selectedProjectSlug, tableSlug);
         setCacheStatusValue(selectedProjectSlug, tableSlug, response.cache);
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error';
@@ -883,13 +920,13 @@ export function App() {
   }
 
   async function handleReindex(tableSlug: string) {
-    if (!credential || !selectedProjectSlug) return;
+    if (!access || !selectedProjectSlug) return;
     setCacheStatusLoading(selectedProjectSlug, tableSlug, true);
     setCacheStatusError(selectedProjectSlug, tableSlug, null);
 
     await runAction(`Reindexing ${selectedProjectSlug}/${tableSlug}`, async () => {
       try {
-        const response = await reindexTable(credential, selectedProjectSlug, tableSlug);
+        const response = await reindexTable(access, selectedProjectSlug, tableSlug);
         setCacheStatusValue(selectedProjectSlug, tableSlug, response.cache);
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error';
@@ -902,12 +939,12 @@ export function App() {
   }
 
   async function handleDeleteTable(tableSlug: string) {
-    if (!credential || !selectedProjectSlug) return;
+    if (!access || !selectedProjectSlug) return;
     const confirmed = window.confirm(`Delete table ${selectedProjectSlug}/${tableSlug}? This removes Sheetflare configuration and clears the local cache, but does not delete the Google Sheets tab.`);
     if (!confirmed) return;
 
     await runAction(`Deleting table ${selectedProjectSlug}/${tableSlug}`, async () => {
-      await deleteTable(credential, selectedProjectSlug, tableSlug);
+      await deleteTable(access, selectedProjectSlug, tableSlug);
       const cacheKey = getTableCacheKey(selectedProjectSlug, tableSlug);
       setCacheStateByTable((current) => {
         const { [cacheKey]: removed, ...rest } = current;
@@ -924,19 +961,19 @@ export function App() {
         void removed;
         return rest;
       });
-      await refreshProjects(credential);
-      await refreshProjectDetail(credential, selectedProjectSlug);
+      await refreshProjects(access);
+      await refreshProjectDetail(access, selectedProjectSlug);
     });
   }
 
   async function handleDeleteProject() {
-    if (!credential || !selectedProjectSlug || projectDetailState.status !== 'ready') return;
+    if (!access || !selectedProjectSlug || projectDetailState.status !== 'ready') return;
     const tableCount = projectDetailState.tables.length;
     const confirmed = window.confirm(`Delete project ${selectedProjectSlug} and its ${tableCount} configured table${tableCount === 1 ? '' : 's'}? This does not delete the upstream Google spreadsheet.`);
     if (!confirmed) return;
 
     await runAction(`Deleting project ${selectedProjectSlug}`, async () => {
-      await deleteProject(credential, selectedProjectSlug);
+      await deleteProject(access, selectedProjectSlug);
       setCacheStateByTable({});
       setCacheStatusErrorByTable({});
       setCacheStatusLoadingByTable({});
@@ -952,48 +989,48 @@ export function App() {
         status: 'idle',
         message: 'Select a project to inspect spreadsheet watch status.'
       });
-      await refreshProjects(credential);
+      await refreshProjects(access);
     });
   }
 
   async function handleRevokeKey(apiKeyId: string) {
-    if (!credential) return;
+    if (!access) return;
     await runAction(`Revoking key ${apiKeyId}`, async () => {
-      await revokeApiKey(credential, apiKeyId);
+      await revokeApiKey(access, apiKeyId);
       setCreatedKey((current) => (current?.startsWith(`sfk_${apiKeyId}.`) ? null : current));
       if (selectedProjectSlug) {
-        await refreshProjectKeys(credential, selectedProjectSlug);
+        await refreshProjectKeys(access, selectedProjectSlug);
       }
-      await refreshGlobalKeys(credential);
+      await refreshGlobalKeys(access);
     });
   }
 
   async function handleRefreshProjects() {
-    if (!credential) return;
+    if (!access) return;
     setState({ status: 'loading' });
     await runAction('Refreshing project registry', async () => {
-      await refreshProjects(credential);
+      await refreshProjects(access);
     });
   }
 
   async function handleRefreshSelectedProject() {
-    if (!credential || !selectedProjectSlug) return;
+    if (!access || !selectedProjectSlug) return;
     await runAction(`Refreshing project ${selectedProjectSlug}`, async () => {
-      await refreshProjectDetail(credential, selectedProjectSlug, { showLoading: true });
+      await refreshProjectDetail(access, selectedProjectSlug, { showLoading: true });
     });
   }
 
   async function handleRefreshProjectKeys() {
-    if (!credential || !selectedProjectSlug) return;
+    if (!access || !selectedProjectSlug) return;
     await runAction(`Refreshing keys for ${selectedProjectSlug}`, async () => {
-      await refreshProjectKeys(credential, selectedProjectSlug, { showLoading: true });
+      await refreshProjectKeys(access, selectedProjectSlug, { showLoading: true });
     });
   }
 
   async function handleRefreshGlobalKeys() {
-    if (!credential) return;
+    if (!access) return;
     await runAction('Refreshing global admin keys', async () => {
-      await refreshGlobalKeys(credential, { showLoading: true });
+      await refreshGlobalKeys(access, { showLoading: true });
     });
   }
 
@@ -1017,7 +1054,7 @@ export function App() {
           cacheStatusLoadingByTable
         )
       : null;
-  const credentialStatus = getCredentialStatus(credential, state);
+  const credentialStatus = getCredentialStatus(access, serverCredentialState, state);
 
   return (
     <main className="shell">
@@ -1031,11 +1068,13 @@ export function App() {
 
       <CredentialPanel
         credentialStatus={credentialStatus}
+        credentialSource={access?.source ?? null}
         draftCredential={draftCredential}
         onDraftCredentialChange={setDraftCredential}
         onSave={saveCredential}
         onClear={clearCredential}
         saveDisabled={draftCredential.trim().length === 0}
+        clearDisabled={access?.source !== 'browser'}
         busy={busyAction !== null}
       />
 
@@ -1061,7 +1100,7 @@ export function App() {
                   {projectsExpanded ? 'Collapse projects' : 'Show projects'}
                 </button>
               ) : null}
-              <button type="button" className="secondaryButton" onClick={() => void handleRefreshProjects()} disabled={!credential || busyAction !== null}>
+              <button type="button" className="secondaryButton" onClick={() => void handleRefreshProjects()} disabled={!access || busyAction !== null}>
                 Refresh projects
               </button>
               <span className="badge">{projectCount}</span>
@@ -1073,7 +1112,7 @@ export function App() {
           {state.status === 'error' ? (
             <p className="error">
               {state.message}
-              {state.unauthorized ? ' Update the stored credential and try again.' : ''}
+              {state.unauthorized ? ' Update the credential and try again.' : ''}
             </p>
           ) : null}
           {state.status === 'ready' && state.data.length === 0 ? (
@@ -1083,7 +1122,7 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => setProjectSetupOpen(true)}
-                  disabled={!credential || busyAction !== null}
+                  disabled={!access || busyAction !== null}
                 >
                   Add project
                 </button>
@@ -1132,7 +1171,7 @@ export function App() {
           onRefresh={() => void handleRefreshSelectedProject()}
           onDeleteProject={() => void handleDeleteProject()}
           busy={busyAction !== null}
-          createTableDisabled={!credential || !selectedProjectSlug || busyAction !== null || !createTableValidation.isValid}
+          createTableDisabled={!access || !selectedProjectSlug || busyAction !== null || !createTableValidation.isValid}
           getTableCacheKey={getTableCacheKey}
         />
       </section>
@@ -1159,7 +1198,7 @@ export function App() {
               fieldErrors={createProjectValidation.fieldErrors}
               onChange={setCreateProjectDraft}
               onSubmit={() => void handleCreateProject()}
-              submitDisabled={!credential || busyAction !== null || !createProjectValidation.isValid}
+              submitDisabled={!access || busyAction !== null || !createProjectValidation.isValid}
             />
           </details>
 
@@ -1177,7 +1216,7 @@ export function App() {
               fieldErrors={createKeyValidation.fieldErrors}
               onChange={setCreateKeyDraft}
               onSubmit={() => void handleCreateKey()}
-              submitDisabled={!credential || busyAction !== null || !createKeyValidation.isValid}
+              submitDisabled={!access || busyAction !== null || !createKeyValidation.isValid}
               createdKey={createdKey}
               projectKeysState={projectKeysState}
               globalKeysState={globalKeysState}

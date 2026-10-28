@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  adminCredentialHeaderName,
+  adminRequestHeaderName,
   buildAdminHeaders,
   normalizeAdminCredential
 } from './auth';
@@ -20,13 +20,16 @@ describe('normalizeAdminCredential', () => {
 });
 
 describe('buildAdminHeaders', () => {
-  it('builds the dedicated proxy credential header when a credential exists', () => {
-    expect(buildAdminHeaders('secret-token')).toEqual({
-      [adminCredentialHeaderName]: 'secret-token'
+  it('sends the browser credential as bearer authorization with the admin request marker', () => {
+    expect(buildAdminHeaders({ source: 'browser', credential: 'secret-token' })).toEqual({
+      [adminRequestHeaderName]: '1',
+      authorization: 'Bearer secret-token'
     });
   });
 
-  it('returns undefined when no credential is configured', () => {
-    expect(buildAdminHeaders(null)).toBeUndefined();
+  it('sends only the admin request marker when the local server owns the credential', () => {
+    expect(buildAdminHeaders({ source: 'local-server' })).toEqual({
+      [adminRequestHeaderName]: '1'
+    });
   });
 });

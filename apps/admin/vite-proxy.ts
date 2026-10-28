@@ -1,8 +1,9 @@
-import type { ClientRequest, IncomingMessage } from 'node:http';
-import { adminCredentialHeaderName } from './src/auth';
+import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from 'node:http';
+import { adminRequestHeaderName, adminSessionPath, normalizeAdminCredential } from './src/auth';
 
 export const adminHost = '127.0.0.1';
 export const adminPort = 4173;
+const adminOrigin = `http://${adminHost}:${adminPort}`;
 
 const defaultAdminApiTarget = 'http://127.0.0.1:8787';
 const loopbackHostnames: Readonly<Record<string, true>> = {
@@ -79,6 +80,33 @@ export function resolveAdminApiTarget(
   return defaultAdminApiTarget;
 }
 
+export function resolveServerAdminCredential(env: Readonly<Record<string, string | undefined>>): string | null {
+  for (const name of ['SHEETFLARE_ADMIN_CREDENTIAL', 'SHEETFLARE_ADMIN_BEARER']) {
+    const credential = normalizeAdminCredential(env[name] ?? '');
+    if (credential === null) {
+      continue;
+    }
+    if (!/^[\x21-\x7e]+$/.test(credential)) {
+      throw new Error(`Invalid ${name}: admin credentials must contain only visible ASCII characters.`);
+    }
+    return credential;
+  }
+
+  return null;
+}
+
+function isAdminUiRequest(headers: IncomingHttpHeaders): boolean {
+  if (headers[adminRequestHeaderName] !== '1') {
+    return false;
+  }
+  if (headers.origin !== undefined && headers.origin !== adminOrigin) {
+    return false;
+  }
+
+  const fetchSite = headers['sec-fetch-site'];
+  return fetchSite === undefined || fetchSite === 'same-origin';
+}
+
 const forwardedRequestHeaderNames: Readonly<Record<string, true>> = {
   accept: true,
   'content-length': true,
@@ -88,7 +116,8 @@ const forwardedRequestHeaderNames: Readonly<Record<string, true>> = {
 
 export function rewriteAdminProxyRequest(
   proxyRequest: Pick<ClientRequest, 'setHeader' | 'removeHeader'>,
-  request: Pick<IncomingMessage, 'headers'>
+  request: Pick<IncomingMessage, 'headers'>,
+  serverCredential: string | null
 ): void {
   for (const headerName of Object.keys(request.headers)) {
     if (!forwardedRequestHeaderNames[headerName]) {
@@ -97,12 +126,48 @@ export function rewriteAdminProxyRequest(
   }
 
   proxyRequest.removeHeader('authorization');
-  proxyRequest.removeHeader(adminCredentialHeaderName);
 
-  const credential = request.headers[adminCredentialHeaderName];
-  if (typeof credential === 'string' && credential.length > 0) {
+  if (!isAdminUiRequest(request.headers)) {
+    return;
+  }
+
+  const browserAuthorization = request.headers.authorization;
+  const browserToken = browserAuthorization?.startsWith('Bearer ')
+    ? browserAuthorization.slice('Bearer '.length).trim()
+    : '';
+  const credential = browserToken.length > 0 ? browserToken : serverCredential;
+  if (credential !== null) {
     proxyRequest.setHeader('authorization', `Bearer ${credential}`);
   }
+}
+
+type AdminSessionResponse = {
+  statusCode: number;
+  setHeader(name: string, value: string): unknown;
+  end(body?: string): unknown;
+};
+
+export function handleAdminSessionRequest(
+  request: Pick<IncomingMessage, 'method' | 'url'>,
+  response: AdminSessionResponse,
+  serverCredentialAvailable: boolean
+): boolean {
+  if (request.url !== adminSessionPath) {
+    return false;
+  }
+
+  response.setHeader('cache-control', 'no-store');
+  if (request.method !== 'GET') {
+    response.statusCode = 405;
+    response.setHeader('allow', 'GET');
+    response.end();
+    return true;
+  }
+
+  response.statusCode = 200;
+  response.setHeader('content-type', 'application/json');
+  response.end(JSON.stringify({ serverCredential: serverCredentialAvailable }));
+  return true;
 }
 
 export function rewriteAdminProxyResponse(response: Pick<IncomingMessage, 'headers'>): void {

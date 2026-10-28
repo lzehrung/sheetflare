@@ -49,7 +49,7 @@ $env:SHEETFLARE_API_BASE_URL = "http://127.0.0.1:8787"
 npm run dev:admin
 ```
 
-Paste a scoped admin API key for routine work. Use the bootstrap token only as break-glass. The UI holds the credential in memory for the current session only; refreshing or restarting requires you to paste it again.
+Set `SHEETFLARE_ADMIN_CREDENTIAL` to a scoped admin API key before `npm run dev:admin` and the UI loads without a prompt; the local server attaches the key upstream and the browser never receives it. Without that variable, paste a scoped key; the UI keeps it in memory for the current session only. Use the bootstrap token only as break-glass. Credential precedence, request protections, and password-manager guidance are in [deploy.md](./deploy.md#admin-credential).
 
 Manual fallback:
 

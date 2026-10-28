@@ -11,7 +11,7 @@ The design keeps the current boundary intact:
 - the browser talks only to the loopback Vite server;
 - Vite routes only to configured upstreams;
 - the browser selects an instance ID, never an arbitrary URL;
-- credentials stay in memory and belong to one instance;
+- each credential belongs to one instance: server credentials stay in the Vite process, and browser-entered credentials stay in memory;
 - the UI verifies the remote identity before sending a credential;
 - the active instance remains visible during every operation.
 

@@ -181,7 +181,7 @@ npm run doctor
 npm run smoke
 ```
 
-3. Launch the local admin UI, open `http://127.0.0.1:4173`, paste the scoped admin key, and confirm projects load:
+3. Launch the local admin UI in the same shell, open `http://127.0.0.1:4173`, and confirm projects load without pasting a credential:
 
 ```powershell
 npm run dev:admin
@@ -214,7 +214,7 @@ npm run ops:cache:health
 2. `apiUrl` in repo-root `.sheetflare.setup.local.json`
 3. `http://127.0.0.1:8787`
 
-Remote targets must use HTTPS because the proxy translates the browser's private credential header into bearer authorization. HTTP is accepted only for loopback Worker development. The browser and Vite proxy are same-origin, so normal admin use needs no Worker CORS configuration.
+Remote targets must use HTTPS because the proxy forwards the admin credential as bearer authorization. HTTP is accepted only for loopback Worker development. The browser and Vite proxy are same-origin, so normal admin use needs no Worker CORS configuration.
 
 Explicit local Worker override:
 
@@ -230,7 +230,26 @@ $env:SHEETFLARE_API_BASE_URL = "https://your-staging-worker.example.workers.dev"
 npm run dev:admin
 ```
 
-Never pass `--host 0.0.0.0`, use a LAN hostname, or expose port `4173` through a public tunnel. Paste a scoped admin key for routine work. The credential exists in browser memory for the current session only and is never written to storage, setup state, or the URL.
+Never pass `--host 0.0.0.0`, use a LAN hostname, or expose port `4173` through a public tunnel.
+
+### Admin Credential
+
+The UI uses the first available credential source:
+
+1. A credential entered in the UI for the current session. It stays in browser memory only and overrides the server credential until **Clear**.
+2. `SHEETFLARE_ADMIN_CREDENTIAL` (or legacy `SHEETFLARE_ADMIN_BEARER`) in the environment that starts `npm run dev:admin`. The Vite server reads it once at startup and attaches it upstream; the browser never receives it.
+3. Neither: the UI asks for a credential.
+
+```powershell
+$env:SHEETFLARE_ADMIN_CREDENTIAL = "sfk_admin-key.secret"
+npm run dev:admin
+```
+
+Use a scoped admin API key for routine work; use the bootstrap token only as break-glass. The startup log states whether a server-side credential is in use, never its value. Restart the server after changing the variable.
+
+The proxy attaches a credential only to requests that carry the admin UI's `x-sheetflare-admin-request` marker and come from `http://127.0.0.1:4173`. Requests from other browser origins, including other localhost ports, reach the Worker unauthenticated. Local processes that can reach port `4173` act with the server credential, the same trust boundary as the environment variable itself.
+
+Sheetflare never writes credentials to browser storage, setup state, or the URL. The credential field supports password managers. Any local process can bind `127.0.0.1:4173` while Sheetflare is stopped, so fill a saved credential only on a page you opened after starting `npm run dev:admin` yourself.
 
 ## Legacy Configuration And State
 
