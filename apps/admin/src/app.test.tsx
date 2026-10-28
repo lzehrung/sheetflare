@@ -1722,4 +1722,50 @@ describe('App', () => {
     await screen.findByText(/The configured admin credential was rejected\./);
     expect(screen.getByText('Rejected')).toBeTruthy();
   });
+
+  it('loads with the local server credential and lets a session credential override it', async () => {
+    const projectRequestCredentials: Array<string | null> = [];
+
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const headers = new Headers(init?.headers);
+
+      if (url === '/__sheetflare/admin-session') {
+        return createJsonResponse({ serverCredential: true });
+      }
+
+      if (url === '/v1/admin/projects' && method === 'GET') {
+        expect(headers.get('x-sheetflare-admin-request')).toBe('1');
+        projectRequestCredentials.push(headers.get('authorization'));
+        return createJsonResponse({ data: [] });
+      }
+
+      if (url === '/v1/admin/keys') {
+        return createJsonResponse({ data: [] });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    }));
+
+    render(<App />);
+
+    await screen.findByText('Configured');
+    expect(screen.getByText(/Using SHEETFLARE_ADMIN_CREDENTIAL from the local admin server/)).toBeTruthy();
+    expect(projectRequestCredentials).toEqual([null]);
+    expect(screen.getByRole('button', { name: 'Clear' }).hasAttribute('disabled')).toBe(true);
+
+    fireEvent.change(screen.getByPlaceholderText('sfk_... or bootstrap token'), {
+      target: { value: 'sfk_override.secret' }
+    });
+    fireEvent.click(screen.getByText('Save and load'));
+
+    await screen.findByText('Using the credential entered for this session.');
+    await waitFor(() => expect(projectRequestCredentials).toEqual([null, 'Bearer sfk_override.secret']));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+
+    await screen.findByText(/Using SHEETFLARE_ADMIN_CREDENTIAL from the local admin server/);
+    await waitFor(() => expect(projectRequestCredentials).toEqual([null, 'Bearer sfk_override.secret', null]));
+  });
 });

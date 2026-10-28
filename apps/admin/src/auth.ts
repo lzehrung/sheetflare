@@ -1,5 +1,10 @@
 export const adminCredentialStorageKey = 'sheetflare.adminCredential';
-export const adminCredentialHeaderName = 'x-sheetflare-admin-credential';
+export const adminRequestHeaderName = 'x-sheetflare-admin-request';
+export const adminSessionPath = '/__sheetflare/admin-session';
+
+export type AdminAccess =
+  | { source: 'local-server' }
+  | { source: 'browser'; credential: string };
 
 export function normalizeAdminCredential(input: string): string | null {
   const trimmed = input.trim();
@@ -15,12 +20,13 @@ export function normalizeAdminCredential(input: string): string | null {
   return trimmed;
 }
 
-export function buildAdminHeaders(credential: string | null): HeadersInit | undefined {
-  if (!credential) {
-    return undefined;
+export function buildAdminHeaders(access: AdminAccess): Record<string, string> {
+  if (access.source === 'local-server') {
+    return { [adminRequestHeaderName]: '1' };
   }
 
   return {
-    [adminCredentialHeaderName]: credential
+    [adminRequestHeaderName]: '1',
+    authorization: `Bearer ${access.credential}`
   };
 }

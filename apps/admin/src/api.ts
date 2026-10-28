@@ -15,7 +15,7 @@ import type {
   RefreshTableCacheResult,
   ReindexTableResult
 } from '@sheetflare/contracts';
-import { buildAdminHeaders } from './auth';
+import { adminSessionPath, buildAdminHeaders, type AdminAccess } from './auth';
 
 type ApiErrorResponse = {
   error?: {
@@ -74,12 +74,12 @@ function formatRequestError(response: Response, parsed: ApiErrorResponse | unkno
 }
 
 async function requestAdminJson<T>(
-  credential: string,
+  access: AdminAccess,
   path: string,
   init?: RequestInit
 ): Promise<T> {
   const headers = {
-    ...buildAdminHeaders(credential),
+    ...buildAdminHeaders(access),
     ...(init?.body !== undefined ? { 'content-type': 'application/json' } : {})
   };
   const response = await fetch(path, {
@@ -112,27 +112,52 @@ async function requestAdminJson<T>(
   return parsed as T;
 }
 
-export function listProjects(credential: string) {
-  return requestAdminJson<AdminListProjectsResult>(credential, '/v1/admin/projects');
+export type AdminSession = {
+  serverCredential: boolean;
+};
+
+export async function getAdminSession(): Promise<AdminSession> {
+  const response = await fetch(adminSessionPath, {
+    headers: { accept: 'application/json' }
+  });
+  if (!response.ok) {
+    throw new Error(`Local admin session lookup failed: ${response.status}`);
+  }
+
+  const parsed = parseJsonResponse(await response.text());
+  if (
+    !parsed
+    || typeof parsed !== 'object'
+    || !('serverCredential' in parsed)
+    || typeof parsed.serverCredential !== 'boolean'
+  ) {
+    throw new Error('Local admin session lookup returned an invalid response.');
+  }
+
+  return { serverCredential: parsed.serverCredential };
 }
 
-export function getProject(credential: string, projectSlug: string) {
+export function listProjects(access: AdminAccess) {
+  return requestAdminJson<AdminListProjectsResult>(access, '/v1/admin/projects');
+}
+
+export function getProject(access: AdminAccess, projectSlug: string) {
   return requestAdminJson<AdminGetProjectResult>(
-    credential,
+    access,
     `/v1/admin/projects?project=${encodeURIComponent(projectSlug)}`
   );
 }
 
-export function createProject(credential: string, input: CreateProjectInput) {
-  return requestAdminJson<AdminGetProjectResult>(credential, '/v1/admin/projects', {
+export function createProject(access: AdminAccess, input: CreateProjectInput) {
+  return requestAdminJson<AdminGetProjectResult>(access, '/v1/admin/projects', {
     method: 'POST',
     body: JSON.stringify(input)
   });
 }
 
-export function deleteProject(credential: string, projectSlug: string) {
+export function deleteProject(access: AdminAccess, projectSlug: string) {
   return requestAdminJson<DeleteProjectResult>(
-    credential,
+    access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}`,
     {
       method: 'DELETE'
@@ -140,36 +165,36 @@ export function deleteProject(credential: string, projectSlug: string) {
   );
 }
 
-export function listSpreadsheetTabs(credential: string, projectSlug: string) {
+export function listSpreadsheetTabs(access: AdminAccess, projectSlug: string) {
   return requestAdminJson<AdminListSpreadsheetTabsResult>(
-    credential,
+    access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/spreadsheet/tabs`
   );
 }
 
-export function listSpreadsheetWatches(credential: string) {
+export function listSpreadsheetWatches(access: AdminAccess) {
   return requestAdminJson<AdminListSpreadsheetWatchesResult>(
-    credential,
+    access,
     '/v1/admin/system/google/drive/watches'
   );
 }
 
 export function inspectSpreadsheetTab(
-  credential: string,
+  access: AdminAccess,
   projectSlug: string,
   tabName: string,
   headerRow?: number
 ) {
   const query = headerRow !== undefined ? `?headerRow=${encodeURIComponent(String(headerRow))}` : '';
   return requestAdminJson<AdminInspectSpreadsheetTabResult>(
-    credential,
+    access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/spreadsheet/tabs/${encodeURIComponent(tabName)}${query}`
   );
 }
 
-export function createTable(credential: string, projectSlug: string, input: CreateTableInput) {
+export function createTable(access: AdminAccess, projectSlug: string, input: CreateTableInput) {
   return requestAdminJson<{ data: CreateTableInput & { projectSlug: string } }>(
-    credential,
+    access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables`,
     {
       method: 'POST',
@@ -178,9 +203,9 @@ export function createTable(credential: string, projectSlug: string, input: Crea
   );
 }
 
-export function deleteTable(credential: string, projectSlug: string, tableSlug: string) {
+export function deleteTable(access: AdminAccess, projectSlug: string, tableSlug: string) {
   return requestAdminJson<DeleteTableResult>(
-    credential,
+    access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}`,
     {
       method: 'DELETE'
@@ -189,30 +214,30 @@ export function deleteTable(credential: string, projectSlug: string, tableSlug: 
 }
 
 export function createApiKey(
-  credential: string,
+  access: AdminAccess,
   input: {
     name: string;
     projectSlug?: string | null;
     scopes: string[];
   }
 ) {
-  return requestAdminJson<AdminCreateApiKeyResult>(credential, '/v1/admin/keys', {
+  return requestAdminJson<AdminCreateApiKeyResult>(access, '/v1/admin/keys', {
     method: 'POST',
     body: JSON.stringify(input)
   });
 }
 
-export function listApiKeys(credential: string, projectSlug?: string | null) {
+export function listApiKeys(access: AdminAccess, projectSlug?: string | null) {
   const query = projectSlug ? `?project=${encodeURIComponent(projectSlug)}` : '';
   return requestAdminJson<AdminListApiKeysResult>(
-    credential,
+    access,
     `/v1/admin/keys${query}`
   );
 }
 
-export function revokeApiKey(credential: string, apiKeyId: ApiKeyPrincipal['id']) {
+export function revokeApiKey(access: AdminAccess, apiKeyId: ApiKeyPrincipal['id']) {
   return requestAdminJson<{ ok: true }>(
-    credential,
+    access,
     `/v1/admin/keys/${encodeURIComponent(apiKeyId)}`,
     {
       method: 'DELETE'
@@ -220,16 +245,16 @@ export function revokeApiKey(credential: string, apiKeyId: ApiKeyPrincipal['id']
   );
 }
 
-export function getCacheStatus(credential: string, projectSlug: string, tableSlug: string) {
+export function getCacheStatus(access: AdminAccess, projectSlug: string, tableSlug: string) {
   return requestAdminJson<GetTableCacheStatusResult>(
-    credential,
+    access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}/cache`
   );
 }
 
-export function refreshTableCache(credential: string, projectSlug: string, tableSlug: string) {
+export function refreshTableCache(access: AdminAccess, projectSlug: string, tableSlug: string) {
   return requestAdminJson<RefreshTableCacheResult>(
-    credential,
+    access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}/refresh`,
     {
       method: 'POST'
@@ -237,9 +262,9 @@ export function refreshTableCache(credential: string, projectSlug: string, table
   );
 }
 
-export function reindexTable(credential: string, projectSlug: string, tableSlug: string) {
+export function reindexTable(access: AdminAccess, projectSlug: string, tableSlug: string) {
   return requestAdminJson<ReindexTableResult>(
-    credential,
+    access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}/reindex`,
     {
       method: 'POST'

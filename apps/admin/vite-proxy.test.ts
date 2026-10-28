@@ -4,10 +4,12 @@ import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from 'node:h
 import type { ConfigEnv, UserConfig, UserConfigExport } from 'vite';
 import { describe, expect, it } from 'vitest';
 import viteConfig from './vite.config';
-import { adminCredentialHeaderName } from './src/auth';
+import { adminRequestHeaderName, adminSessionPath } from './src/auth';
 import {
   adminResponseHeaders,
+  handleAdminSessionRequest,
   resolveAdminApiTarget,
+  resolveServerAdminCredential,
   rewriteAdminProxyRequest,
   rewriteAdminProxyResponse
 } from './vite-proxy';
@@ -167,9 +169,26 @@ describe('resolveAdminApiTarget', () => {
 });
 
 describe('rewriteAdminProxyRequest', () => {
+  const adminUiHeaders = {
+    host: '127.0.0.1:4173',
+    [adminRequestHeaderName]: '1'
+  } satisfies IncomingHttpHeaders;
+
+  function rewrite(requestHeaders: IncomingHttpHeaders, serverCredential: string | null) {
+    const definedHeaders = Object.entries(requestHeaders).flatMap(([name, value]) =>
+      value === undefined ? [] : [[name, value] as const]
+    );
+    const { headers, proxyRequest } = createProxyRequest({
+      ...Object.fromEntries(definedHeaders),
+      host: 'api.example.test'
+    });
+    rewriteAdminProxyRequest(proxyRequest, createIncomingRequest(requestHeaders), serverCredential);
+    return Object.fromEntries(headers);
+  }
+
   it('forwards only required request headers and synthesized bearer authorization', () => {
     const browserHeaders = {
-      host: '127.0.0.1:4173',
+      ...adminUiHeaders,
       accept: 'application/json',
       'content-type': 'application/json',
       'content-length': '17',
@@ -183,18 +202,12 @@ describe('rewriteAdminProxyRequest', () => {
       cookie: 'session=browser-secret',
       origin: 'http://127.0.0.1:4173',
       referer: 'http://127.0.0.1:4173/admin',
+      'sec-fetch-site': 'same-origin',
       'x-arbitrary-client-header': 'untrusted',
-      authorization: 'Basic caller-controlled',
-      [adminCredentialHeaderName]: 'admin-secret'
+      authorization: 'Bearer admin-secret'
     } satisfies IncomingHttpHeaders;
-    const { headers, proxyRequest } = createProxyRequest({
-      ...browserHeaders,
-      host: 'api.example.test'
-    });
 
-    rewriteAdminProxyRequest(proxyRequest, createIncomingRequest(browserHeaders));
-
-    expect(Object.fromEntries(headers)).toEqual({
+    expect(rewrite(browserHeaders, null)).toEqual({
       host: 'api.example.test',
       accept: 'application/json',
       'content-type': 'application/json',
@@ -203,23 +216,133 @@ describe('rewriteAdminProxyRequest', () => {
     });
   });
 
+  it('uses the server credential when the admin UI sends no browser credential', () => {
+    expect(rewrite(adminUiHeaders, 'server-secret')).toEqual({
+      host: 'api.example.test',
+      authorization: 'Bearer server-secret'
+    });
+  });
+
+  it('lets a browser credential override the server credential', () => {
+    expect(rewrite({ ...adminUiHeaders, authorization: 'Bearer browser-secret' }, 'server-secret')).toEqual({
+      host: 'api.example.test',
+      authorization: 'Bearer browser-secret'
+    });
+  });
+
+  it.each([
+    { name: 'the admin request marker is missing', requestHeaders: { host: '127.0.0.1:4173' } },
+    { name: 'the admin request marker is wrong', requestHeaders: { ...adminUiHeaders, [adminRequestHeaderName]: 'true' } },
+    { name: 'another localhost origin sends it', requestHeaders: { ...adminUiHeaders, origin: 'http://localhost:3000' } },
+    { name: 'a remote origin sends it', requestHeaders: { ...adminUiHeaders, origin: 'https://attacker.example' } },
+    { name: 'the browser marks it cross-site', requestHeaders: { ...adminUiHeaders, 'sec-fetch-site': 'cross-site' } },
+    { name: 'the browser marks it same-site', requestHeaders: { ...adminUiHeaders, 'sec-fetch-site': 'same-site' } }
+  ] satisfies ReadonlyArray<{ name: string; requestHeaders: IncomingHttpHeaders }>)(
+    'never attaches either credential when $name',
+    ({ requestHeaders }) => {
+      expect(rewrite({ ...requestHeaders, authorization: 'Bearer browser-secret' }, 'server-secret')).toEqual({
+        host: 'api.example.test'
+      });
+      expect(rewrite(requestHeaders, 'server-secret')).toEqual({
+        host: 'api.example.test'
+      });
+    }
+  );
+
   it.each([
     { name: 'missing', requestHeaders: {} },
-    { name: 'empty', requestHeaders: { [adminCredentialHeaderName]: '' } },
-    { name: 'an array', requestHeaders: { [adminCredentialHeaderName]: ['first', 'second'] } }
-  ] satisfies ReadonlyArray<{ name: string; requestHeaders: IncomingHttpHeaders }>) (
-    'removes both sensitive headers when the private credential is $name',
+    { name: 'a non-bearer scheme', requestHeaders: { authorization: 'Basic caller-controlled' } },
+    { name: 'an empty bearer token', requestHeaders: { authorization: 'Bearer ' } }
+  ] satisfies ReadonlyArray<{ name: string; requestHeaders: IncomingHttpHeaders }>)(
+    'sends no authorization when the browser authorization is $name and no server credential exists',
     ({ requestHeaders }) => {
       const { headers, proxyRequest } = createProxyRequest({
-        authorization: 'Basic attacker-controlled',
-        [adminCredentialHeaderName]: 'attacker-controlled'
+        authorization: 'Basic attacker-controlled'
       });
 
-      rewriteAdminProxyRequest(proxyRequest, createIncomingRequest(requestHeaders));
+      rewriteAdminProxyRequest(
+        proxyRequest,
+        createIncomingRequest({ [adminRequestHeaderName]: '1', ...requestHeaders }),
+        null
+      );
 
       expect(Object.fromEntries(headers)).toEqual({});
     }
   );
+});
+
+describe('resolveServerAdminCredential', () => {
+  it('prefers SHEETFLARE_ADMIN_CREDENTIAL over the legacy bearer variable', () => {
+    expect(resolveServerAdminCredential({
+      SHEETFLARE_ADMIN_CREDENTIAL: ' sfk_admin.secret ',
+      SHEETFLARE_ADMIN_BEARER: 'legacy-token'
+    })).toBe('sfk_admin.secret');
+  });
+
+  it('falls back to SHEETFLARE_ADMIN_BEARER and strips a bearer prefix', () => {
+    expect(resolveServerAdminCredential({
+      SHEETFLARE_ADMIN_CREDENTIAL: '   ',
+      SHEETFLARE_ADMIN_BEARER: 'Bearer legacy-token'
+    })).toBe('legacy-token');
+  });
+
+  it('returns null when no credential is configured', () => {
+    expect(resolveServerAdminCredential({})).toBeNull();
+  });
+
+  it('rejects credentials that cannot be sent as one header token', () => {
+    expect(() => resolveServerAdminCredential({ SHEETFLARE_ADMIN_CREDENTIAL: 'sfk_admin secret' })).toThrow(
+      'Invalid SHEETFLARE_ADMIN_CREDENTIAL: admin credentials must contain only visible ASCII characters.'
+    );
+  });
+});
+
+describe('handleAdminSessionRequest', () => {
+  function createResponse() {
+    const headers = new Map<string, string>();
+    const result = { statusCode: 0, body: '' };
+    const response = {
+      get statusCode() {
+        return result.statusCode;
+      },
+      set statusCode(value: number) {
+        result.statusCode = value;
+      },
+      setHeader(name: string, value: string) {
+        headers.set(name, value);
+        return this;
+      },
+      end(body?: string) {
+        result.body = body ?? '';
+        return this;
+      }
+    };
+    return { headers, response, result };
+  }
+
+  it.each([true, false])('reports server credential availability %s without exposing the value', (available) => {
+    const { headers, response, result } = createResponse();
+
+    expect(handleAdminSessionRequest({ method: 'GET', url: adminSessionPath }, response, available)).toBe(true);
+
+    expect(result).toEqual({ statusCode: 200, body: JSON.stringify({ serverCredential: available }) });
+    expect(headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('rejects non-GET methods', () => {
+    const { response, result } = createResponse();
+
+    expect(handleAdminSessionRequest({ method: 'POST', url: adminSessionPath }, response, true)).toBe(true);
+
+    expect(result.statusCode).toBe(405);
+  });
+
+  it('passes other paths to the next middleware', () => {
+    const { response, result } = createResponse();
+
+    expect(handleAdminSessionRequest({ method: 'GET', url: '/v1/admin/projects' }, response, true)).toBe(false);
+    expect(result.statusCode).toBe(0);
+  });
 });
 
 describe('rewriteAdminProxyResponse', () => {
