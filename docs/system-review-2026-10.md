@@ -93,7 +93,7 @@ Severity: **P1** likely wrong behavior or significant risk; **P2** real but boun
 - [x] **P2 · logic** `--apply-secrets` kept using the superseded bootstrap token from `SHEETFLARE_ADMIN_CREDENTIAL` for watch registration, smoke, and verify. *(Copilot review)*
 - [x] **P3 · docs** The local admin server credential is delegated to every local process that can reach `127.0.0.1:4173`; Fetch Metadata only blocks cross-origin pages. Documented as the trust boundary. *(Copilot review)*
 - [x] **P2 · tests** `apps/api/tsconfig.json` type-checks only `src`, so test files are never type-checked (`test/support/harness.ts` already carries a hidden type error). *(fixed: `tsconfig.test.json`; 23 errors fixed; gate proven)*
-- [x] **P2 · logic** A sync in flight while a write commits can promote the older snapshot, briefly serving pre-write data. *(fixed: content revision check marks the cache stale; late reads cannot join an older sync)*
+- [x] **P2 · logic** A sync in flight while a write commits can promote the older snapshot, briefly serving pre-write data. *(fixed: a sync whose snapshot a write overlapped keeps the live rows and stays stale, so in-flight unique checks keep earlier writes; late reads cannot join an older sync)*
 - [x] **P2 · logic** `id` filters have the same numeric-operand mismatch between indexed and scan paths that `rowNumber` had. *(fixed: operands canonicalized to ID strings)*
 - [x] **P2 · security** Rate-limit principals use the full IPv6 address; bucket by /64.
 - [x] **P3 · logic** A missing default Google credential returns 400 instead of a 5xx configuration error.
@@ -102,6 +102,9 @@ Severity: **P1** likely wrong behavior or significant risk; **P2** real but boun
 - [x] **P3 · logic** Point writes against a fresh cache no longer detect an ID duplicated upstream within the TTL; the next sync rejects it. *(fixed for adjacent duplicates; accepted trade-off: duplicates farther than one row are caught by the next sync, documented in README)*
 - [x] **P3 · usability** A valid key scoped to another project gets 403 on a public-read project that anonymous callers can read. *(fixed: reads allowed; writes and private projects keep 403)*
 - [x] **P3 · security** No warning for bootstrap or webhook secrets shorter than 32 characters. *(fixed: admin-only `/ready` note)*
+- [x] **P2 · security** A key scoped to another project could tell existing private tables (403) from missing ones (404) after public-read reads were allowed; cross-project not-found now returns the same 403. *(Copilot review on #20)*
+- [x] **P3 · logic** Credential-conflict placeholder rows were treated as active Drive watches by retry advice, notifications, and cleanup. *(Copilot review on #20)*
+- [x] **P3 · logic** Duplicate configured bootstrap key names could revoke the authenticating key twice during rotation; names are now unique and revocations deduplicated. *(Copilot review on #19)*
 - [x] **P3 · security** Add Dependabot or Renovate to keep SHA-pinned GitHub Actions current. *(fixed: `.github/dependabot.yml`)*
 - [ ] **Validation** Verify generation-keyed caching, `cf.cacheKey` format, and purge behavior against real Workers Cache in staging (blocked: GitHub staging secrets unset, Wrangler login expired).
 
