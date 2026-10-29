@@ -47,18 +47,31 @@ describe('buildFilterSql', () => {
     ).toThrow(BadRequestError);
   });
 
-  it('escapes literal wildcard characters in string filters', () => {
+  it('escapes literal wildcard characters in contains filters', () => {
     const result = buildFilterSql(
       {
-        name: { startsWith: 'a_%\\' }
+        name: { contains: 'a_%\\' }
       },
       ['name']
     );
 
     expect(result.conditions).toContain("cf0.value_kind = 'string' AND cf0.value_text LIKE ? ESCAPE '\\'");
     expect(result.joinParameters).toEqual(['name']);
-    expect(result.conditionParameters).toEqual(['a\\_\\%\\\\%']);
-    expect(result.parameters).toEqual(['name', 'a\\_\\%\\\\%']);
+    expect(result.conditionParameters).toEqual(['%a\\_\\%\\\\%']);
+    expect(result.parameters).toEqual(['name', '%a\\_\\%\\\\%']);
+  });
+
+  it('matches startsWith prefixes literally and case-sensitively, and marks them scan-heavy', () => {
+    const result = buildFilterSql(
+      {
+        name: { startsWith: 'A_%\\' }
+      },
+      ['name']
+    );
+
+    expect(result.conditions).toEqual(["cf0.value_kind = 'string' AND instr(cf0.value_text, ?) = 1"]);
+    expect(result.conditionParameters).toEqual(['A_%\\']);
+    expect(result.requiresFullScan).toBe(true);
   });
 
   it('treats neq as not-equal across kinds instead of same-kind only', () => {
@@ -102,6 +115,17 @@ describe('validateFilterCapabilities', () => {
       validateFilterCapabilities(
         {
           name: { contains: 'ada' }
+        },
+        ['name']
+      )
+    ).toEqual({ requiresFullScan: true });
+  });
+
+  it('flags startsWith as scan-heavy', () => {
+    expect(
+      validateFilterCapabilities(
+        {
+          name: { startsWith: 'a' }
         },
         ['name']
       )

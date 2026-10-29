@@ -5204,4 +5204,29 @@ describe('TableDO', () => {
     });
     expect(JSON.stringify(await getUsersCacheStatus(env))).not.toContain('SENSITIVE_UPSTREAM_TEXT');
   });
+
+  it('treats startsWith as a case-sensitive, scan-heavy operator on indexed fields', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Apple'],
+        ['row-2', 'apricot'],
+        ['row-3', 'banana']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+
+    const result = await listUsers(env, { filter: { name: { startsWith: 'a' } } });
+    expect(result.data.map((row) => row.id)).toEqual(['row-2']);
+
+    const limitedEnv = createTestEnv({ TABLE_MAX_FULL_SCAN_ROWS: '2' });
+    await createUsersTable(limitedEnv, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+    await expect(listUsers(limitedEnv, { filter: { name: { startsWith: 'A' } } })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'This query requires a full scan and exceeds the configured scan threshold of 2 cached rows.'
+    });
+  });
 });
