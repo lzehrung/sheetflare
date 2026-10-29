@@ -60,7 +60,7 @@ const createTableRpcInputSchema = z.object({
   createEnabled: z.boolean().optional(),
   updateEnabled: z.boolean().optional(),
   deleteEnabled: z.boolean().optional(),
-  cacheTtlSeconds: z.number().int().nonnegative().optional()
+  cacheTtlSeconds: tableConfigSchema.shape.cacheTtlSeconds.optional()
 });
 
 export const controlPlaneDoRequestSchema = z.discriminatedUnion('type', [

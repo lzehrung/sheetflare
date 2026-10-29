@@ -145,6 +145,16 @@ class LocalDurableObjectNamespace<TEnv> {
   getStoredTableNames(name: string) {
     return this.instances.get(name)?.__state.getTableNames() ?? [];
   }
+
+  /** Runs SQL against the named instance's storage, e.g. to seed rows written by an earlier release. */
+  runSql(name: string, query: string, ...parameters: Array<string | number | boolean | null>) {
+    const entry = this.instances.get(name);
+    if (!entry) {
+      throw new Error(`Durable object ${name} has not been created.`);
+    }
+
+    return entry.__state.storage.sql.exec(query, ...parameters).toArray();
+  }
 }
 
 export function createDurableObjectNamespace<TEnv>(

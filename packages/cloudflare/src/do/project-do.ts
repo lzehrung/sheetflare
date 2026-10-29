@@ -56,6 +56,10 @@ type TableRow = {
   updated_at: string;
 };
 
+// Upper bound of TableConfig.cacheTtlSeconds. Tables stored before the bound existed are served at the bound so their
+// configuration still satisfies the TableDO RPC schema.
+const maxCacheTtlSeconds = 3600;
+
 function getControlPlaneStub(env: CloudflareEnv) {
   return env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
 }
@@ -622,7 +626,7 @@ export class ProjectDO {
       createEnabled: Boolean(row.create_enabled),
       updateEnabled: Boolean(row.update_enabled),
       deleteEnabled: Boolean(row.delete_enabled),
-      cacheTtlSeconds: row.cache_ttl_seconds,
+      cacheTtlSeconds: Math.min(row.cache_ttl_seconds, maxCacheTtlSeconds),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
