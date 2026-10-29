@@ -719,7 +719,8 @@ export class TableDO {
     assertManagedIdFieldIsNotWritten(normalizedPatch, config.idColumn);
     assertWritableFields(normalizedPatch, config.readOnlyFields);
     // A fresh cache was verified by its last sync, so the cached row-number hint only needs a
-    // single-row ID check; on a miss or a stale cache, findRowById scans the ID column.
+    // bounded check (the row and its two neighbours, which also catches an ID copied beside it); on a
+    // miss or a stale cache, findRowById scans the whole ID column.
     const existingRow = await this.resolveRowById(config, rowId, { layout, verifyUnique: cacheState.staleReason !== 'fresh' });
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
@@ -989,10 +990,11 @@ export class TableDO {
       };
     }
 
+    const contentRevision = this.getCounter(contentRevisionMetaKey);
     const sync: ActiveSync = {
       configSignature,
-      contentRevision: this.getCounter(contentRevisionMetaKey),
-      promise: this.performSync(config, options.requestContext)
+      contentRevision,
+      promise: this.performSync(config, options.requestContext, contentRevision)
     };
     this.activeSync = sync;
 
@@ -1010,11 +1012,15 @@ export class TableDO {
     }
   }
 
-  private async performSync(config: ResolvedTableConfig, requestContext: TableRequestContext | null): Promise<TableCacheStatus> {
+  // observedContentRevision is the content revision when the sync was requested; see ActiveSync.
+  private async performSync(
+    config: ResolvedTableConfig,
+    requestContext: TableRequestContext | null,
+    observedContentRevision: number
+  ): Promise<TableCacheStatus> {
     const startedAt = new Date().toISOString();
     const syncStartedAtMs = Date.now();
     const observedExternalChangeGeneration = this.getCounter(externalChangeGenerationMetaKey);
-    const observedContentRevision = this.getCounter(contentRevisionMetaKey);
     this.setSyncMeta({
       ...this.getSyncMeta(),
       status: 'syncing',
