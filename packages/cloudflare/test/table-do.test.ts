@@ -466,6 +466,72 @@ async function startDeleteRebuildAfterPointReadRepair(options: { denyRebuild?: b
   return { env, deletion, rebuild, retry };
 }
 
+// A list on an expired cache starts a sync and Google answers its snapshot read, then a delete reaches the
+// cache before that sync promotes anything. The delete cannot lower the row numbers of an expired cache in place,
+// so it drops row-1, marks the cache for a rebuild and waits for the list's sync, which a second list has joined.
+// A third list and a point read arrive once the cache is marked, and wait for the same sync. The sync finds the
+// cache changed under it and discards its snapshot. Resolves once the rebuild that replaces it has had its
+// snapshot read answered and held (a 403 once released, with denyRebuild). At that point the cache has dropped
+// row-1 but still has row-2 on row 3 and row-3 on row 4, where the sheet has them on 2 and 3. Starts a fake
+// clock; the caller restores it.
+async function startDeleteSupersedingListSync(options: { denyRebuild?: boolean } = {}) {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-10-29T12:00:00.000Z'));
+  const sheet: SheetState = {
+    rows: [
+      ['_id', 'name'],
+      ['row-1', 'Ada'],
+      ['row-2', 'Bea'],
+      ['row-3', 'Cora']
+    ],
+    requestedRanges: []
+  };
+  const snapshotRange = "'Users'!A1:B";
+  const baseFetch = createSheetsFetch(sheet);
+  let denyNextSnapshot = false;
+  const denyingFetch: FetchHandler = async (input, init) => {
+    if (denyNextSnapshot && decodeRangeFromUrl(String(input)) === snapshotRange) {
+      denyNextSnapshot = false;
+      return Response.json({ error: { code: 403, message: 'denied', status: 'PERMISSION_DENIED' } }, { status: 403 });
+    }
+
+    return baseFetch(input, init);
+  };
+  const listSync = createSnapshotGate(denyingFetch, snapshotRange);
+  const rebuild = createSnapshotGate(listSync.fetch, snapshotRange);
+  vi.stubGlobal('fetch', rebuild.fetch);
+  const env = createTestEnv();
+  await createUsersTable(env, { cacheTtlSeconds: 15 });
+  await listUsers(env);
+  vi.setSystemTime(new Date('2026-10-29T12:01:00.000Z'));
+
+  listSync.arm();
+  const list = listUsers(env, { sort: 'rowNumber:asc' });
+  await listSync.reached;
+  const joinedList = listUsers(env, { filter: { rowNumber: { eq: '3' } } });
+  expect(await answerOrWaiting(joinedList)).toBe('waiting');
+
+  const deletion = deleteUser(env, 'row-1');
+  expect(await answerOrWaiting(deletion)).toBe('waiting');
+  expect(await getUsersCacheStatus(env)).toMatchObject({
+    status: 'syncing',
+    stale: true,
+    staleReason: 'external-change',
+    externalChange: { pending: true, debounceUntil: null }
+  });
+  const lateList = listUsers(env, { sort: 'rowNumber:asc' });
+  expect(await answerOrWaiting(lateList)).toBe('waiting');
+  const latePointRead = callUsersTable(env, { type: 'table.row.get', ...usersTable, rowId: 'row-3' }, 'table.row.get.result');
+  expect(await answerOrWaiting(latePointRead)).toBe('waiting');
+
+  denyNextSnapshot = options.denyRebuild === true;
+  rebuild.arm();
+  listSync.release();
+  await rebuild.reached;
+
+  return { env, sheet, list, joinedList, lateList, latePointRead, deletion, rebuild };
+}
+
 describe('TableDO', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -6787,5 +6853,318 @@ describe('TableDO', () => {
       ['row-5', 5]
     ]);
     expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', rowCount: 4 });
+  });
+
+  it('keeps the requests that waited on a sync a delete superseded waiting for the rebuild, instead of answering from the row numbers the delete did not lower', async () => {
+    try {
+      const { env, sheet, list, joinedList, lateList, latePointRead, deletion, rebuild } = await startDeleteSupersedingListSync();
+
+      // The sync dropped its snapshot and let go of the lists that waited on it, but the cache is still marked for the
+      // rebuild that is reading Google now.
+      expect(await answerOrWaiting(list)).toBe('waiting');
+      expect(await answerOrWaiting(joinedList)).toBe('waiting');
+      expect(await answerOrWaiting(lateList)).toBe('waiting');
+      expect(await answerOrWaiting(latePointRead)).toBe('waiting');
+
+      rebuild.release();
+      await deletion;
+      const rowsOnTheirSheetNumbers = [
+        ['row-2', 2],
+        ['row-3', 3]
+      ];
+      expect((await list).data.map((row) => [row.id, row.rowNumber])).toEqual(rowsOnTheirSheetNumbers);
+      expect((await joinedList).data.map((row) => row.id)).toEqual(['row-3']);
+      expect((await lateList).data.map((row) => [row.id, row.rowNumber])).toEqual(rowsOnTheirSheetNumbers);
+      expect((await latePointRead).data).toMatchObject({ id: 'row-3', rowNumber: 3 });
+      expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', rowCount: 2 });
+      // The setup sync, the lists' sync, and one rebuild: whichever request started the rebuild, the others joined it,
+      // and none of them synced again once it was in.
+      expect(sheet.requestedRanges.filter((range) => range === "'Users'!A1:B")).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails the requests that waited on a sync a delete superseded when the rebuild fails, and does not retry it behind them', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { env, sheet, list, joinedList, lateList, latePointRead, deletion, rebuild } = await startDeleteSupersedingListSync({
+        denyRebuild: true
+      });
+
+      const outcomes = Promise.all([
+        expect(list).rejects.toMatchObject({ name: 'BadGatewayError' }),
+        expect(joinedList).rejects.toMatchObject({ name: 'BadGatewayError' }),
+        expect(lateList).rejects.toMatchObject({ name: 'BadGatewayError' }),
+        expect(latePointRead).rejects.toMatchObject({ name: 'BadGatewayError' }),
+        expect(deletion).rejects.toMatchObject({ name: 'BadGatewayError' })
+      ]);
+      rebuild.release();
+      await outcomes;
+
+      // The failure ends the wait, and nothing read Google again behind it. Google already applied the delete, so the
+      // mark and the error stay for the next request to retry.
+      expect(sheet.requestedRanges.filter((range) => range === "'Users'!A1:B")).toHaveLength(2);
+      expect(await getUsersCacheStatus(env)).toMatchObject({
+        status: 'error',
+        stale: true,
+        staleReason: 'error',
+        externalChange: { pending: true }
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('answers a point read from a verified cache when the sync it waited on was superseded by a write that was already in flight', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea']
+      ],
+      requestedRanges: []
+    };
+    // Holds the update's read-back of the row it wrote, and the snapshot read of the sync the point read starts.
+    const readBack = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A2:B2");
+    const snapshot = createSnapshotGate(readBack.fetch, "'Users'!A1:B");
+    vi.stubGlobal('fetch', snapshot.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // The update passed its cache check while the cache was fresh, and waits on Google for the read-back.
+    readBack.arm();
+    const update = updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+    await readBack.reached;
+
+    // Someone renames row-2 in the sheet and Drive reports it without a debounce window, so a point read resyncs first.
+    sheet.rows[2] = ['row-2', 'Beatrice'];
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: new Date().toISOString(),
+      debounceUntil: null
+    }, 'table.external-change.record.result');
+    snapshot.arm();
+    const read = callUsersTable(env, { type: 'table.row.get', ...usersTable, rowId: 'row-2' }, 'table.row.get.result');
+    await snapshot.reached;
+
+    // The update reaches the cache while that sync holds its snapshot, so the sync drops the snapshot that has the rename.
+    readBack.release();
+    await update;
+    snapshot.release();
+
+    // The point read must not be answered from the cached copy that snapshot would have replaced.
+    await expect(read).resolves.toMatchObject({ data: { id: 'row-2', values: { name: 'Beatrice' } } });
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh' });
+  });
+
+  it('checks a unique field against a verified cache when the sync a create waited on was superseded by a point read repairing the cache', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'email'],
+        ['row-1', 'ada@example.com']
+      ],
+      requestedRanges: []
+    };
+    // Holds the Google answer to a point read of row-3 and the snapshot read of the sync the create starts.
+    const lookup = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A4:B4");
+    const snapshot = createSnapshotGate(lookup.fetch, "'Users'!A1:B");
+    vi.stubGlobal('fetch', snapshot.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      indexedFields: ['email'],
+      cacheTtlSeconds: 3600,
+      fieldRules: { email: { unique: true } }
+    });
+    await listUsers(env);
+
+    // Rows typed in by hand are not cached. The point read of row-3 starts while the cache is fresh and waits on Google.
+    sheet.rows.push(['row-2', 'bea@example.com'], ['row-3', 'cora@example.com']);
+    lookup.arm();
+    const read = callUsersTable(env, { type: 'table.row.get', ...usersTable, rowId: 'row-3' }, 'table.row.get.result');
+    await lookup.reached;
+
+    // Drive reports the edits with a debounce window, so reads may still use the cache but a write resyncs first. The
+    // create's sync reads a sheet where bea@example.com is taken.
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: new Date().toISOString(),
+      debounceUntil: new Date(Date.now() + 60_000).toISOString()
+    }, 'table.external-change.record.result');
+    snapshot.arm();
+    const creation = createUser(env, { email: 'bea@example.com' });
+    const rejection = expect(creation).rejects.toMatchObject({ name: 'ConflictError', message: 'email must be unique.' });
+    await snapshot.reached;
+
+    // The point read caches row-3 while that sync holds its snapshot, so the sync drops the snapshot that has row-2.
+    lookup.release();
+    await read;
+    snapshot.release();
+
+    await rejection;
+    expect(sheet.rows.filter((row) => row[1] === 'bea@example.com')).toHaveLength(1);
+  });
+
+  it('does not let a lookup that read the sheet before a delete move a row back to its old number after the delete has rebuilt the cache', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-10-29T12:00:00.000Z'));
+      const sheet: SheetState = {
+        rows: [
+          ['_id', 'name'],
+          ['row-1', 'Ada'],
+          ['row-2', 'Bea'],
+          ['row-3', 'Cora']
+        ],
+        requestedRanges: []
+      };
+      // Holds Google's answer to the lookup's read of row 5, where row-4 sits until the delete moves it up.
+      const lookup = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A5:B5");
+      vi.stubGlobal('fetch', lookup.fetch);
+      const env = createTestEnv();
+      await createUsersTable(env, { cacheTtlSeconds: 15 });
+      await listUsers(env);
+
+      // A row typed in by hand is not cached yet, so a point read has to ask Google for it.
+      sheet.rows.push(['row-4', 'Dee']);
+      lookup.arm();
+      const read = callUsersTable(env, { type: 'table.row.get', ...usersTable, rowId: 'row-4' }, 'table.row.get.result');
+      await lookup.reached;
+
+      // The cache has expired when the delete runs, so the delete cannot lower its row numbers in place and rebuilds it.
+      // The rebuild reads the sheet without row-1 and with row-4 on row 4, and clears the mark.
+      vi.setSystemTime(new Date('2026-10-29T12:01:00.000Z'));
+      await deleteUser(env, 'row-1');
+      expect(await getUsersCacheStatus(env)).toMatchObject({
+        stale: false,
+        staleReason: 'fresh',
+        externalChange: { pending: false },
+        rowCount: 3
+      });
+
+      // The lookup's answer predates the delete, so it still says row 5. The caller gets that answer, but the cache has
+      // moved on and the lookup must not move row-4 back there while the cache reports fresh.
+      lookup.release();
+      await expect(read).resolves.toMatchObject({ data: { id: 'row-4', rowNumber: 5 } });
+      expect((await listUsers(env, { sort: 'rowNumber:asc' })).data.map((row) => [row.id, row.rowNumber])).toEqual([
+        ['row-2', 2],
+        ['row-3', 3],
+        ['row-4', 4]
+      ]);
+      expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', rowCount: 3 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not let a lookup that read the sheet before a delete move a row back to its old number after the delete lowered the row numbers in place', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    // Holds Google's answer to the lookup's read of row 5, where row-4 sits until the delete moves it up.
+    const lookup = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A5:B5");
+    vi.stubGlobal('fetch', lookup.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    sheet.rows.push(['row-4', 'Dee']);
+    lookup.arm();
+    const read = callUsersTable(env, { type: 'table.row.get', ...usersTable, rowId: 'row-4' }, 'table.row.get.result');
+    await lookup.reached;
+
+    // The cache is fresh, so the delete lowers its row numbers in place and starts no rebuild.
+    await deleteUser(env, 'row-1');
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', externalChange: { pending: false } });
+
+    lookup.release();
+    await expect(read).resolves.toMatchObject({ data: { id: 'row-4', rowNumber: 5 } });
+
+    // The lookup's answer predates the delete, so the cache did not take row-4 from it. The next point read asks Google
+    // again, finds row-4 on row 4, and caches it there.
+    expect((await listUsers(env, { sort: 'rowNumber:asc' })).data.map((row) => [row.id, row.rowNumber])).toEqual([
+      ['row-2', 2],
+      ['row-3', 3]
+    ]);
+    await expect(
+      callUsersTable(env, { type: 'table.row.get', ...usersTable, rowId: 'row-4' }, 'table.row.get.result')
+    ).resolves.toMatchObject({ data: { id: 'row-4', rowNumber: 4 } });
+    expect((await listUsers(env, { sort: 'rowNumber:asc' })).data.map((row) => [row.id, row.rowNumber])).toEqual([
+      ['row-2', 2],
+      ['row-3', 3],
+      ['row-4', 4]
+    ]);
+  });
+
+  it('does not let a lookup that began before an unconfirmed write supersede the resync that write requires by repairing a cached row', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let loseResponseFor: string | null = null;
+    const lossyFetch: FetchHandler = async (input, init) => {
+      const response = await baseFetch(input, init);
+      if (loseResponseFor && String(input).includes(loseResponseFor)) {
+        loseResponseFor = null;
+        throw new Error('socket hang up');
+      }
+
+      return response;
+    };
+    // Holds Google's answer to a point read of row-3, then the snapshot read of the resync the write requires.
+    const lookup = createSnapshotGate(lossyFetch, "'Users'!A4:B4");
+    const snapshot = createSnapshotGate(lookup.fetch, "'Users'!A1:B");
+    vi.stubGlobal('fetch', snapshot.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // A row typed in by hand is not cached yet, so a point read has to ask Google for it.
+    sheet.rows.push(['row-3', 'Cora']);
+    lookup.arm();
+    const read = callUsersTable(env, { type: 'table.row.get', ...usersTable, rowId: 'row-3' }, 'table.row.get.result');
+    await lookup.reached;
+
+    // Google applies the update but its answer is lost, so the cache is marked for a resync without moving its content revision.
+    loseResponseFor = '/values:batchUpdate';
+    await expect(updateUser(env, 'row-1', { name: 'Ada Lovelace' })).rejects.toMatchObject({ name: 'ServiceUnavailableError' });
+    expect(await getUsersCacheStatus(env)).toMatchObject({
+      stale: true,
+      staleReason: 'external-change',
+      externalChange: { pending: true, debounceUntil: null }
+    });
+    snapshot.arm();
+    const list = listUsers(env, { sort: 'rowNumber:asc' });
+    await snapshot.reached;
+
+    // Repairing row-3 now would move the content revision under the resync, which would then drop its snapshot. The point
+    // read still returns the row Google gave it.
+    lookup.release();
+    await expect(read).resolves.toMatchObject({ data: { id: 'row-3', rowNumber: 4 } });
+    snapshot.release();
+
+    expect((await list).data.map((row) => [row.id, row.rowNumber, row.values.name])).toEqual([
+      ['row-1', 2, 'Ada Lovelace'],
+      ['row-2', 3, 'Bea'],
+      ['row-3', 4, 'Cora']
+    ]);
+    expect(infoSpy).not.toHaveBeenCalledWith(expect.stringContaining('"event":"table.sync.superseded"'));
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh' });
   });
 });
