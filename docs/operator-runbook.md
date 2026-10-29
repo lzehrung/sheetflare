@@ -159,7 +159,7 @@ npm run ops:bootstrap
 
 For a public anonymous read surface, create a separate project with `defaultAuthMode` set to `"public-read"` rather than widening the private project's auth model.
 
-Projects and tables are upserted, so `npm run ops:bootstrap` is safe to rerun. API keys are not: a key whose `name` already has an active key is skipped (the output lists it under `skippedKeys`), so a rerun never stacks duplicate privileged keys. Give a new key a new name, or rotate as described in [Rotate API keys](#rotate-api-keys).
+Projects and tables are upserted, so `npm run ops:bootstrap` is safe to rerun. API keys are not: a key whose `name` already has an active key is skipped (the output lists it under `skippedKeys`), so a rerun never stacks duplicate privileged keys. Names must be unique within `apiKeys`; bootstrap rejects a repeated name before making any API call, because the name is what identifies a managed key for skip and rotate. Give a new key a new name, or rotate as described in [Rotate API keys](#rotate-api-keys).
 
 `readOnlyFields` is the right tool when:
 
