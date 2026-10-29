@@ -139,3 +139,14 @@ describe('styles.css design tokens', () => {
     expect(contrastRatio(token(tokens, name), panel)).toBeGreaterThanOrEqual(normalTextMinimumContrast);
   });
 });
+
+describe('styles.css badge modifiers', () => {
+  // .badge and its modifiers all have specificity (0,1,0). A modifier declared before .badge loses
+  // its color and background to the base rule, so its tint never renders.
+  it.each(['.badgeDanger', '.badgeMuted', '.healthBadge'])('declares %s after the base .badge rule', (selector) => {
+    const baseRule = stylesheet.indexOf('\n.badge {');
+    const modifierRule = stylesheet.indexOf(`\n${selector} {`);
+    expect(baseRule).toBeGreaterThanOrEqual(0);
+    expect(modifierRule).toBeGreaterThan(baseRule);
+  });
+});
