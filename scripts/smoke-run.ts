@@ -1,5 +1,6 @@
 import { getEnv, assert, assertPresent, logStep, logSuccess, requestJson, ScriptError } from './lib/runtime';
 import { readSmokeConfig } from './lib/smoke-config';
+import { assertUpdatedValuesPersisted } from './lib/smoke-assertions';
 import { summarizeJson, writeReportArtifacts } from './lib/reporting';
 
 type RowEnvelope = {
@@ -461,6 +462,31 @@ async function main() {
     });
 
     await runStep({
+      name: 'Read the updated smoke row back',
+      request: {
+        method: 'GET',
+        path: `/v1/projects/${encodeURIComponent(privateProject)}/tables/${encodeURIComponent(privateTable)}/rows/${encodeURIComponent(smokeId)}`,
+        auth: 'private-read'
+      },
+      summary: () => 'Every configured update value persisted.',
+      run: async () => {
+        const response = await requestJson<GetRowResponse>({
+          baseUrl,
+          path: `/v1/projects/${encodeURIComponent(privateProject)}/tables/${encodeURIComponent(privateTable)}/rows/${encodeURIComponent(smokeId)}`,
+          bearer: privateReadKey,
+          expectedStatus: 200
+        });
+        const body = assertPresent(response.data, 'Get row returned an empty response body.');
+        assertUpdatedValuesPersisted(body.data.values, updateValues, 'after the update');
+        return {
+          responseStatus: response.response.status,
+          responseBody: body,
+          value: body
+        };
+      }
+    });
+
+    await runStep({
       name: 'Force a reindex',
       request: {
         method: 'POST',
@@ -478,6 +504,31 @@ async function main() {
         });
         const body = assertPresent(response.data, 'Reindex returned an empty response body.');
         assert(body.ok === true, 'Reindex did not succeed.');
+        return {
+          responseStatus: response.response.status,
+          responseBody: body,
+          value: body
+        };
+      }
+    });
+
+    await runStep({
+      name: 'Read the smoke row back after reindex',
+      request: {
+        method: 'GET',
+        path: `/v1/projects/${encodeURIComponent(privateProject)}/tables/${encodeURIComponent(privateTable)}/rows/${encodeURIComponent(smokeId)}`,
+        auth: 'private-read'
+      },
+      summary: () => 'Updated values survived the reindex from the sheet.',
+      run: async () => {
+        const response = await requestJson<GetRowResponse>({
+          baseUrl,
+          path: `/v1/projects/${encodeURIComponent(privateProject)}/tables/${encodeURIComponent(privateTable)}/rows/${encodeURIComponent(smokeId)}`,
+          bearer: privateReadKey,
+          expectedStatus: 200
+        });
+        const body = assertPresent(response.data, 'Get row returned an empty response body.');
+        assertUpdatedValuesPersisted(body.data.values, updateValues, 'after the reindex');
         return {
           responseStatus: response.response.status,
           responseBody: body,
