@@ -1,4 +1,5 @@
 import {
+  AppError,
   BadGatewayError,
   BadRequestError,
   NotFoundError,
@@ -80,6 +81,15 @@ function buildGoogleApiErrorDetails(status: number, body: GoogleErrorBody): Goog
     ...(body.reason !== null && googleErrorReasonPattern.test(body.reason) ? { reason: body.reason } : {}),
     ...(body.message?.includes(driveSubscriptionQuotaMessage) ? { driveSubscriptionQuotaExceeded: true } : {})
   };
+}
+
+/**
+ * True when a failed write may still have been applied by Google: transport failures, timeouts,
+ * and 5xx responses surface as ServiceUnavailableError, and an unreadable success response as a
+ * plain Error. Other AppErrors are 4xx rejections that Google did not apply.
+ */
+export function isUnconfirmedWriteFailure(error: unknown) {
+  return !(error instanceof AppError) || error instanceof ServiceUnavailableError;
 }
 
 type FetchLike = typeof fetch;
@@ -566,6 +576,26 @@ export class GoogleSheetsService {
         rowId: getManagedRowId(entry.rowIdValue, config.idColumn, entry.rowNumber),
         rowNumber: entry.rowNumber
       }));
+  }
+
+  /** Managed IDs in an inclusive, bounded row window; blank or invalid ID cells are skipped. */
+  async readRowReferencesInRange(
+    config: GoogleSheetTableConfig,
+    startRowNumber: number,
+    endRowNumber: number,
+    layout?: GoogleSheetHeaderLayout
+  ): Promise<RowReference[]> {
+    const resolvedLayout = layout ?? await this.readHeaderLayout(config);
+    const idColumnLetter = columnNumberToA1(resolvedLayout.idColumnNumber);
+    const idColumnValues = await this.readValues(
+      config.spreadsheetId,
+      `${escapeSheetName(config.sheetTabName)}!${idColumnLetter}${startRowNumber}:${idColumnLetter}${endRowNumber}`
+    );
+
+    return idColumnValues.flatMap((cells, index) => {
+      const parsed = parseManagedRowId(parseSheetCellValue(cells[0]));
+      return parsed.ok ? [{ rowId: parsed.rowId, rowNumber: startRowNumber + index }] : [];
+    });
   }
 
   async readSingleRow(

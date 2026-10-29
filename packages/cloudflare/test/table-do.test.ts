@@ -5628,4 +5628,136 @@ describe('TableDO', () => {
       ['row-1', 'Ada Lovelace']
     ]);
   });
+
+  it('re-resolves the appended row before patching when rows are inserted above it during create', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let insertAfterAppend = true;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await baseFetch(input, init);
+      if (insertAfterAppend && String(input).includes(':append')) {
+        insertAfterAppend = false;
+        sheet.rows.splice(1, 0, ['row-manual', 'Manual']);
+      }
+
+      return response;
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    const created = await createUser(env, { name: 'Grace' });
+
+    expect(created.data).toMatchObject({ rowNumber: 4, values: { name: 'Grace' } });
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-manual', 'Manual'],
+      ['row-1', 'Ada'],
+      [created.data.id, 'Grace']
+    ]);
+    expect((await getUsersCacheStatus(env)).staleReason).toBe('external-change');
+  });
+
+  it('fails closed and marks the cache stale when the written row no longer has the target id', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let insertBeforePatch = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (insertBeforePatch && String(input).includes('/values:batchUpdate')) {
+        insertBeforePatch = false;
+        sheet.rows.splice(1, 0, ['row-manual', 'Manual']);
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    insertBeforePatch = true;
+    await expect(updateUser(env, 'row-1', { name: 'Ada Lovelace' })).rejects.toMatchObject({
+      name: 'ConflictError',
+      details: { rowId: 'row-1', rowNumber: 2 }
+    });
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: true, staleReason: 'external-change' });
+  });
+
+  it('removes an orphaned skeleton and marks the cache stale when an append response is lost', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let loseAppendResponse = true;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await baseFetch(input, init);
+      if (loseAppendResponse && String(input).includes(':append')) {
+        loseAppendResponse = false;
+        throw new Error('socket hang up');
+      }
+
+      return response;
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    await expect(createUser(env, { name: 'Grace' })).rejects.toMatchObject({ name: 'ServiceUnavailableError' });
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-1', 'Ada']
+    ]);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: true, staleReason: 'external-change' });
+  });
+
+  it('does not serve stale cache after update or delete responses are lost', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let loseResponseFor: string | null = null;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await baseFetch(input, init);
+      if (loseResponseFor && String(input).includes(loseResponseFor)) {
+        loseResponseFor = null;
+        throw new Error('socket hang up');
+      }
+
+      return response;
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    loseResponseFor = '/values:batchUpdate';
+    await expect(updateUser(env, 'row-1', { name: 'Ada Lovelace' })).rejects.toMatchObject({ name: 'ServiceUnavailableError' });
+    expect((await listUsers(env)).data.map((row) => row.values.name)).toEqual(['Ada Lovelace', 'Bea']);
+
+    loseResponseFor = ':batchUpdate';
+    await expect(deleteUser(env, 'row-2')).rejects.toMatchObject({ name: 'ServiceUnavailableError' });
+    expect((await listUsers(env)).data.map((row) => row.id)).toEqual(['row-1']);
+  });
 });

@@ -47,6 +47,7 @@ import {
 } from '@sheetflare/domain';
 import {
   GoogleSheetsService,
+  isUnconfirmedWriteFailure,
   type GoogleSheetHeaderLayout,
   type GoogleSheetTableConfig
 } from '@sheetflare/google-sheets';
@@ -640,28 +641,41 @@ export class TableDO {
     normalizedCandidate[config.idColumn] = rowId;
     this.assertFieldRules(normalizedCandidate, config);
     this.assertUniqueFieldRules(normalizedCandidate, config);
-    let rowNumber: number | null = null;
+    const writableValues = Object.fromEntries(
+      Object.entries(normalizedCandidate).filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
+    ) as Partial<RowRecord>;
+    let appendedRowNumber: number | null = null;
     let liveRow: RowEnvelope;
     try {
-      rowNumber = await sheets.appendRowSkeleton(config, rowId, layout);
-      const writableValues = Object.fromEntries(
-        Object.entries(normalizedCandidate).filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
-      ) as Partial<RowRecord>;
-      await sheets.writeRowPatch(config, rowNumber, writableValues, layout);
-      liveRow = await sheets.readSingleRow(config, rowNumber, layout);
-    } catch (error) {
-      if (rowNumber !== null) {
-        await this.rollbackAppendedCreateRow(config, rowId, rowNumber, layout, error);
+      appendedRowNumber = await sheets.appendRowSkeleton(config, rowId, layout);
+      // Rows inserted or removed above the append shift it, so re-resolve the skeleton by ID
+      // instead of patching the row number the append reported.
+      const skeleton = await sheets.findRowById(config, rowId, appendedRowNumber, { layout, verifyUnique: false });
+      if (!skeleton) {
+        throw new ConflictError(`Row ${rowId} disappeared before its values were written.`, { rowId });
       }
 
+      await sheets.writeRowPatch(config, skeleton.row.rowNumber, writableValues, layout);
+      liveRow = await this.readWrittenRow(config, rowId, skeleton.row.rowNumber, layout);
+    } catch (error) {
+      if (appendedRowNumber === null && !isUnconfirmedWriteFailure(error)) {
+        throw error;
+      }
+
+      this.markCacheStaleAfterUnconfirmedWrite(config, 'create', rowId, error);
+      await this.rollbackCreatedRow(config, rowId, appendedRowNumber, layout, error);
       throw error;
     }
 
-    this.upsertRowIndex(rowId, rowNumber);
+    this.upsertRowIndex(rowId, liveRow.rowNumber);
     this.upsertCachedRow(liveRow);
     this.upsertCachedCells(config, liveRow);
     this.invalidateSchemaMeta();
     this.markCacheFreshAfterMutation(config, headers);
+    if (liveRow.rowNumber !== appendedRowNumber) {
+      // The skeleton moved, so rows shifted under the cached row numbers.
+      this.recordPendingExternalChange(new Date().toISOString(), null);
+    }
 
     return {
       data: liveRow,
@@ -704,8 +718,20 @@ export class TableDO {
         .filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
         .map(([fieldName]) => [fieldName, normalizedCandidate[fieldName]])
     ) as Partial<RowRecord>;
-    await sheets.writeRowPatch(config, existingRow.rowNumber, writableValues, layout);
-    const liveRow = await sheets.readSingleRow(config, existingRow.rowNumber, layout);
+    let writeCommitted = false;
+    let liveRow: RowEnvelope;
+    try {
+      await sheets.writeRowPatch(config, existingRow.rowNumber, writableValues, layout);
+      writeCommitted = true;
+      liveRow = await this.readWrittenRow(config, rowId, existingRow.rowNumber, layout);
+    } catch (error) {
+      if (writeCommitted || isUnconfirmedWriteFailure(error)) {
+        this.markCacheStaleAfterUnconfirmedWrite(config, 'update', rowId, error);
+      }
+
+      throw error;
+    }
+
     this.upsertRowIndex(rowId, existingRow.rowNumber);
     this.upsertCachedRow(liveRow);
     this.upsertCachedCells(config, liveRow);
@@ -734,7 +760,19 @@ export class TableDO {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
 
-    await sheets.deleteRow(config, existingRow.rowNumber);
+    let deleteCommitted = false;
+    try {
+      await sheets.deleteRow(config, existingRow.rowNumber);
+      deleteCommitted = true;
+      await this.assertRowDeleted(config, rowId, existingRow.rowNumber, layout);
+    } catch (error) {
+      if (deleteCommitted || isUnconfirmedWriteFailure(error)) {
+        this.markCacheStaleAfterUnconfirmedWrite(config, 'delete', rowId, error);
+      }
+
+      throw error;
+    }
+
     this.deleteRowIndex(rowId);
     this.deleteCachedRow(rowId);
     if (cacheState.staleReason === 'fresh' && cachedHeaders === JSON.stringify(headers)) {
@@ -806,6 +844,12 @@ export class TableDO {
 
   private async recordExternalChange(projectSlug: string, tableSlug: string, changedAt: string, debounceUntil: string | null) {
     await this.getTableConfig(projectSlug, tableSlug);
+    this.recordPendingExternalChange(changedAt, debounceUntil);
+
+    return { ok: true as const };
+  }
+
+  private recordPendingExternalChange(changedAt: string, debounceUntil: string | null) {
     this.setExternalChangeState({
       ...this.getExternalChangeState(),
       pending: true,
@@ -814,8 +858,26 @@ export class TableDO {
     });
     this.incrementCounter(externalChangeGenerationMetaKey);
     this.incrementCounter(dataGenerationMetaKey);
+  }
 
-    return { ok: true as const };
+  // Google may have applied a write that failed or could not be confirmed, so the cache can no
+  // longer be trusted. Record it like an undebounced external change: the next read resyncs.
+  private markCacheStaleAfterUnconfirmedWrite(
+    config: ResolvedTableConfig,
+    operation: 'create' | 'update' | 'delete',
+    rowId: string,
+    error: unknown
+  ) {
+    this.recordPendingExternalChange(new Date().toISOString(), null);
+    console.warn(JSON.stringify({
+      event: 'table.write.unconfirmed',
+      projectSlug: config.projectSlug,
+      tableSlug: config.tableSlug,
+      operation,
+      rowId,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message : String(error)
+    }));
   }
 
   private async ensureQueryCacheReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
@@ -1042,10 +1104,12 @@ export class TableDO {
     return result.row;
   }
 
-  private async rollbackAppendedCreateRow(
+  // Removes a created row after a failed create. appendedRowNumber is null when the append
+  // response was lost, so the skeleton (if Google committed it) is found by managed ID alone.
+  private async rollbackCreatedRow(
     config: ResolvedTableConfig,
     rowId: string,
-    appendedRowNumber: number,
+    appendedRowNumber: number | null,
     layout: GoogleSheetHeaderLayout,
     createError: unknown
   ) {
@@ -1058,7 +1122,7 @@ export class TableDO {
       );
 
       if (!rollbackTarget) {
-        throw new Error(`Appended row ${rowId} could not be found for rollback.`);
+        return;
       }
 
       if (rollbackTarget.duplicateCount !== 1) {
@@ -1066,13 +1130,52 @@ export class TableDO {
       }
 
       await this.getSheetsClient(config).deleteRow(config, rollbackTarget.row.rowNumber);
+      await this.assertRowDeleted(config, rowId, rollbackTarget.row.rowNumber, layout);
     } catch (rollbackError) {
-      throw new ServiceUnavailableError('Create failed after Google Sheets row append and automatic rollback could not safely remove the partial row.', {
+      console.error(JSON.stringify({
+        event: 'table.create.rollback_failed',
+        projectSlug: config.projectSlug,
+        tableSlug: config.tableSlug,
         rowId,
         appendedRowNumber,
         createError: createError instanceof Error ? createError.message : String(createError),
         rollbackError: rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+      }));
+      throw new ServiceUnavailableError('Create failed after Google Sheets row append and automatic rollback could not safely remove the partial row.', {
+        rowId,
+        appendedRowNumber
       });
+    }
+  }
+
+  // Row-number writes are not conditional in the Sheets API, so confirm the written row still
+  // carries the target ID; otherwise rows moved and the write may have hit a different row.
+  private async readWrittenRow(config: ResolvedTableConfig, rowId: string, rowNumber: number, layout: GoogleSheetHeaderLayout) {
+    const row = await this.getSheetsClient(config).readSingleRow(config, rowNumber, layout);
+    if (row.id !== rowId) {
+      throw new ConflictError(
+        `Row ${rowId} moved while it was being written, so the write may have changed a different row. Verify the sheet before retrying.`,
+        { rowId, rowNumber }
+      );
+    }
+
+    return row;
+  }
+
+  // Deletes are by row index, so check the neighbouring managed IDs: if the target ID is still
+  // there, rows shifted during the delete and a different row was removed.
+  private async assertRowDeleted(config: ResolvedTableConfig, rowId: string, deletedRowNumber: number, layout: GoogleSheetHeaderLayout) {
+    const neighbours = await this.getSheetsClient(config).readRowReferencesInRange(
+      config,
+      Math.max(config.dataStartRow, deletedRowNumber - 1),
+      deletedRowNumber + 1,
+      layout
+    );
+    if (neighbours.some((entry) => entry.rowId === rowId)) {
+      throw new ConflictError(
+        `Row ${rowId} moved while it was being deleted, so a different row may have been deleted. Verify the sheet.`,
+        { rowId, rowNumber: deletedRowNumber }
+      );
     }
   }
 
