@@ -720,6 +720,7 @@ function createEnv(options?: {
               issues: [],
               validatedAt: '2026-04-26T00:00:02.000Z'
             },
+            dataGeneration: 0,
             externalChange: {
               pending: options?.tableExternalChangeDebounceUntil !== undefined,
               lastChangedAt: options?.tableExternalChangeDebounceUntil === undefined ? null : '2026-04-26T00:00:00.000Z',
@@ -752,6 +753,7 @@ function createEnv(options?: {
               issues: [],
               validatedAt: '2026-04-26T00:00:03.000Z'
             },
+            dataGeneration: 0,
             externalChange: {
               pending: false,
               lastChangedAt: null,
@@ -784,6 +786,7 @@ function createEnv(options?: {
               issues: [],
               validatedAt: '2026-04-26T00:00:03.000Z'
             },
+            dataGeneration: 0,
             externalChange: {
               pending: false,
               lastChangedAt: null,
@@ -3278,6 +3281,7 @@ describe('api routes', () => {
           issues: [],
           validatedAt: '2026-04-26T00:00:02.000Z'
         },
+        dataGeneration: 0,
         externalChange: {
           pending: false,
           lastChangedAt: null,
@@ -3484,6 +3488,7 @@ describe('api routes', () => {
           issues: [],
           validatedAt: '2026-04-26T00:00:03.000Z'
         },
+        dataGeneration: 0,
         externalChange: {
           pending: false,
           lastChangedAt: null,

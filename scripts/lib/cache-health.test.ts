@@ -23,6 +23,7 @@ function createCacheStatus(overrides?: Partial<TableCacheStatus>): TableCacheSta
       issues: [],
       validatedAt: '2026-04-29T18:00:01.000Z'
     },
+    dataGeneration: 0,
     externalChange: {
       pending: false,
       lastChangedAt: null,

@@ -160,6 +160,7 @@ describe('admin api helpers', () => {
             issues: [],
             validatedAt: '2026-04-26T00:00:02.000Z'
           },
+          dataGeneration: 0,
           externalChange: {
             pending: false,
             lastChangedAt: null,

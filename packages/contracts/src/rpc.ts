@@ -31,7 +31,7 @@ import type { ApiKeyPrincipal } from './auth';
 import { apiKeyIdSchema, projectSlugSchema, rowIdSchema, tableSlugSchema } from './ids';
 import type { ProjectConfig, TableConfig } from './project';
 import { fieldRulesSchema, maxIndexedFieldCount, tableConfigSchema } from './project';
-import type { ListRowsResult } from './table';
+import type { ListRowsResult, TableDataGeneration } from './table';
 import { listRowsQuerySchema } from './table';
 
 export const tableRequestContextSchema = z.object({
@@ -266,6 +266,13 @@ export const tableDoRequestSchema = z.discriminatedUnion('type', [
     tableSlug: tableSlugSchema,
     resolvedConfig: resolvedTableConfigSnapshotSchema.optional(),
     requestContext: tableRequestContextSchema.optional()
+  }),
+  z.object({
+    type: z.literal('table.generation.get'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    resolvedConfig: resolvedTableConfigSnapshotSchema.optional(),
+    requestContext: tableRequestContextSchema.optional()
   })
 ]);
 
@@ -335,7 +342,8 @@ export type TableDoResponse =
   | { type: 'table.cache.refresh.result'; result: RefreshTableCacheResult }
   | { type: 'table.cache.clear.result'; result: { ok: true } }
   | { type: 'table.external-change.record.result'; result: { ok: true } }
-  | { type: 'table.reindex.result'; result: ReindexTableResult };
+  | { type: 'table.reindex.result'; result: ReindexTableResult }
+  | { type: 'table.generation.get.result'; result: TableDataGeneration };
 
 export type TableRequestContext = z.infer<typeof tableRequestContextSchema>;
 

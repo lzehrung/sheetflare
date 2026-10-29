@@ -5302,4 +5302,70 @@ describe('TableDO', () => {
     expect(indexed.data.map((row) => row.id)).toEqual(['row-1']);
     expect(scanned.data.map((row) => row.id)).toEqual(['row-1']);
   });
+
+  it('reports a cheap, monotonic data generation that advances whenever reads could change', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let googleRequestCount = 0;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      googleRequestCount += 1;
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+    const getGeneration = () => callUsersTable(env, { type: 'table.generation.get', ...usersTable }, 'table.generation.get.result');
+
+    let requestsBefore = googleRequestCount;
+    const initial = await getGeneration();
+    expect(googleRequestCount).toBe(requestsBefore);
+    expect(initial).toEqual({ dataGeneration: 0, lastSyncCompletedAt: null, cacheTtlSeconds: 3600 });
+
+    let lastGeneration = initial.dataGeneration;
+    const expectGenerationAdvanced = async () => {
+      const next = await getGeneration();
+      expect(next.dataGeneration).toBeGreaterThan(lastGeneration);
+      lastGeneration = next.dataGeneration;
+      return next;
+    };
+
+    await listUsers(env);
+    const afterSync = await expectGenerationAdvanced();
+    expect(afterSync.lastSyncCompletedAt).not.toBeNull();
+    expect((await getUsersCacheStatus(env)).dataGeneration).toBe(lastGeneration);
+
+    const created = await createUser(env, { name: 'Grace' });
+    await expectGenerationAdvanced();
+    await updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+    await expectGenerationAdvanced();
+    await deleteUser(env, created.data.id);
+    await expectGenerationAdvanced();
+
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: '2026-10-28T00:00:00.000Z',
+      debounceUntil: null
+    }, 'table.external-change.record.result');
+    await expectGenerationAdvanced();
+    await callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result');
+    await expectGenerationAdvanced();
+
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 60 });
+    const afterConfigChange = await expectGenerationAdvanced();
+    expect(afterConfigChange.cacheTtlSeconds).toBe(60);
+
+    await callUsersTable(env, { type: 'table.cache.clear', ...usersTable }, 'table.cache.clear.result');
+    const afterClear = await expectGenerationAdvanced();
+    expect(afterClear.lastSyncCompletedAt).toBeNull();
+
+    requestsBefore = googleRequestCount;
+    expect((await getGeneration()).dataGeneration).toBe(lastGeneration);
+    expect(googleRequestCount).toBe(requestsBefore);
+  });
 });

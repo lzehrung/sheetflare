@@ -17,6 +17,7 @@ import {
   type TableRequestContext,
   type TableDoResponse,
   type ResolvedTableConfigSnapshot,
+  type TableDataGeneration,
   type TableExternalChange,
   type TableValidationSummary,
   type TableValidationIssue
@@ -85,6 +86,15 @@ const emptyExternalChangeState: TableExternalChange = {
   debounceUntil: null,
   lastAutoReindexAt: null
 };
+
+// dataGeneration is a monotonic counter that advances on every event that can change what a read
+// returns or how stale it is: sync promotion or failure, a committed create/update/delete (or a
+// cache row repaired from Google) applied to the cache, cache clear, an observed config change,
+// and recording or clearing an external change. The gateway keys cached reads by it, so committed
+// changes never depend on edge purges. It survives cache clears so a value is never reused.
+const dataGenerationMetaKey = 'data.generation';
+const monotonicCounterMetaKeys = [dataGenerationMetaKey];
+const readConfigSignatureMetaKey = 'config.readSignature';
 
 type ResolvedTableConfig = GoogleSheetTableConfig & {
   googleCredentialRef: string;
@@ -448,6 +458,11 @@ export class TableDO {
               : { force: true, requestContext }
           )
         };
+      case 'table.generation.get':
+        return {
+          type: 'table.generation.get.result',
+          result: await this.getDataGeneration(body.projectSlug, body.tableSlug, body.resolvedConfig)
+        };
     }
   }
 
@@ -461,6 +476,7 @@ export class TableDO {
         throw new BadRequestError(`Resolved config does not match ${projectSlug}/${tableSlug}.`);
       }
 
+      this.observeConfig(resolvedConfig);
       return resolvedConfig;
     }
 
@@ -478,7 +494,40 @@ export class TableDO {
       projectSlug,
       tableSlug
     });
+    this.observeConfig(result.result.data.resolvedConfig);
     return result.result.data.resolvedConfig;
+  }
+
+  // Advances dataGeneration when a request carries a config that changes what reads return or
+  // how long they stay fresh, so readers keyed by the generation never mix configurations.
+  private observeConfig(config: ResolvedTableConfig) {
+    const signature = JSON.stringify({
+      cache: buildCacheConfigSignature(config),
+      cacheTtlSeconds: config.cacheTtlSeconds,
+      readEnabled: config.readEnabled
+    });
+    const previousSignature = this.getMeta(readConfigSignatureMetaKey);
+    if (previousSignature === signature) {
+      return;
+    }
+
+    this.setMeta(readConfigSignatureMetaKey, signature);
+    if (previousSignature !== null) {
+      this.incrementCounter(dataGenerationMetaKey);
+    }
+  }
+
+  private async getDataGeneration(
+    projectSlug: string,
+    tableSlug: string,
+    resolvedConfig?: ResolvedTableConfigSnapshot
+  ): Promise<TableDataGeneration> {
+    const config = await this.getTableConfig(projectSlug, tableSlug, resolvedConfig);
+    return {
+      dataGeneration: this.getCounter(dataGenerationMetaKey),
+      lastSyncCompletedAt: this.getSyncMeta().lastSyncCompletedAt,
+      cacheTtlSeconds: config.cacheTtlSeconds
+    };
   }
 
   private getSheetsClient(config: { googleCredentialRef: string }) {
@@ -687,6 +736,7 @@ export class TableDO {
       this.invalidateSchemaMeta();
       this.markCacheFreshAfterMutation(config, headers);
     } else {
+      this.noteCacheContentChanged();
       await this.syncCache(projectSlug, tableSlug, { force: true, resolvedConfig: config, requestContext: requestContext ?? null });
     }
 
@@ -757,6 +807,7 @@ export class TableDO {
       lastChangedAt: changedAt,
       debounceUntil
     });
+    this.incrementCounter(dataGenerationMetaKey);
 
     return { ok: true as const };
   }
@@ -898,6 +949,7 @@ export class TableDO {
         lastSyncCompletedAt: completedAt,
         lastSyncError: null
       });
+      this.noteCacheContentChanged();
       console.info(JSON.stringify({
         event: 'table.sync.complete',
         projectSlug: config.projectSlug,
@@ -920,6 +972,7 @@ export class TableDO {
         lastSyncStartedAt: startedAt,
         lastSyncError: error instanceof Error ? error.message : 'Unknown sync error'
       });
+      this.incrementCounter(dataGenerationMetaKey);
       console.error(JSON.stringify({
         event: 'table.sync.failed',
         projectSlug: config.projectSlug,
@@ -945,8 +998,12 @@ export class TableDO {
     const rowNumberHint = cached?.rowNumber ?? this.lookupRowNumber(rowId);
     const result = await this.getSheetsClient(config).findRowById(config, rowId, rowNumberHint, options);
     if (!result) {
-      this.deleteRowIndex(rowId);
-      this.deleteCachedRow(rowId);
+      if (cached || rowNumberHint !== null) {
+        this.deleteRowIndex(rowId);
+        this.deleteCachedRow(rowId);
+        this.noteCacheContentChanged();
+      }
+
       return null;
     }
 
@@ -957,9 +1014,16 @@ export class TableDO {
       );
     }
 
-    this.upsertRowIndex(rowId, result.row.rowNumber);
-    this.upsertCachedRow(result.row);
-    this.upsertCachedCells(config, result.row);
+    const cacheIsCurrent = cached !== null
+      && cached.rowNumber === result.row.rowNumber
+      && JSON.stringify(cached.values) === JSON.stringify(result.row.values);
+    if (!cacheIsCurrent) {
+      this.upsertRowIndex(rowId, result.row.rowNumber);
+      this.upsertCachedRow(result.row);
+      this.upsertCachedCells(config, result.row);
+      this.noteCacheContentChanged();
+    }
+
     return result.row;
   }
 
@@ -1164,7 +1228,8 @@ export class TableDO {
       lastSyncCompletedAt: meta.lastSyncCompletedAt,
       lastSyncError: meta.lastSyncError,
       validation: this.getValidationSummary(),
-      externalChange
+      externalChange,
+      dataGeneration: this.getCounter(dataGenerationMetaKey)
     };
   }
 
@@ -1271,8 +1336,10 @@ export class TableDO {
   private clearCacheState() {
     this.clearCacheTables('live');
     this.clearCacheTables('staging');
-    this.ctx.storage.sql.exec(`DELETE FROM meta`);
+    const preservedKeyPlaceholders = monotonicCounterMetaKeys.map(() => '?').join(', ');
+    this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key NOT IN (${preservedKeyPlaceholders})`, ...monotonicCounterMetaKeys);
     this.activeSync = null;
+    this.noteCacheContentChanged();
   }
 
   private getSyncMeta(): SyncMeta {
@@ -1300,6 +1367,19 @@ export class TableDO {
     this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, key);
   }
 
+  private getCounter(key: string) {
+    const value = Number(this.getMeta(key) ?? '0');
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  }
+
+  private incrementCounter(key: string) {
+    this.setMeta(key, String(this.getCounter(key) + 1));
+  }
+
+  private noteCacheContentChanged() {
+    this.incrementCounter(dataGenerationMetaKey);
+  }
+
   private computeCacheStatus(config: GoogleSheetTableConfig & { googleCredentialRef?: string }): TableCacheStatus {
     const cacheState = this.getCacheState(config);
     return {
@@ -1312,7 +1392,8 @@ export class TableDO {
       lastSyncCompletedAt: cacheState.lastSyncCompletedAt,
       lastSyncError: cacheState.lastSyncError,
       validation: cacheState.validation,
-      externalChange: cacheState.externalChange
+      externalChange: cacheState.externalChange,
+      dataGeneration: cacheState.dataGeneration
     };
   }
 
@@ -1328,6 +1409,7 @@ export class TableDO {
       lastSyncCompletedAt: completedAt,
       lastSyncError: null
     });
+    this.noteCacheContentChanged();
   }
 
   private buildValidationSummary(
