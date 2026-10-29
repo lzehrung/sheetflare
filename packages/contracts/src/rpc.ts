@@ -76,6 +76,16 @@ export const controlPlaneDoRequestSchema = z.discriminatedUnion('type', [
       updatedAt: z.string().datetime()
     })
   }),
+  // Sent by ProjectDO before it writes a new project or moves one to another spreadsheet or credential ref. The control
+  // plane rejects a spreadsheet that other projects use under a different credential ref and, when `revokeApiKeys` is
+  // set because the slug has no project yet, revokes API keys left bound to the slug by an earlier project.
+  z.object({
+    type: z.literal('control.project.prepare'),
+    projectSlug: projectSlugSchema,
+    spreadsheetId: z.string().min(1),
+    googleCredentialRef: z.string().min(1),
+    revokeApiKeys: z.boolean()
+  }),
   z.object({
     type: z.literal('control.project.delete'),
     projectSlug: projectSlugSchema
@@ -284,6 +294,7 @@ export type ControlPlaneDoRequest = z.infer<typeof controlPlaneDoRequestSchema>;
 export type ControlPlaneDoResponse =
   | { type: 'control.projects.list.result'; result: AdminListProjectsResult }
   | { type: 'control.project.upsert.result'; result: { ok: true } }
+  | { type: 'control.project.prepare.result'; result: { ok: true } }
   | { type: 'control.project.delete.result'; result: { ok: true } }
   | { type: 'control.spreadsheet-watches.list.result'; result: AdminListSpreadsheetWatchesResult }
   | { type: 'control.spreadsheet-watches.retry-advice.list.result'; result: AdminListSpreadsheetWatchRetryAdviceResult }

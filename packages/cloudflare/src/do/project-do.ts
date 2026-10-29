@@ -251,16 +251,26 @@ export class ProjectDO {
     const googleCredentialRef = normalizeOptionalFieldName(input.googleCredentialRef) ?? defaultGoogleCredentialRef;
 
     resolveGoogleCredential(this.env, googleCredentialRef);
-    const existing = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, input.slug);
+    const previous = this.findProjectToCreate(input.slug, allowExisting);
 
-    if (!allowExisting) {
-      if (existing) {
-        throw new ConflictError(`Project ${input.slug} already exists.`, {
-          projectSlug: input.slug
-        });
-      }
+    // The control plane rejects a spreadsheet that other projects use under another credential ref and, for a slug
+    // without a project, revokes keys an earlier project with this slug left behind, before anything is written here.
+    if (
+      !previous
+      || previous.spreadsheet_id !== input.spreadsheetId
+      || previous.google_credential_ref !== googleCredentialRef
+    ) {
+      await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), {
+        type: 'control.project.prepare',
+        projectSlug: input.slug,
+        spreadsheetId: input.spreadsheetId,
+        googleCredentialRef,
+        revokeApiKeys: previous === null
+      });
     }
 
+    // Other requests run while the control plane answers, so the existence check that guards the write is repeated.
+    const existing = this.findProjectToCreate(input.slug, allowExisting);
     this.ensureSchema();
     this.ctx.storage.sql.exec(
       `
@@ -288,6 +298,17 @@ export class ProjectDO {
       data: await this.getProject(input.slug),
       created: existing === null
     };
+  }
+
+  private findProjectToCreate(projectSlug: string, allowExisting: boolean) {
+    const existing = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, projectSlug);
+    if (existing && !allowExisting) {
+      throw new ConflictError(`Project ${projectSlug} already exists.`, {
+        projectSlug
+      });
+    }
+
+    return existing;
   }
 
   private async getProject(projectSlug: string): Promise<AdminGetProjectResult> {
@@ -468,9 +489,11 @@ export class ProjectDO {
     const tables = await this.listTables(projectSlug);
     const deletedTables = tables.map((table) => table.tableSlug);
 
+    // Revoke the project's keys and drop its registry entry first. If the control plane fails, nothing here has been
+    // deleted yet: the project keeps working, its slug cannot be re-created, and retrying the delete converges.
+    await this.deleteRegistryProject(projectSlug);
     this.ctx.storage.sql.exec(`DELETE FROM tables WHERE project_slug = ?`, projectSlug);
     this.ctx.storage.sql.exec(`DELETE FROM project WHERE slug = ?`, projectSlug);
-    await this.deleteRegistryProject(projectSlug);
 
     return {
       ok: true,

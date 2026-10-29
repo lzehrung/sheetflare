@@ -1,4 +1,4 @@
-import { AppError, NotFoundError, ServiceUnavailableError } from '@sheetflare/contracts';
+import { AppError, ConflictError, NotFoundError, ServiceUnavailableError } from '@sheetflare/contracts';
 import type {
   AdminListSpreadsheetWatchRetryAdviceResult,
   AdminListSpreadsheetWatchesResult,
@@ -225,6 +225,12 @@ export class ControlPlaneDO {
           type: 'control.project.upsert.result',
           result: { ok: true }
         };
+      case 'control.project.prepare':
+        this.prepareProjectRegistration(body);
+        return {
+          type: 'control.project.prepare.result',
+          result: { ok: true }
+        };
       case 'control.project.delete':
         await this.deleteProjectSummary(body.projectSlug);
         return {
@@ -330,9 +336,38 @@ export class ControlPlaneDO {
     );
   }
 
-  private async deleteProjectSummary(projectSlug: string) {
-    const revokedAt = new Date().toISOString();
+  private prepareProjectRegistration(input: Extract<ControlPlaneDoRequest, { type: 'control.project.prepare' }>) {
+    // A spreadsheet has one Drive watch, created with one credential, so projects that share a spreadsheet must share
+    // its credential ref. Any ref already on the spreadsheet is accepted, which lets operators converge registries
+    // written before this rule existed.
+    const registeredGoogleCredentialRefs = this.selectRows<{ google_credential_ref: string }>(
+      `
+      SELECT DISTINCT google_credential_ref
+      FROM project_registry
+      WHERE spreadsheet_id = ? AND slug <> ?
+      ORDER BY google_credential_ref ASC
+      `,
+      input.spreadsheetId,
+      input.projectSlug
+    ).map((row) => row.google_credential_ref);
 
+    if (registeredGoogleCredentialRefs.length > 0 && !registeredGoogleCredentialRefs.includes(input.googleCredentialRef)) {
+      throw new ConflictError(
+        `Spreadsheet ${input.spreadsheetId} is already registered with Google credential ref "${registeredGoogleCredentialRefs[0]}". Projects that share a spreadsheet must use the same credential ref.`,
+        {
+          spreadsheetId: input.spreadsheetId,
+          googleCredentialRef: input.googleCredentialRef,
+          registeredGoogleCredentialRefs
+        }
+      );
+    }
+
+    if (input.revokeApiKeys) {
+      this.revokeProjectApiKeys(input.projectSlug);
+    }
+  }
+
+  private revokeProjectApiKeys(projectSlug: string) {
     this.ctx.storage.sql.exec(
       `
       UPDATE api_keys
@@ -340,9 +375,13 @@ export class ControlPlaneDO {
       WHERE project_slug = ?
         AND revoked_at IS NULL
       `,
-      revokedAt,
+      new Date().toISOString(),
       projectSlug
     );
+  }
+
+  private async deleteProjectSummary(projectSlug: string) {
+    this.revokeProjectApiKeys(projectSlug);
     this.ctx.storage.sql.exec(
       `
       DELETE FROM project_registry
