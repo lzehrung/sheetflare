@@ -13,6 +13,7 @@ import {
 } from '@sheetflare/contracts';
 import type { Env } from '../../src/env';
 import { CachedTableReads, type CachedTableReadProps } from '../../src/index';
+import type { WorkersCacheEmulator } from './workers-cache';
 import { apiKeyFixtures } from './api-keys';
 
 export type FakeDurableObjectRequest = {
@@ -76,6 +77,12 @@ const resolvedTableConfigSnapshot = resolvedTableConfigSnapshotSchema.parse({
   spreadsheetId: 'sheet-1',
   googleCredentialRef: 'default'
 });
+
+/**
+ * When the canned TableDO last completed a sync. Edge freshness counts from here, so a test that asserts an exact
+ * `max-age` freezes the clock at this instant (or a known distance after it).
+ */
+export const cannedTableSyncCompletedAt = '2026-04-26T00:00:01.000Z';
 
 export const defaultCachedTableReadProps: CachedTableReadProps = {
   resolvedConfig: resolvedTableConfigSnapshot
@@ -154,6 +161,11 @@ export function createEnv(options?: {
   allowedOrigins?: string;
   cachedReadPurgeShouldFail?: boolean;
   cachedReadResponseHeaders?: Record<string, string>;
+  /**
+   * Puts an emulated Workers Cache in front of the cached-read entrypoint and routes its purge calls to the emulated
+   * purge API, instead of invoking the entrypoint on every read and accepting every purge.
+   */
+  workersCache?: WorkersCacheEmulator;
   /** Counts rate-limit checks per Durable Object name and key like the real fixed window instead of answering from a script. */
   rateLimitFixedWindow?: boolean;
   /** Replaces the body of every response from the cached-read entrypoint, as a Workers Cache hit would. */
@@ -374,14 +386,17 @@ export function createEnv(options?: {
     }
 
     if (body.type === 'control.spreadsheet-watch.notify') {
-      return Response.json({
+      const response = {
         type: 'control.spreadsheet-watch.notify.result',
         result: {
           accepted: true,
           spreadsheetId: 'sheet-1',
-          debounceUntil: '2026-04-26T00:00:30.000Z'
+          debounceUntil: '2026-04-26T00:00:30.000Z',
+          changed: true,
+          projectSlugs: ['demo']
         }
-      });
+      } satisfies ControlPlaneDoResponse;
+      return Response.json(response);
     }
 
     if (body.type === 'control.projects.list' && options?.controlProjectsListUnexpectedResponse === true) {
@@ -710,6 +725,18 @@ export function createEnv(options?: {
       });
     }
 
+    if (body.type === 'table.generation.get') {
+      const response = {
+        type: 'table.generation.get.result',
+        result: {
+          dataGeneration: 0,
+          lastSyncCompletedAt: cannedTableSyncCompletedAt,
+          cacheTtlSeconds: options?.tableCacheTtlSeconds ?? 15
+        }
+      } satisfies TableDoResponse;
+      return Response.json(response);
+    }
+
     if (body.type === 'table.cache.get') {
       if (options?.tableCacheGetUnexpectedResponse) {
         const response = {
@@ -734,7 +761,7 @@ export function createEnv(options?: {
             staleReason: externalChangePending ? 'external-change' : (options?.tableCacheStaleReason ?? defaultStaleReason),
             rowCount: 2,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
-            lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
+            lastSyncCompletedAt: cannedTableSyncCompletedAt,
             dataGeneration: 0,
             lastSyncError: null,
             validation: {
@@ -953,11 +980,15 @@ export function createEnv(options?: {
       authorization: request.headers.get('authorization'),
       cacheKey: init?.cf?.cacheKey ?? null
     });
-    const entrypointResponse = await createCachedTableReadsHarness(env, {
+    const runEntrypoint = () => createCachedTableReadsHarness(env, {
       props,
       purgeCalls: cachedReadPurgeCalls,
-      purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
+      purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false,
+      workersCache: options?.workersCache
     }).entrypoint.fetch(request);
+    const entrypointResponse = options?.workersCache === undefined
+      ? await runEntrypoint()
+      : await options.workersCache.fetch({ props, cacheKey: init?.cf?.cacheKey ?? null, request, run: runEntrypoint });
     const response = options?.cachedReadResponseBody === undefined
       ? entrypointResponse
       : new Response(options.cachedReadResponseBody, {
@@ -980,19 +1011,22 @@ export function createEnv(options?: {
       async invalidateProject(projectSlug: string) {
         await createCachedTableReadsHarness(env, {
           purgeCalls: cachedReadPurgeCalls,
-          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
+          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false,
+          workersCache: options?.workersCache
         }).entrypoint.invalidateProject(projectSlug);
       },
       async invalidateTable(projectSlug: string, tableSlug: string) {
         await createCachedTableReadsHarness(env, {
           purgeCalls: cachedReadPurgeCalls,
-          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
+          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false,
+          workersCache: options?.workersCache
         }).entrypoint.invalidateTable(projectSlug, tableSlug);
       },
       async invalidateRow(projectSlug: string, tableSlug: string, rowId: string) {
         await createCachedTableReadsHarness(env, {
           purgeCalls: cachedReadPurgeCalls,
-          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
+          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false,
+          workersCache: options?.workersCache
         }).entrypoint.invalidateRow(projectSlug, tableSlug, rowId);
       }
     }
@@ -1096,6 +1130,8 @@ export function createCachedTableReadsHarness(
     purgeCalls?: CachePurgeCall[];
     purgeShouldFail?: boolean;
     purgeResultShouldFail?: boolean;
+    /** Answers purge calls like the emulated purge API (rate limit included) instead of always accepting them. */
+    workersCache?: WorkersCacheEmulator;
   }
 ): { entrypoint: CachedTableReads; purgeCalls: CachePurgeCall[] } {
   const purgeCalls = options?.purgeCalls ?? [];
@@ -1121,6 +1157,9 @@ export function createCachedTableReadsHarness(
               }
             ]
           };
+        }
+        if (options?.workersCache !== undefined) {
+          return options.workersCache.purge(purgeOptions);
         }
         return {
           success: true,
