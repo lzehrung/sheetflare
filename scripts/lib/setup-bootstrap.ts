@@ -89,7 +89,7 @@ export function createBootstrapEnv(
     SHEETFLARE_ADMIN_CREDENTIAL: adminCredential,
     SHEETFLARE_BOOTSTRAP_CONFIG_JSON: JSON.stringify(createBootstrapConfigFromSetup(config)),
     SHEETFLARE_BOOTSTRAP_RESULT_MODE: 'full',
-    ...(options.rotateKeys ? { SHEETFLARE_BOOTSTRAP_ROTATE_KEYS: 'true' } : {})
+    SHEETFLARE_BOOTSTRAP_ROTATE_KEYS: options.rotateKeys === true ? 'true' : 'false'
   } satisfies NodeJS.ProcessEnv;
 }
 
@@ -101,7 +101,45 @@ export function createBootstrapCommandOptions(env: NodeJS.ProcessEnv) {
   } as const;
 }
 
-const bootstrapResultMarker = '__SHEETFLARE_BOOTSTRAP_RESULT__=';
+export const bootstrapResultMarker = '__SHEETFLARE_BOOTSTRAP_RESULT__=';
+
+const bootstrapFailureMessage = 'Bootstrap failed. Confirm the spreadsheet is shared with the Google service-account email as Editor, the configured tab exists, the _id header exists, and existing _id values are unique and non-blank.';
+
+export type BootstrapCommandResult = {
+  ok: true;
+  output: SetupBootstrapOutput;
+  failureMessage: null;
+} | {
+  ok: false;
+  output: SetupBootstrapOutput | null;
+  failureMessage: string;
+};
+
+export function readBootstrapCommandResult(result: {
+  code: number | null;
+  stdout: string;
+}): BootstrapCommandResult {
+  const output = result.stdout.includes(bootstrapResultMarker) ? parseBootstrapOutput(result.stdout) : null;
+  if (result.code !== 0) {
+    return {
+      ok: false,
+      output,
+      failureMessage: bootstrapFailureMessage
+    };
+  }
+  if (output === null) {
+    return {
+      ok: false,
+      output: null,
+      failureMessage: 'Bootstrap output did not include the setup bootstrap result marker.'
+    };
+  }
+  return {
+    ok: true,
+    output,
+    failureMessage: null
+  };
+}
 
 export function redactBootstrapResultMarker(stdout: string) {
   return stdout

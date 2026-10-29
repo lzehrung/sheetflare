@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import type { FieldRules } from '@sheetflare/contracts';
+import { parseSheetCellValue, serializeSheetCell } from '@sheetflare/google-sheets';
 import { assertReadinessChecksOk, assertUpdatedValuesPersisted, findUnpersistedValues } from './smoke-assertions';
 import { ScriptError } from './runtime';
 
@@ -33,6 +35,34 @@ describe('findUnpersistedValues', () => {
 
   it('does not coerce structurally different values', () => {
     expect(findUnpersistedValues({ tags: 'a,b' }, { tags: ['a', 'b'] })).toHaveLength(1);
+  });
+
+  it('expects a trim and lowercase field rule to persist the normalized string', () => {
+    const fieldRules: FieldRules = { name: { normalize: ['trim', 'lowercase'] } };
+    expect(findUnpersistedValues(
+      { name: 'alice' },
+      { name: ' Alice ' },
+      fieldRules
+    )).toEqual([]);
+    expect(findUnpersistedValues(
+      { name: ' Alice ' },
+      { name: ' Alice ' },
+      fieldRules
+    )).toEqual([{ field: 'name', expected: 'alice', actual: ' Alice ' }]);
+  });
+
+  it('expects an array to persist as the sheets JSON text', () => {
+    const persisted = parseSheetCellValue(serializeSheetCell(['a', 'b']));
+    expect(findUnpersistedValues({ tags: persisted }, { tags: ['a', 'b'] })).toEqual([]);
+  });
+
+  it('expects a number to persist through sheets serialization', () => {
+    const persisted = parseSheetCellValue(serializeSheetCell(7));
+    expect(findUnpersistedValues({ count: persisted }, { count: 7 })).toEqual([]);
+    expect(findUnpersistedValues({ count: '7' }, { count: 7 })).toEqual([]);
+    expect(findUnpersistedValues({ count: '8' }, { count: 7 })).toEqual([
+      { field: 'count', expected: 7, actual: '8' }
+    ]);
   });
 });
 
