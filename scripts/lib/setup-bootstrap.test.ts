@@ -11,6 +11,7 @@ import type { SetupConfig } from './setup-config';
 
 const baseConfig: SetupConfig = {
   profile: 'production',
+  adminUi: 'enabled',
   privateProject: {
     slug: 'demo',
     name: 'Demo',

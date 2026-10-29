@@ -1,5 +1,9 @@
 import type { DurableObjectNamespace } from '@cloudflare/workers-types';
 
+export interface StaticAssetsBinding {
+  fetch(request: Request): Promise<Response>;
+}
+
 export interface CloudflareEnv {
   CONTROL_PLANE_DO: DurableObjectNamespace;
   PROJECT_DO: DurableObjectNamespace;
@@ -14,4 +18,6 @@ export interface CloudflareEnv {
   RATE_LIMIT_WINDOW_SECONDS?: string;
   TABLE_MAX_FULL_SCAN_ROWS?: string;
   SHEETFLARE_ALLOWED_ORIGINS?: string;
+  ADMIN_UI?: string;
+  ASSETS?: StaticAssetsBinding;
 }

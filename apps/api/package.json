@@ -3,10 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "build": "wrangler deploy --dry-run",
-    "deploy": "npx wrangler@4.107.0 deploy --config wrangler.jsonc",
-    "deploy:staging": "npx wrangler@4.107.0 deploy --config wrangler.staging.jsonc",
+    "build:admin": "npm --prefix ../admin run build",
+    "dev": "npm run build:admin && wrangler dev",
+    "build": "npm run build:admin && wrangler deploy --dry-run",
+    "deploy": "npm run build:admin && npx wrangler@4.107.0 deploy --config wrangler.jsonc",
+    "deploy:staging": "npm run build:admin && npx wrangler@4.107.0 deploy --config wrangler.staging.jsonc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests"
   },

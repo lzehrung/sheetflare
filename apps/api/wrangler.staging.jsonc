@@ -3,6 +3,11 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-07",
   "workers_dev": true,
+  "assets": {
+    "directory": "../admin/dist",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
   "cache": {
     "enabled": true
   },
@@ -25,6 +30,7 @@
     }
   ],
   "vars": {
+    "ADMIN_UI": "enabled",
     "GOOGLE_CLIENT_EMAIL": "sheetflare-staging@sheetflare-staging.iam.gserviceaccount.com",
     "RATE_LIMIT_MAX_REQUESTS": "300",
     "RATE_LIMIT_WINDOW_SECONDS": "60",

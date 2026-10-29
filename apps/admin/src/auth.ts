@@ -1,6 +1,5 @@
 export const adminCredentialStorageKey = 'sheetflare.adminCredential';
 export const adminRequestHeaderName = 'x-sheetflare-admin-request';
-export const adminSessionPath = '/__sheetflare/admin-session';
 
 export type AdminAccess =
   | { source: 'local-server' }

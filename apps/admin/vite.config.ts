@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { adminUiBasePath } from '@sheetflare/contracts';
 import { defineConfig, type Connect, type Plugin, type ProxyOptions } from 'vite';
 import {
   adminHost,
@@ -60,7 +61,12 @@ const adminSessionPlugin: Plugin = {
   }
 };
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  base: command === 'build' ? adminUiBasePath : '/',
+  build: {
+    outDir: 'dist/admin',
+    emptyOutDir: true
+  },
   plugins: [adminSessionPlugin],
   server: {
     host: adminHost,
@@ -81,4 +87,4 @@ export default defineConfig({
     strictPort: true,
     headers: adminResponseHeaders
   }
-});
+}));

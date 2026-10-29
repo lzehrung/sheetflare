@@ -1,5 +1,7 @@
 # Multi-Instance Local Admin Plan
 
+> **Status: deferred.** Each deployment now serves its own admin UI at `/admin/` (see [hosted-admin-plan.md](./hosted-admin-plan.md)), which covers per-instance access without a registry. Revisit this plan only if operators need one local process that switches between deployments.
+
 ## Goal
 
 Let one loopback-only Sheetflare admin process manage multiple independent Sheetflare Worker deployments safely.

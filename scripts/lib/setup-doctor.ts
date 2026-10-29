@@ -12,6 +12,7 @@ type ReadyResponse = {
     namedGoogleCredentials: 'configured' | 'missing' | 'invalid';
     googleDriveWebhookSecret: 'configured' | 'missing';
     bootstrapAdmin: 'configured' | 'missing';
+    adminUi?: 'enabled' | 'disabled' | 'invalid' | 'assets-missing';
   };
   notes: string[];
 };
@@ -121,6 +122,27 @@ function describeReadyCredentialSummary(ready: ReadyResponse['checks']) {
   }
 
   return 'named Google credentials';
+}
+
+function describeAdminUiResult(
+  deployed: ReadyResponse['checks']['adminUi'],
+  configured: SetupConfig['adminUi'],
+  apiUrl: string
+): SetupPrereqResult {
+  const redeployHint = 'Run npm run setup -- --deploy to redeploy the Worker with the configured admin UI setting.';
+  if (deployed === undefined) {
+    return createResult('Admin UI', 'warning', 'The deployed Worker predates the hosted admin UI.', redeployHint);
+  }
+  if (deployed === 'invalid' || deployed === 'assets-missing') {
+    return createResult('Admin UI', 'blocked', `API /ready reports the hosted admin UI as ${deployed}.`, redeployHint);
+  }
+  if (deployed !== configured) {
+    return createResult('Admin UI', 'warning', `The deployed Worker has the hosted admin UI ${deployed}, but setup config sets adminUi to ${configured}.`, redeployHint);
+  }
+  if (deployed === 'enabled') {
+    return createResult('Admin UI', 'ready', `Hosted admin UI is enabled at ${apiUrl}/admin/.`, null);
+  }
+  return createResult('Admin UI', 'ready', 'Hosted admin UI is disabled by setup config.', null);
 }
 
 export async function runSetupDoctor(options: {
@@ -240,6 +262,8 @@ export async function runSetupDoctor(options: {
           null
         ));
       }
+
+      results.push(describeAdminUiResult(ready.checks.adminUi, options.config.adminUi, options.runtimeState.apiUrl));
     } catch (error) {
       results.push(createResult(
         'API readiness',

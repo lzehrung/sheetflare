@@ -40,6 +40,9 @@ jobs:
           npm run typecheck
           npm run build
 
+      - name: Build admin UI
+        run: npm --workspace @sheetflare/admin run build
+
       - name: Write staging secrets file
         run: |
           node -e "const fs = require('fs'); const secrets = { GOOGLE_PRIVATE_KEY: process.env.SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY, ADMIN_BEARER_TOKEN: process.env.SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN }; if (!secrets.GOOGLE_PRIVATE_KEY || !secrets.ADMIN_BEARER_TOKEN) { throw new Error('Missing required staging deploy secrets.'); } fs.writeFileSync('.wrangler-staging-secrets.json', JSON.stringify(secrets));"

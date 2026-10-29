@@ -26,8 +26,11 @@ type SetupSmokeConfig = {
   updateValues: Record<string, unknown>;
 };
 
+export type SetupAdminUi = 'enabled' | 'disabled';
+
 export type SetupConfig = {
   profile: SetupProfile;
+  adminUi: SetupAdminUi;
   privateProject: SetupProjectSection;
   publicReadProject: SetupProjectSection | null;
   smoke: SetupSmokeConfig;
@@ -210,6 +213,7 @@ export function serializeSetupConfig(config: SetupConfig) {
 export function createDefaultSetupConfig(profile: SetupProfile = 'production') {
   return serializeSetupConfig({
     profile,
+    adminUi: 'enabled',
     privateProject: {
       slug: 'demo',
       name: 'Demo',
@@ -244,13 +248,23 @@ export function createDefaultSetupConfig(profile: SetupProfile = 'production') {
   });
 }
 
+function parseSetupAdminUi(input: unknown, legacyDeploy: unknown): SetupAdminUi {
+  if (input === undefined) {
+    return isRecord(legacyDeploy) && legacyDeploy.admin === false ? 'disabled' : 'enabled';
+  }
+  if (input !== 'enabled' && input !== 'disabled') {
+    throw new ScriptError('adminUi must be "enabled" or "disabled".');
+  }
+  return input;
+}
+
 export function parseSetupConfig(input: unknown): SetupConfig {
   if (!isRecord(input)) {
     throw new ScriptError('Setup config must be a JSON object.');
   }
 
   const profile = parseSetupProfile(input.profile);
-
+  const adminUi = parseSetupAdminUi(input.adminUi, input.deploy);
 
   const privateProject = parseProjectSection(input.privateProject, 'privateProject');
   const publicReadProject = input.publicReadProject === undefined || input.publicReadProject === null
@@ -303,6 +317,7 @@ export function parseSetupConfig(input: unknown): SetupConfig {
 
   return {
     profile,
+    adminUi,
     privateProject,
     publicReadProject,
     smoke

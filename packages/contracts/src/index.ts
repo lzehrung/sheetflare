@@ -5,3 +5,4 @@ export * from './table';
 export * from './api';
 export * from './rpc';
 export * from './errors';
+export * from './admin-ui';

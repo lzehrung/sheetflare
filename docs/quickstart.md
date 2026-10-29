@@ -2,7 +2,7 @@
 
 This is the shortest safe path from one Google Sheet tab to a deployed API.
 
-By the end of this guide, you will have a live Cloudflare Worker API serving rows from your sheet, a local admin UI you can launch on demand, and a smoke-tested deployment.
+By the end of this guide, you will have a live Cloudflare Worker API serving rows from your sheet, an admin UI at `<your-worker>/admin/` that works from any browser, and a smoke-tested deployment.
 
 Use this guide when you want Sheetflare to make the setup decisions for you. For CI deploy details, manual fallback commands, or deeper operations, see [deploy.md](./deploy.md), [operator-runbook.md](./operator-runbook.md), and [google-service-accounts.md](./google-service-accounts.md).
 
@@ -80,7 +80,7 @@ Setup can create or update:
 
 - Worker secrets
 - Google Cloud project and service account, when you choose provisioning
-- API Worker deployment
+- API Worker deployment, including the hosted admin UI
 - first Sheetflare project and table
 - initial admin, read, and mutation API keys
 - Google Drive watches for automatic reindexing
@@ -99,15 +99,11 @@ Beginner setup runs verification by default. You can rerun it any time:
 npm run doctor
 ```
 
-`npm run doctor` checks the local config, resolved Google credential source, API Worker `/ready`, and Drive watch coverage. Verification is Worker-only and does not require Wrangler authentication.
+`npm run doctor` checks the local config, resolved Google credential source, API Worker `/ready`, the hosted admin UI, and Drive watch coverage. Verification is Worker-only and does not require Wrangler authentication.
 
-Launch the admin UI after the Worker passes verification:
+Open the admin UI URL that setup printed (`https://<your-worker>/admin/`) and sign in with the admin API key that setup created. It works from any browser, including phones and machines without this repository. The UI keeps the key in memory for the session; let your password manager save it. Use the bootstrap token only for break-glass access.
 
-```powershell
-npm run dev:admin
-```
-
-Open `http://127.0.0.1:4173`. The fixed-port server is loopback-only and automatically targets `apiUrl` from `.sheetflare.setup.local.json`. If `SHEETFLARE_ADMIN_CREDENTIAL` holds a scoped admin API key in the shell that starts the server, the UI loads without a prompt. Otherwise paste a scoped key; the UI keeps it in memory only for the current session. Use the bootstrap token only for break-glass access.
+To skip the hosted admin, set `"adminUi": "disabled"` in `sheetflare.setup.json` and run `npm run setup -- --deploy`. You can still run the loopback admin locally with `npm run dev:admin`; see [deploy.md](./deploy.md#local-admin-ui).
 
 Use these when you only want one step:
 

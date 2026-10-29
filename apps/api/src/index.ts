@@ -4,6 +4,9 @@ import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import { WorkerEntrypoint, exports as workerExports } from 'cloudflare:workers';
 import {
   AppError,
+  adminSessionPath,
+  buildAdminUiHeaders,
+  type AdminSessionResponse,
   adminCreateApiKeyInputSchema,
   adminCreateApiKeyResultSchema,
   adminGetProjectResultSchema,
@@ -118,7 +121,8 @@ const readyResponseSchema = z.object({
     defaultGoogleCredential: z.enum(['configured', 'missing']),
     namedGoogleCredentials: z.enum(['configured', 'missing', 'invalid']),
     googleDriveWebhookSecret: z.enum(['configured', 'missing']),
-    bootstrapAdmin: z.enum(['configured', 'missing'])
+    bootstrapAdmin: z.enum(['configured', 'missing']),
+    adminUi: z.enum(['enabled', 'disabled', 'invalid', 'assets-missing'])
   }),
   notes: z.array(z.string())
 });
@@ -2105,6 +2109,45 @@ export class CachedTableReads extends WorkerEntrypoint<Env, CachedTableReadProps
   }
 }
 
+const adminUiHeaders = buildAdminUiHeaders();
+
+type AdminUiStatus = 'enabled' | 'disabled' | 'invalid' | 'assets-missing';
+
+function getAdminUiStatus(env: Env): AdminUiStatus {
+  const mode = env.ADMIN_UI?.trim() ?? '';
+  if (mode === '' || mode === 'disabled') {
+    return 'disabled';
+  }
+  if (mode !== 'enabled') {
+    return 'invalid';
+  }
+  return env.ASSETS ? 'enabled' : 'assets-missing';
+}
+
+async function serveAdminUi(c: AppContext): Promise<Response> {
+  const status = getAdminUiStatus(c.env);
+  if (status === 'disabled') {
+    throw new NotFoundError('The admin UI is disabled for this deployment.');
+  }
+  if (status === 'invalid') {
+    throw new ServiceUnavailableError('ADMIN_UI must be "enabled" or "disabled".');
+  }
+  if (status === 'assets-missing' || !c.env.ASSETS) {
+    throw new ServiceUnavailableError('The admin UI is enabled but its assets are not deployed.');
+  }
+
+  if (c.req.path === '/admin') {
+    return c.redirect('/admin/', 308);
+  }
+
+  const assetResponse = await c.env.ASSETS.fetch(c.req.raw);
+  const response = new Response(assetResponse.body, assetResponse);
+  for (const [name, value] of Object.entries(adminUiHeaders)) {
+    response.headers.set(name, value);
+  }
+  return response;
+}
+
 function createApp() {
   const app = new OpenAPIHono<{ Bindings: Env; Variables: AppVariables }>();
 
@@ -2222,6 +2265,7 @@ function createApp() {
     const hasAnyGoogleCredential = hasDefaultGoogleCredential || namedGoogleCredentials === 'configured';
     const hasDriveWebhookSecret = Boolean(c.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim());
     const hasBootstrapAdmin = Boolean(c.env.ADMIN_BEARER_TOKEN?.trim());
+    const adminUi = getAdminUiStatus(c.env);
     const notes: string[] = [];
 
     if (!hasDefaultGoogleCredential && namedGoogleCredentials === 'missing') {
@@ -2240,6 +2284,12 @@ function createApp() {
       notes.push('GOOGLE_DRIVE_WEBHOOK_SECRET is not configured. Automatic Drive-watch reindexing is unavailable.');
     }
 
+    if (adminUi === 'invalid') {
+      notes.push('ADMIN_UI must be "enabled" or "disabled". The hosted admin UI returns 503 until it is fixed.');
+    } else if (adminUi === 'assets-missing') {
+      notes.push('ADMIN_UI is enabled but the ASSETS binding is missing. Build the admin UI and redeploy.');
+    }
+
     notes.push('This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.');
 
     return c.json({
@@ -2251,7 +2301,8 @@ function createApp() {
         defaultGoogleCredential: hasDefaultGoogleCredential ? 'configured' : 'missing',
         namedGoogleCredentials,
         googleDriveWebhookSecret: hasDriveWebhookSecret ? 'configured' : 'missing',
-        bootstrapAdmin: hasBootstrapAdmin ? 'configured' : 'missing'
+        bootstrapAdmin: hasBootstrapAdmin ? 'configured' : 'missing',
+        adminUi
       },
       notes
     }, hasAnyGoogleCredential ? 200 : 503);
@@ -2280,6 +2331,13 @@ function createApp() {
       theme: 'default'
     })
   );
+
+  app.get('/admin', serveAdminUi);
+  app.get('/admin/*', serveAdminUi);
+  app.get(adminSessionPath, (c) => {
+    const body: AdminSessionResponse = { serverCredential: false };
+    return c.json(body);
+  });
 
   app.openapi(adminListProjectsRoute, async (c) => {
     const auth = await authenticateRequest(c);

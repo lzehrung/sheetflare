@@ -111,6 +111,7 @@ describe('parseSetupConfig', () => {
 
     expect(config).toMatchObject({
       profile: 'production',
+      adminUi: 'disabled',
       privateProject: {
         slug: 'demo'
       },
@@ -121,6 +122,29 @@ describe('parseSetupConfig', () => {
       }
     });
     expect(config).not.toHaveProperty('deploy');
+  });
+
+  it.each([
+    { name: 'defaults to enabled when unset', extra: {}, expected: 'enabled' },
+    { name: 'keeps an explicit disabled value', extra: { adminUi: 'disabled' }, expected: 'disabled' },
+    { name: 'lets an explicit value override a legacy admin opt-out', extra: { adminUi: 'enabled', deploy: { admin: false } }, expected: 'enabled' },
+    { name: 'keeps a legacy admin opt-in enabled', extra: { deploy: { admin: true } }, expected: 'enabled' }
+  ])('adminUi $name', ({ extra, expected }) => {
+    const parsed: unknown = JSON.parse(createDefaultSetupConfig());
+    if (typeof parsed !== 'object' || parsed === null) {
+      throw new TypeError('Expected the starter config object');
+    }
+
+    expect(parseSetupConfig({ ...parsed, adminUi: undefined, ...extra }).adminUi).toBe(expected);
+  });
+
+  it('rejects unknown adminUi values', () => {
+    const parsed: unknown = JSON.parse(createDefaultSetupConfig());
+    if (typeof parsed !== 'object' || parsed === null) {
+      throw new TypeError('Expected the starter config object');
+    }
+
+    expect(() => parseSetupConfig({ ...parsed, adminUi: 'on' })).toThrow('adminUi must be "enabled" or "disabled".');
   });
 
   it('rejects project-level defaultAuthMode in setup config', () => {

@@ -5,6 +5,7 @@ import { ScriptError } from './runtime';
 
 const privateConfig: SetupConfig = {
   profile: 'production',
+  adminUi: 'enabled',
   privateProject: {
     slug: 'demo',
     name: 'Demo',

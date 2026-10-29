@@ -4,7 +4,8 @@ import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from 'node:h
 import type { ConfigEnv, UserConfig, UserConfigExport } from 'vite';
 import { describe, expect, it } from 'vitest';
 import viteConfig from './vite.config';
-import { adminRequestHeaderName, adminSessionPath } from './src/auth';
+import { adminSessionPath } from '@sheetflare/contracts';
+import { adminRequestHeaderName } from './src/auth';
 import {
   adminResponseHeaders,
   handleAdminSessionRequest,

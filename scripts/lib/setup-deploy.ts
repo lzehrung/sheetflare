@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import * as ts from 'typescript';
 import { getCommandName, runCommand } from './process';
 import { ScriptError } from './runtime';
-import type { SetupProfile } from './setup-config';
+import type { SetupAdminUi, SetupProfile } from './setup-config';
 
 const apiWranglerConfigPath = resolve('apps/api/wrangler.jsonc');
 const stagingApiWranglerConfigPath = resolve('apps/api/wrangler.staging.jsonc');
@@ -63,7 +63,7 @@ function extractWorkersDevUrl(output: string) {
 }
 
 
-export function patchApiConfigForDeploy(config: JsonObject, googleClientEmail: string | null) {
+export function patchApiConfigForDeploy(config: JsonObject, googleClientEmail: string | null, adminUi: SetupAdminUi) {
   const next = structuredClone(config);
   const vars = typeof next.vars === 'object' && next.vars !== null
     ? { ...(next.vars as Record<string, unknown>) }
@@ -73,8 +73,26 @@ export function patchApiConfigForDeploy(config: JsonObject, googleClientEmail: s
   } else {
     delete vars.GOOGLE_CLIENT_EMAIL;
   }
+  vars.ADMIN_UI = adminUi;
   next.vars = vars;
+  if (adminUi === 'disabled') {
+    delete next.assets;
+  }
   return next;
+}
+
+async function buildAdminUi(options: { debug?: boolean }) {
+  const result = await runCommand(
+    getCommandName('npm'),
+    ['--workspace', '@sheetflare/admin', 'run', 'build'],
+    {
+      echoStdout: Boolean(options.debug),
+      echoStderr: Boolean(options.debug)
+    }
+  );
+  if (result.code !== 0) {
+    throw new ScriptError('Admin UI build failed. Fix the build or set "adminUi": "disabled" in the setup config.');
+  }
 }
 
 
@@ -84,10 +102,19 @@ export function buildApiDeployCommand(configPath: string) {
 
 
 
-export async function deployApiWorker(profile: SetupProfile, googleClientEmail: string | null, options: { debug?: boolean } = {}) {
+export async function deployApiWorker(
+  profile: SetupProfile,
+  googleClientEmail: string | null,
+  adminUi: SetupAdminUi,
+  options: { debug?: boolean } = {}
+) {
+  if (adminUi === 'enabled') {
+    await buildAdminUi(options);
+  }
+
   return withPatchedJsonConfig(
     getApiWranglerConfigPath(profile),
-    (config) => patchApiConfigForDeploy(config, googleClientEmail),
+    (config) => patchApiConfigForDeploy(config, googleClientEmail, adminUi),
     async (tempConfigPath) => {
       const result = await runCommand(
         getCommandName('npx'),
