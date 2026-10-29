@@ -17,7 +17,8 @@ const boundary = vi.hoisted(() => {
     stdout: '',
     stderr: ''
   };
-  return { commands, bearers, fetchUrls, bootstrap };
+  const secretPut: { failingName: string | null } = { failingName: null };
+  return { commands, bearers, fetchUrls, bootstrap, secretPut };
 });
 
 vi.mock('./process', async () => {
@@ -35,6 +36,9 @@ vi.mock('./process', async () => {
           stdout: boundary.bootstrap.stdout,
           stderr: boundary.bootstrap.stderr
         };
+      }
+      if (boundary.secretPut.failingName && args.includes(boundary.secretPut.failingName)) {
+        return { code: 1, stdout: '', stderr: 'wrangler secret put failed' };
       }
       return { code: 0, stdout: '', stderr: '' };
     })
@@ -122,6 +126,7 @@ describe('setup Drive watch recovery after webhook secret replacement', () => {
     args: string[];
     baseUrl?: string | null;
     bootstrap?: { code: number; stdout: string; stderr: string };
+    failingSecret?: 'GOOGLE_DRIVE_WEBHOOK_SECRET' | 'ADMIN_BEARER_TOKEN';
     fetch?: typeof fetch;
   }) {
     configDir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-'));
@@ -150,6 +155,7 @@ describe('setup Drive watch recovery after webhook secret replacement', () => {
     boundary.bootstrap.code = options.bootstrap?.code ?? 0;
     boundary.bootstrap.stdout = options.bootstrap?.stdout ?? bootstrapSuccessStdout;
     boundary.bootstrap.stderr = options.bootstrap?.stderr ?? '';
+    boundary.secretPut.failingName = options.failingSecret ?? null;
 
     const warnings: string[] = [];
     const errors: string[] = [];
@@ -239,5 +245,31 @@ describe('setup Drive watch recovery after webhook secret replacement', () => {
     expect(warnings.join('\n')).toContain('npm run ops:watch:drive');
     expect(errors.join('\n')).toContain('Bootstrap failed');
     expect(errors.join('\n')).not.toContain('register failed');
+  });
+
+  it('keeps the previous admin credential for watch re-registration when the ADMIN_BEARER_TOKEN put fails after the webhook secret lands', async () => {
+    const { setup, errors } = await runSetup({
+      args: ['--apply-secrets', '--bootstrap'],
+      baseUrl: 'https://example.workers.dev',
+      failingSecret: 'ADMIN_BEARER_TOKEN'
+    });
+
+    await expect(setup.setupRun).rejects.toThrow('setup exited 1');
+    expect(registerUrls()).toHaveLength(1);
+    expect(boundary.bearers.length).toBeGreaterThan(0);
+    expect(boundary.bearers.every((bearer) => bearer === oldBootstrapToken)).toBe(true);
+    expect(errors.join('\n')).toContain('Failed to apply ADMIN_BEARER_TOKEN');
+  });
+
+  it('does not re-register Drive watches when the GOOGLE_DRIVE_WEBHOOK_SECRET put fails', async () => {
+    const { setup, errors } = await runSetup({
+      args: ['--apply-secrets', '--bootstrap'],
+      baseUrl: 'https://example.workers.dev',
+      failingSecret: 'GOOGLE_DRIVE_WEBHOOK_SECRET'
+    });
+
+    await expect(setup.setupRun).rejects.toThrow('setup exited 1');
+    expect(registerUrls()).toHaveLength(0);
+    expect(errors.join('\n')).toContain('Failed to apply GOOGLE_DRIVE_WEBHOOK_SECRET');
   });
 });

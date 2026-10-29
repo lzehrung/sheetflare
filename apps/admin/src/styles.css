@@ -321,7 +321,7 @@ body {
 
 .scopeGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
   gap: 12px;
   margin-top: 12px;
 }
@@ -329,6 +329,10 @@ body {
 .scopeOption {
   display: grid;
   gap: 4px;
+}
+
+.scopeOption .toggle {
+  flex-wrap: wrap;
 }
 
 .scopeOption .scopeDescription {
