@@ -39,6 +39,8 @@ import {
   reindexTableResultSchema,
   rowParamsSchema,
   tableConfigSchema,
+  spreadsheetWatchNotifyResultSchema,
+  tableDataGenerationSchema,
   BadRequestError,
   ForbiddenError,
   NotFoundError,
@@ -72,6 +74,7 @@ import {
   type ResolvedProjectTableResult,
   type ResolvedTableConfigSnapshot,
   type RateLimitDoResponse,
+  type TableDataGeneration,
   type TableDoResponse,
   TooManyRequestsError,
   type UpdateRowInput,
@@ -340,15 +343,13 @@ const webhookFailureBlocks = new Map<string, WebhookFailureBlock>();
 const corsAllowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
 const corsAllowedHeaders = 'Authorization, Content-Type';
 const cacheStatusHeaderName = 'x-sheetflare-cache-status';
-const cacheInvalidationHeaderName = 'x-sheetflare-cache-invalidation';
 const corsExposedHeaders = [
   'X-Request-Id',
   'X-RateLimit-Limit',
   'X-RateLimit-Remaining',
   'X-RateLimit-Reset',
   'Retry-After',
-  cacheStatusHeaderName,
-  cacheInvalidationHeaderName
+  cacheStatusHeaderName
 ].join(', ');
 
 // Makes room for one more entry: drops expired entries first, then the oldest ones.
@@ -1176,37 +1177,13 @@ function grantsTableRead(auth: AuthContext) {
   return auth.kind === 'bootstrap-admin' || (auth.kind === 'api-key' && hasScope(auth.record, 'table:read'));
 }
 
-// Table reads wait on the caller's rate limit and on the table lookup. Neither depends on the other, so once the
-// caller is known and its key is allowed near this project at all, both run together. A key that may not touch the
-// project never causes a project lookup.
-async function authorizeTableRead(c: AppContext, projectSlug: string, tableSlug: string) {
-  const auth = await identifyCaller(c);
-  assertCredentialProjectBoundary(auth, projectSlug);
+type TableReadTarget = {
+  tableAccess: ResolvedProjectTableResult;
+  /** The table's data generation just before the read. Cached reads are keyed by it. */
+  generation: TableDataGeneration;
+};
 
-  const resolution = settle(loadProjectTable(c, projectSlug, tableSlug));
-  await completeAuthentication(c, auth);
-  const resolved = await resolution;
-
-  if (grantsTableRead(auth)) {
-    if (!resolved.ok) {
-      throw resolved.reason;
-    }
-
-    return resolved.value;
-  }
-
-  // Callers without a read grant may only read public-read projects. Private projects, missing projects, and missing
-  // tables all get the same denial, so the response never reveals which of them exist.
-  if (resolved.ok && resolved.value.project.defaultAuthMode === 'public-read') {
-    return resolved.value;
-  }
-
-  if (!resolved.ok && !isNotFound(resolved.reason)) {
-    throw resolved.reason;
-  }
-
-  throw auth.kind === 'api-key' ? missingScopeError('table:read') : new UnauthorizedError();
-}
+type TableLookup = { readable: true; target: TableReadTarget } | { readable: false };
 
 async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug: string) {
   const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, projectSlug), {
@@ -1219,6 +1196,74 @@ async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug:
     type: 'project.table.resolve.result';
     result: { data: ResolvedProjectTableResult };
   }).result.data;
+}
+
+// Cheap and free of Google calls: the table answers from its own metadata without syncing. It carries the resolved
+// config so the table notices a configuration change before the cache key is built.
+async function loadTableDataGeneration(
+  env: Env,
+  projectSlug: string,
+  tableSlug: string,
+  resolvedConfig: ResolvedTableConfigSnapshot
+): Promise<TableDataGeneration> {
+  const response = await doRpc<TableDoResponse>(getTableStub(env, projectSlug, tableSlug), {
+    type: 'table.generation.get',
+    projectSlug,
+    tableSlug,
+    resolvedConfig
+  });
+  if (response.type !== 'table.generation.get.result') {
+    throw new ServiceUnavailableError('Unexpected table generation response.');
+  }
+
+  const generation = tableDataGenerationSchema.safeParse(response.result);
+  if (!generation.success) {
+    throw new ServiceUnavailableError('Unexpected table generation response.');
+  }
+
+  return generation.data;
+}
+
+// The table lookup and, only when this caller may read the table (a read grant, or a public-read project), the table's
+// data generation. A caller that may not read it never causes a table call.
+async function lookupTableForCaller(
+  c: AppContext,
+  auth: AuthContext,
+  projectSlug: string,
+  tableSlug: string
+): Promise<TableLookup> {
+  const tableAccess = await loadProjectTable(c, projectSlug, tableSlug);
+  if (!grantsTableRead(auth) && tableAccess.project.defaultAuthMode !== 'public-read') {
+    return { readable: false };
+  }
+
+  const generation = await loadTableDataGeneration(c.env, projectSlug, tableSlug, tableAccess.resolvedConfig);
+  return { readable: true, target: { tableAccess, generation } };
+}
+
+// Table reads wait on the caller's rate limit and on the table lookup. Neither depends on the other, so once the
+// caller is known and its key is allowed near this project at all, both run together, and the generation lookup rides
+// along with the table lookup instead of queueing behind the rate limit. A key that may not touch the project never
+// causes a project lookup.
+async function authorizeTableRead(c: AppContext, projectSlug: string, tableSlug: string): Promise<TableReadTarget> {
+  const auth = await identifyCaller(c);
+  assertCredentialProjectBoundary(auth, projectSlug);
+
+  const lookup = settle(lookupTableForCaller(c, auth, projectSlug, tableSlug));
+  await completeAuthentication(c, auth);
+  const looked = await lookup;
+
+  if (looked.ok) {
+    if (looked.value.readable) {
+      return looked.value.target;
+    }
+  } else if (grantsTableRead(auth) || !isNotFound(looked.reason)) {
+    throw looked.reason;
+  }
+
+  // Callers without a read grant may only read public-read projects. Private projects, missing projects, and missing
+  // tables all get the same denial, so the response never reveals which of them exist.
+  throw auth.kind === 'api-key' ? missingScopeError('table:read') : new UnauthorizedError();
 }
 
 async function loadProjectTables(c: { env: Env }, projectSlug: string) {
@@ -1268,49 +1313,54 @@ async function getTableCacheStatusData(c: AppContext, projectSlug: string, table
   return response.result.data;
 }
 
-async function invalidateCachedProject(projectSlug: string) {
-  await workerExports.CachedTableReads.invalidateProject(projectSlug);
-}
-
-async function invalidateCachedTable(projectSlug: string, tableSlug: string) {
-  await workerExports.CachedTableReads.invalidateTable(projectSlug, tableSlug);
-}
-
-async function invalidateCachedRow(projectSlug: string, tableSlug: string, rowId: string) {
-  await workerExports.CachedTableReads.invalidateRow(projectSlug, tableSlug, rowId);
-}
-
-async function invalidateAfterCommittedChange(c: AppContext, invalidate: () => Promise<void>) {
+// Hono throws when a request was dispatched without an ExecutionContext, as unit tests calling `app.request` do. The
+// Workers runtime always supplies one.
+function getExecutionContext(c: AppContext) {
   try {
-    await invalidate();
+    return c.executionCtx;
+  } catch {
+    return null;
+  }
+}
+
+type CachePurgeLogContext = { method: string; path: string; requestId: string };
+
+// A purge failure never reaches the client. It is logged for operators, and the next request is served as usual.
+async function purgeCachedEntriesQuietly(context: CachePurgeLogContext, targets: readonly CachePurgeTarget[]) {
+  try {
+    await workerExports.CachedTableReads.purge(targets);
   } catch (error) {
     const normalizedError = normalizeRequestError(error);
-    c.header(cacheInvalidationHeaderName, 'failed');
-    console.error(JSON.stringify({
+    console.warn(JSON.stringify({
       event: 'cache.invalidation.failed',
-      method: c.req.method,
-      path: c.req.path,
-      requestId: c.get('requestId'),
+      ...context,
       errorName: normalizedError instanceof Error ? normalizedError.name : 'UnknownError',
       errorMessage: normalizedError instanceof Error ? normalizedError.message : String(normalizedError)
     }));
   }
 }
 
-async function invalidateCachedProjectsForSpreadsheet(c: AppContext, spreadsheetId: string) {
-  const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
-    type: 'control.projects.list'
-  });
-  if (response.type !== 'control.projects.list.result') {
-    throw new ServiceUnavailableError('Unexpected control plane projects list response.');
+// Cached reads are keyed by the table's data generation, so an edge entry a committed change superseded can no longer be
+// served, and freshness never depends on this purge. It only frees edge storage ahead of the entry's TTL. That makes it
+// best-effort: one batched call per request, started after the change is committed and finished through waitUntil so the
+// response never waits for it. Workers Cache purge always uses Free-tier limits (a burst of 25 requests, then 5 a
+// minute), so on a busy table most of these calls are expected to be rejected.
+async function purgeCachedEntries(c: AppContext, targets: readonly CachePurgeTarget[]) {
+  if (targets.length === 0) {
+    return;
   }
-  const result = response.result;
 
-  for (const project of result.data) {
-    if (project.spreadsheetId === spreadsheetId) {
-      await invalidateAfterCommittedChange(c, () => invalidateCachedProject(project.slug));
-    }
+  const purge = purgeCachedEntriesQuietly(
+    { method: c.req.method, path: c.req.path, requestId: c.get('requestId') },
+    targets
+  );
+  const executionCtx = getExecutionContext(c);
+  if (executionCtx) {
+    executionCtx.waitUntil(purge);
+    return;
   }
+
+  await purge;
 }
 
 async function getApiKeyRecord(c: { env: Env }, apiKeyId: string) {
@@ -1474,7 +1524,7 @@ const adminCreateProjectRoute = createRoute({
       content: jsonContent(adminGetProjectResultSchema)
     },
     409: {
-      description: 'Project already exists. Repeat the request with upsert=true to replace it intentionally.',
+      description: 'Project already exists. Repeat the request with upsert=true to replace it intentionally. Also returned when another project already uses the spreadsheet with a different Google credential ref: projects that share a spreadsheet must use the same credential ref.',
       content: jsonContent(errorResponseSchema)
     },
     400: badRequestResponse,
@@ -1912,7 +1962,11 @@ const revokeApiKeyRoute = createRoute({
       description: 'Revoke an API key',
       content: jsonContent(okResultSchema)
     },
-    ...protectedRouteErrorResponses
+    ...protectedRouteErrorResponses,
+    404: {
+      description: 'The API key does not exist. Project-scoped admin keys get 403 instead for keys outside their project, whether or not the id exists.',
+      content: jsonContent(errorResponseSchema)
+    }
   }
 });
 
@@ -1925,6 +1979,9 @@ type CachedTableReadOperation =
 
 export type CachedTableReadProps = Readonly<{
   resolvedConfig: ResolvedTableConfigSnapshot;
+  // The table's data generation when the gateway built the cache key. A read that finds the table at another
+  // generation must not be stored, because no later request would look under this key.
+  dataGeneration: number;
 }>;
 
 function noStoreJsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
@@ -2082,17 +2139,40 @@ async function getCachedTableReadCacheStatus(
     throw new ServiceUnavailableError('Unexpected table cache status response.');
   }
 
-  return response.result.data;
+  const status = getTableCacheStatusResultSchema.safeParse(response.result);
+  if (!status.success) {
+    throw new ServiceUnavailableError('Unexpected table cache status response.');
+  }
+
+  return status.data.data;
 }
 
-function getCachedTableReadEdgeTtlSeconds(cacheStatus: GetTableCacheStatusResult['data']) {
-  // TableDO reports a pending external change as stale (`external-change`), so this also keeps entries out of the
-  // edge cache from the Drive notification until the change has been reindexed.
+// An edge entry may live only as long as the table itself would keep serving this data without a resync, which is its
+// TTL counted from the last sync and not from the moment the entry is stored. A table that is stale, not ready, or out
+// of freshness stores nothing. TableDO reports a pending external change as stale (`external-change`), so nothing is
+// stored from a Drive notification until the change has been reindexed.
+function getCachedTableReadEdgeTtlSeconds(
+  cacheStatus: GetTableCacheStatusResult['data'],
+  keyedDataGeneration: number,
+  nowMs: number
+) {
   if (cacheStatus.cacheTtlSeconds <= 0 || cacheStatus.status !== 'ready' || cacheStatus.stale) {
     return 0;
   }
 
-  return cacheStatus.cacheTtlSeconds;
+  // The table moved on while this read ran (a write, a sync, a config change), so the key was built for an earlier
+  // generation and no later request would look under it.
+  if (cacheStatus.dataGeneration !== keyedDataGeneration || cacheStatus.lastSyncCompletedAt === null) {
+    return 0;
+  }
+
+  const lastSyncMs = Date.parse(cacheStatus.lastSyncCompletedAt);
+  if (Number.isNaN(lastSyncMs)) {
+    return 0;
+  }
+
+  const remainingSeconds = Math.floor(cacheStatus.cacheTtlSeconds - (nowMs - lastSyncMs) / 1000);
+  return Math.min(cacheStatus.cacheTtlSeconds, Math.max(0, remainingSeconds));
 }
 
 function getCachedTableReadTags(operation: CachedTableReadOperation) {
@@ -2109,8 +2189,7 @@ function getCachedTableReadTags(operation: CachedTableReadOperation) {
   ];
 }
 
-function cachedTableReadSuccessHeaders(operation: CachedTableReadOperation, cacheStatus: GetTableCacheStatusResult['data']) {
-  const edgeTtlSeconds = getCachedTableReadEdgeTtlSeconds(cacheStatus);
+function cachedTableReadSuccessHeaders(operation: CachedTableReadOperation, edgeTtlSeconds: number) {
   const cacheTags = serializeCacheTags(getCachedTableReadTags(operation));
   const headers = new Headers({
     'cache-control': 'private, no-store'
@@ -2133,13 +2212,16 @@ function cachedTableReadSuccessHeaders(operation: CachedTableReadOperation, cach
 async function cachedTableReadSuccessResponse(
   env: Env,
   operation: CachedTableReadOperation,
-  resolvedConfig: ResolvedTableConfigSnapshot
+  props: CachedTableReadProps
 ) {
-  const result = await runCachedTableRead(env, operation, resolvedConfig);
+  const result = await runCachedTableRead(env, operation, props.resolvedConfig);
   const parsed = parseCachedTableReadResult(operation, result);
-  const cacheStatus = await getCachedTableReadCacheStatus(env, operation, resolvedConfig);
+  const cacheStatus = await getCachedTableReadCacheStatus(env, operation, props.resolvedConfig);
   return Response.json(parsed, {
-    headers: cachedTableReadSuccessHeaders(operation, cacheStatus)
+    headers: cachedTableReadSuccessHeaders(
+      operation,
+      getCachedTableReadEdgeTtlSeconds(cacheStatus, props.dataGeneration, Date.now())
+    )
   });
 }
 
@@ -2217,8 +2299,7 @@ async function buildCachedTableReadConfigVersion(tableAccess: ResolvedProjectTab
   }));
 }
 
-type CachedTableReadFetchOptions = {
-  tableAccess: ResolvedProjectTableResult;
+type CachedTableReadFetchOptions = TableReadTarget & {
   query?: ListRowsQuery;
 };
 
@@ -2244,6 +2325,8 @@ async function createCachedTableReadRequest(c: AppContext, pathname: string, opt
   cacheKey.search = url.search;
   cacheKey.searchParams.set('__sf_auth', options.tableAccess.project.defaultAuthMode);
   cacheKey.searchParams.set('__sf_config', await buildCachedTableReadConfigVersion(options.tableAccess));
+  // A committed change moves the table to a new generation, which makes every older entry unreachable without a purge.
+  cacheKey.searchParams.set('__sf_gen', String(options.generation.dataGeneration));
 
   return {
     request: new Request(url, {
@@ -2258,7 +2341,8 @@ async function fetchCachedTableRead(c: AppContext, pathname: string, options: Ca
   const { request, cacheKey } = await createCachedTableReadRequest(c, pathname, options);
   return workerExports.CachedTableReads({
     props: {
-      resolvedConfig: options.tableAccess.resolvedConfig
+      resolvedConfig: options.tableAccess.resolvedConfig,
+      dataGeneration: options.generation.dataGeneration
     }
   }).fetch(request, {
     cf: {
@@ -2348,6 +2432,36 @@ function getRowCacheTag(projectSlug: string, tableSlug: string, rowId: string) {
   return `row:${encodeCacheTagPart(projectSlug)}:${encodeCacheTagPart(tableSlug)}:${encodeCacheTagPart(rowId)}`;
 }
 
+// Workers Cache accepts at most this many tags in one purge request.
+const maxPurgeTagsPerRequest = 100;
+
+export type CachePurgeTarget =
+  | { kind: 'project'; projectSlug: string }
+  | { kind: 'table'; projectSlug: string; tableSlug: string }
+  | { kind: 'row'; projectSlug: string; tableSlug: string; rowId: string };
+
+// The tags the targets cover, once each. A row whose tag cannot be a valid Cache-Tag has no entry stored under it, so
+// its table tag alone covers it.
+function collectPurgeTags(targets: readonly CachePurgeTarget[]) {
+  const tags = new Set<string>();
+  for (const target of targets) {
+    if (target.kind === 'project') {
+      tags.add(getProjectCacheTag(target.projectSlug));
+      continue;
+    }
+
+    tags.add(getTableCacheTag(target.projectSlug, target.tableSlug));
+    if (target.kind === 'row') {
+      const rowTag = getRowCacheTag(target.projectSlug, target.tableSlug, target.rowId);
+      if (isValidCacheTag(rowTag)) {
+        tags.add(rowTag);
+      }
+    }
+  }
+
+  return [...tags];
+}
+
 export class CachedTableReads extends WorkerEntrypoint<Env, CachedTableReadProps> {
   async fetch(request: Request): Promise<Response> {
     if (request.method === 'HEAD') {
@@ -2377,43 +2491,35 @@ export class CachedTableReads extends WorkerEntrypoint<Env, CachedTableReadProps
       return await cachedTableReadSuccessResponse(
         this.env,
         parseCachedTableReadRequest(request),
-        this.ctx.props.resolvedConfig
+        this.ctx.props
       );
     } catch (error) {
       return noStoreErrorResponse(error);
     }
   }
 
-  private async purgeTags(tags: string[]): Promise<void> {
+  // Deletes the edge entries the targets superseded. The gateway calls it over RPC as best-effort cleanup: reads are
+  // keyed by the table's data generation, so freshness never depends on a purge. Tags go out in as few purge requests
+  // as the limit of 100 tags per request allows.
+  async purge(targets: readonly CachePurgeTarget[]): Promise<void> {
+    const tags = collectPurgeTags(targets);
+    if (tags.length === 0) {
+      return;
+    }
+
     const workerCache = this.ctx.cache;
     if (!workerCache) {
       throw new ServiceUnavailableError('Workers Cache purge API is unavailable.');
     }
 
-    const result = await workerCache.purge({ tags });
-    if (!result.success) {
-      const failures = result.errors.map(({ code, message }) => `${code}: ${message}`).join('; ');
-      const suffix = failures ? `: ${failures}` : '.';
-      throw new Error(`Workers Cache purge was unsuccessful${suffix}`);
+    for (let start = 0; start < tags.length; start += maxPurgeTagsPerRequest) {
+      const result = await workerCache.purge({ tags: tags.slice(start, start + maxPurgeTagsPerRequest) });
+      if (!result.success) {
+        const failures = result.errors.map(({ code, message }) => `${code}: ${message}`).join('; ');
+        const suffix = failures ? `: ${failures}` : '.';
+        throw new Error(`Workers Cache purge was unsuccessful${suffix}`);
+      }
     }
-  }
-
-  async invalidateProject(projectSlug: string): Promise<void> {
-    await this.purgeTags([getProjectCacheTag(projectSlug)]);
-  }
-
-  async invalidateTable(projectSlug: string, tableSlug: string): Promise<void> {
-    await this.purgeTags([getTableCacheTag(projectSlug, tableSlug)]);
-  }
-
-  async invalidateRow(projectSlug: string, tableSlug: string, rowId: string): Promise<void> {
-    const tags = [getTableCacheTag(projectSlug, tableSlug)];
-    const rowTag = getRowCacheTag(projectSlug, tableSlug, rowId);
-    if (isValidCacheTag(rowTag)) {
-      tags.push(rowTag);
-    }
-
-    await this.purgeTags(tags);
   }
 }
 
@@ -2729,7 +2835,7 @@ function createApp() {
       result: { data: AdminGetProjectResult; created: boolean };
     }).result;
     if (!result.created) {
-      await invalidateAfterCommittedChange(c, () => invalidateCachedProject(result.data.project.slug));
+      await purgeCachedEntries(c, [{ kind: 'project', projectSlug: result.data.project.slug }]);
     }
     return c.json(result.data, result.created ? 201 : 200);
   });
@@ -2751,7 +2857,7 @@ function createApp() {
       type: 'project.delete.result';
       result: DeleteProjectResult;
     }).result;
-    await invalidateAfterCommittedChange(c, () => invalidateCachedProject(project));
+    await purgeCachedEntries(c, [{ kind: 'project', projectSlug: project }]);
 
     return c.json(result);
   });
@@ -2823,7 +2929,7 @@ function createApp() {
       result: { data: UpsertTableResult['data']; created: boolean };
     }).result;
     if (!result.created) {
-      await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, result.data.tableSlug));
+      await purgeCachedEntries(c, [{ kind: 'table', projectSlug: project, tableSlug: result.data.tableSlug }]);
     }
     return c.json(
       { data: result.data },
@@ -2845,29 +2951,29 @@ function createApp() {
       type: 'project.table.delete.result';
       result: DeleteTableResult;
     }).result;
-    await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
+    await purgeCachedEntries(c, [{ kind: 'table', projectSlug: project, tableSlug: table }]);
 
     return c.json(result);
   });
 
   app.openapi(listRowsRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
-    const tableAccess = await authorizeTableRead(c, params.project, params.table);
+    const target = await authorizeTableRead(c, params.project, params.table);
     const query = parseListRowsQuery(c);
     return passThroughCachedReadResponse(await fetchCachedTableRead(
       c,
       `${cachedTableReadBasePath(params.project, params.table)}/rows`,
-      { tableAccess, query }
+      { ...target, query }
     ));
   });
 
   app.openapi(getSchemaRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
-    const tableAccess = await authorizeTableRead(c, params.project, params.table);
+    const target = await authorizeTableRead(c, params.project, params.table);
     return passThroughCachedReadResponse(await fetchCachedTableRead(
       c,
       `${cachedTableReadBasePath(params.project, params.table)}/schema`,
-      { tableAccess }
+      target
     ));
   });
 
@@ -2896,7 +3002,7 @@ function createApp() {
       throw new ServiceUnavailableError('Unexpected table cache refresh response.');
     }
     if (cacheStatusBeforeRefresh.status !== 'ready' || cacheStatusBeforeRefresh.stale) {
-      await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
+      await purgeCachedEntries(c, [{ kind: 'table', projectSlug: project, tableSlug: table }]);
     }
     return c.json(response.result);
   });
@@ -2915,7 +3021,7 @@ function createApp() {
     if (response.type !== 'table.reindex.result') {
       throw new ServiceUnavailableError('Unexpected table reindex response.');
     }
-    await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
+    await purgeCachedEntries(c, [{ kind: 'table', projectSlug: project, tableSlug: table }]);
     return c.json(response.result);
   });
 
@@ -3024,9 +3130,18 @@ function createApp() {
     if (response.type !== 'control.spreadsheet-watch.notify.result') {
       throw new ServiceUnavailableError('Unexpected control plane spreadsheet watch notify response.');
     }
-    const result = response.result;
-    if (result.accepted && result.spreadsheetId && result.debounceUntil) {
-      await invalidateCachedProjectsForSpreadsheet(c, result.spreadsheetId);
+    const notified = spreadsheetWatchNotifyResultSchema.safeParse(response.result);
+    if (!notified.success) {
+      throw new ServiceUnavailableError('Unexpected control plane spreadsheet watch notify response.');
+    }
+    // Only a notification that recorded a new content change can have superseded cached reads. Sync messages and
+    // replayed or out-of-order deliveries change nothing, so they cost no purge. The result names the projects on the
+    // spreadsheet, which spares the registry scan.
+    if (notified.data.changed) {
+      await purgeCachedEntries(
+        c,
+        notified.data.projectSlugs.map((projectSlug): CachePurgeTarget => ({ kind: 'project', projectSlug }))
+      );
     }
 
     return new Response(null, { status: 204 });
@@ -3034,11 +3149,11 @@ function createApp() {
 
   app.openapi(getRowRoute, async (c) => {
     const params = parsePathParams(c, rowParamsSchema);
-    const tableAccess = await authorizeTableRead(c, params.project, params.table);
+    const target = await authorizeTableRead(c, params.project, params.table);
     return passThroughCachedReadResponse(await fetchCachedTableRead(
       c,
       `${cachedTableReadBasePath(params.project, params.table)}/rows/${encodeURIComponent(params.id)}`,
-      { tableAccess }
+      target
     ));
   });
 
@@ -3058,7 +3173,7 @@ function createApp() {
     if (response.type !== 'table.row.create.result') {
       throw new ServiceUnavailableError('Unexpected table row create response.');
     }
-    await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
+    await purgeCachedEntries(c, [{ kind: 'table', projectSlug: project, tableSlug: table }]);
     return c.json(response.result, 201);
   });
 
@@ -3079,7 +3194,7 @@ function createApp() {
     if (response.type !== 'table.row.update.result') {
       throw new ServiceUnavailableError('Unexpected table row update response.');
     }
-    await invalidateAfterCommittedChange(c, () => invalidateCachedRow(project, table, id));
+    await purgeCachedEntries(c, [{ kind: 'row', projectSlug: project, tableSlug: table, rowId: id }]);
     return c.json(response.result);
   });
 
@@ -3098,7 +3213,7 @@ function createApp() {
     if (response.type !== 'table.row.delete.result') {
       throw new ServiceUnavailableError('Unexpected table row delete response.');
     }
-    await invalidateAfterCommittedChange(c, () => invalidateCachedRow(project, table, id));
+    await purgeCachedEntries(c, [{ kind: 'row', projectSlug: project, tableSlug: table, rowId: id }]);
     return c.json(response.result);
   });
 
