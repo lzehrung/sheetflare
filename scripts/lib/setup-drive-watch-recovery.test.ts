@@ -70,7 +70,7 @@ function responseFor(url: string) {
   if (url.endsWith('/watches/register') || url.endsWith('/watches')) {
     return {
       data: url.endsWith('/watches/register')
-        ? [{ spreadsheetId, channelId: 'channel-1' }]
+        ? [{ spreadsheetId, channelId: 'channel-1', lastWatchError: null }]
         : [activeWatch]
     };
   }
@@ -136,8 +136,12 @@ describe('setup Drive watch recovery after webhook secret replacement', () => {
     }
 
     const warnings: string[] = [];
+    const logs: string[] = [];
     vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
       warnings.push(args.map((arg) => String(arg)).join(' '));
+    });
+    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      logs.push(args.map((arg) => String(arg)).join(' '));
     });
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('runSetup must not call process.exit');
@@ -164,6 +168,7 @@ describe('setup Drive watch recovery after webhook secret replacement', () => {
     return {
       run: () => runSetup(cliOptions, { runCommand, fetch: fetchImpl, prompter: null, env }),
       warnings,
+      logs,
       exitSpy
     };
   }
@@ -255,6 +260,61 @@ describe('setup Drive watch recovery after webhook secret replacement', () => {
     expect(boundary.bearers.every((bearer) => bearer === oldBootstrapToken)).toBe(true);
     const message = failure instanceof Error ? failure.message : String(failure);
     expect(message).toContain('Failed to apply ADMIN_BEARER_TOKEN');
+  });
+
+  it('counts only the healthy watch when registration also returns a credential-conflict placeholder', async () => {
+    const conflictSpreadsheetId = 'sheet-conflict';
+    const conflictError = 'Spreadsheet sheet-conflict is registered with conflicting Google credential refs "default", "other". Projects that share a spreadsheet must use the same credential ref.';
+    const healthyRegistration = {
+      spreadsheetId,
+      channelId: 'channel-1',
+      lastWatchError: null
+    };
+    const conflictRegistration = {
+      spreadsheetId: conflictSpreadsheetId,
+      channelId: `credential-conflict:${conflictSpreadsheetId}`,
+      lastWatchError: conflictError
+    };
+    const { run, warnings, logs, exitSpy } = await runSetupWithDeps({
+      args: ['--apply-secrets', '--bootstrap'],
+      baseUrl: 'https://example.workers.dev',
+      fetch: async (input, init) => {
+        rememberBearer(init);
+        const url = String(input);
+        boundary.fetchUrls.push(url);
+        if (url.endsWith('/watches/register')) {
+          return Response.json({
+            data: [healthyRegistration, conflictRegistration]
+          });
+        }
+        if (url.endsWith('/watches')) {
+          return Response.json({
+            data: [
+              activeWatch,
+              {
+                ...activeWatch,
+                spreadsheetId: conflictSpreadsheetId,
+                channelId: conflictRegistration.channelId,
+                resourceId: conflictRegistration.channelId,
+                expirationAt: null,
+                lastWatchError: conflictError
+              }
+            ]
+          });
+        }
+        return Response.json(responseFor(url));
+      }
+    });
+
+    await expect(run()).resolves.toBeUndefined();
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(registerUrls()).toHaveLength(1);
+    expect(logs.join('\n')).toContain('Registered or renewed 1 spreadsheet watch');
+    expect(logs.join('\n')).not.toContain('Registered or renewed 2');
+    const warningText = warnings.join('\n');
+    expect(warningText).toContain(conflictSpreadsheetId);
+    expect(warningText).toContain(conflictError);
+    expect(warningText).toContain('npm run ops:watch:drive');
   });
 
   it('does not re-register Drive watches when the GOOGLE_DRIVE_WEBHOOK_SECRET put fails', async () => {

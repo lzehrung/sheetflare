@@ -17,7 +17,8 @@ describe('registerDriveWatches', () => {
         data: [
           {
             spreadsheetId: 'sheet-1',
-            channelId: 'channel-sheet-1'
+            channelId: 'channel-sheet-1',
+            lastWatchError: null
           }
         ]
       })
@@ -32,7 +33,8 @@ describe('registerDriveWatches', () => {
     })).resolves.toEqual([
       {
         spreadsheetId: 'sheet-1',
-        channelId: 'channel-sheet-1'
+        channelId: 'channel-sheet-1',
+        lastWatchError: null
       }
     ]);
 

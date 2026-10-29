@@ -214,17 +214,27 @@ async function registerDriveWatchesIfPossible(options: {
       retries: 2,
       retryDelayMs: 1000
     });
+    const registered = result.filter((watch) => watch.lastWatchError === null);
     const visibleSpreadsheetIds = new Set(verified.map((watch) => watch.spreadsheetId));
-    const missingSpreadsheetIds = result
+    const missingSpreadsheetIds = registered
       .map((watch) => watch.spreadsheetId)
       .filter((spreadsheetId) => !visibleSpreadsheetIds.has(spreadsheetId));
+
+    for (const watch of result) {
+      if (watch.lastWatchError === null) {
+        continue;
+      }
+      console.warn(
+        `Warning: Skipped Drive watch registration for ${watch.spreadsheetId}: ${watch.lastWatchError} Align the Google credential refs on every project for that spreadsheet, then run: npm run ops:watch:drive`
+      );
+    }
 
     if (missingSpreadsheetIds.length > 0) {
       console.warn(
         `Warning: Drive watch registration returned success, but status has not yet confirmed spreadsheet watch visibility for ${missingSpreadsheetIds.join(', ')}. Re-check with npm run ops:watch:drive:status.`
       );
     } else {
-      logSuccess(`Registered or renewed ${result.length} spreadsheet watch${result.length === 1 ? '' : 'es'}`);
+      logSuccess(`Registered or renewed ${registered.length} spreadsheet watch${registered.length === 1 ? '' : 'es'}`);
     }
     return result;
   } catch (error) {
