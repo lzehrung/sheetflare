@@ -383,6 +383,7 @@ describe('App', () => {
               issues: [],
               validatedAt: '2026-04-26T00:00:01.000Z'
             },
+            dataGeneration: 0,
             externalChange: {
               pending: false,
               lastChangedAt: null,
@@ -410,6 +411,7 @@ describe('App', () => {
               issues: [],
               validatedAt: '2026-04-27T00:00:01.000Z'
             },
+            dataGeneration: 0,
             externalChange: {
               pending: false,
               lastChangedAt: null,
@@ -634,6 +636,7 @@ describe('App', () => {
               issues: [],
               validatedAt: '2026-04-26T00:00:01.000Z'
             },
+            dataGeneration: 0,
             externalChange: {
               pending: false,
               lastChangedAt: null,
@@ -742,6 +745,7 @@ describe('App', () => {
               ],
               validatedAt: '2026-04-26T00:00:01.000Z'
             },
+            dataGeneration: 0,
             externalChange: {
               pending: false,
               lastChangedAt: null,
@@ -771,6 +775,7 @@ describe('App', () => {
               issues: [],
               validatedAt: '2026-04-26T00:00:03.000Z'
             },
+            dataGeneration: 0,
             externalChange: {
               pending: false,
               lastChangedAt: null,
@@ -1356,6 +1361,7 @@ describe('App', () => {
               issues: [],
               validatedAt: '2026-04-26T00:00:01.000Z'
             },
+            dataGeneration: 0,
             externalChange: {
               pending: false,
               lastChangedAt: null,
@@ -1473,6 +1479,7 @@ describe('App', () => {
               issues: [],
               validatedAt: '2026-04-26T00:00:01.000Z'
             },
+            dataGeneration: 0,
             externalChange: {
               pending: false,
               lastChangedAt: null,

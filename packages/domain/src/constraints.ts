@@ -1,4 +1,6 @@
+import { z } from 'zod';
 import type { FieldFilter, FieldRule, FieldRules, QueryScalarValue, RowFilter, RowRecord } from '@sheetflare/contracts';
+import { BadRequestError } from '@sheetflare/contracts';
 
 export type ConstraintViolationCode = 'REQUIRED' | 'TYPE' | 'ENUM';
 
@@ -26,13 +28,10 @@ export function normalizeFieldRule(rule: FieldRule | undefined): FieldRule | und
   };
 }
 
-function isIsoDateString(value: string) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00.000Z`));
-}
-
-function isIsoDateTimeString(value: string) {
-  return /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
-}
+// Zod's ISO validators check month lengths and leap years. Date.parse is not a calendar check:
+// it rolls 2026-02-30 over to March 2 instead of rejecting it.
+const isoDateSchema = z.iso.date();
+const isoDateTimeSchema = z.iso.datetime({ offset: true, local: true });
 
 function isCanonicalNumberString(value: string) {
   return /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value);
@@ -76,20 +75,18 @@ export function coerceFieldRuleValue(
   }
 }
 
+// Filter operands use the same normalization and coercion as stored values (see
+// canonicalizeFieldValue), so they compare equally against indexed cells and scanned rows.
 function coerceFieldRuleScalarValue(
   value: QueryScalarValue | undefined,
   rule: FieldRule | undefined
 ): QueryScalarValue | undefined {
-  const coerced = coerceFieldRuleValue(value, rule);
-  if (coerced === undefined || coerced === null) {
-    return coerced;
+  if (value === undefined) {
+    return undefined;
   }
 
-  if (Array.isArray(coerced)) {
-    return value;
-  }
-
-  return coerced;
+  const canonical = canonicalizeFieldValue(value, rule);
+  return Array.isArray(canonical) ? value : canonical;
 }
 
 function coerceComparableFieldRuleScalarValue(
@@ -98,6 +95,11 @@ function coerceComparableFieldRuleScalarValue(
 ): string | number | undefined {
   const coerced = coerceFieldRuleScalarValue(value, rule);
   return typeof coerced === 'string' || typeof coerced === 'number' ? coerced : value;
+}
+
+// Pattern operators match substrings, so only case folding applies; trimming would change the pattern.
+function normalizePatternOperand(value: string, rule: FieldRule | undefined) {
+  return rule?.normalize?.includes('lowercase') ? value.toLowerCase() : value;
 }
 
 export function coerceFieldFilterDefinition(definition: FieldFilter, rule: FieldRule | undefined): FieldFilter {
@@ -111,8 +113,43 @@ export function coerceFieldFilterDefinition(definition: FieldFilter, rule: Field
     ...(definition.in !== undefined
       ? { in: definition.in.map((value) => coerceFieldRuleScalarValue(value, rule) ?? null) }
       : {}),
-    ...(definition.contains !== undefined ? { contains: definition.contains } : {}),
-    ...(definition.startsWith !== undefined ? { startsWith: definition.startsWith } : {}),
+    ...(definition.contains !== undefined ? { contains: normalizePatternOperand(definition.contains, rule) } : {}),
+    ...(definition.startsWith !== undefined ? { startsWith: normalizePatternOperand(definition.startsWith, rule) } : {}),
+    ...(definition.isNull !== undefined ? { isNull: definition.isNull } : {})
+  };
+}
+
+function toRowNumberOperand(value: string | number | boolean): number {
+  if (typeof value === 'number') {
+    return value;
+  }
+
+  if (typeof value === 'string' && isCanonicalNumberString(value)) {
+    return Number(value);
+  }
+
+  throw new BadRequestError('rowNumber filters require numeric values.', { field: 'rowNumber' });
+}
+
+function toNullableRowNumberOperand(value: QueryScalarValue): number | null {
+  return value === null ? null : toRowNumberOperand(value);
+}
+
+// Indexed SQL compares row numbers as SQLite integers (with type affinity) while scans compare
+// JavaScript numbers. Canonicalize operands once so both paths see the same numeric filter.
+function canonicalizeRowNumberFilter(definition: FieldFilter): FieldFilter {
+  if (definition.startsWith !== undefined || definition.contains !== undefined) {
+    throw new BadRequestError('rowNumber filters do not support startsWith or contains.', { field: 'rowNumber' });
+  }
+
+  return {
+    ...(definition.eq !== undefined ? { eq: toNullableRowNumberOperand(definition.eq) } : {}),
+    ...(definition.neq !== undefined ? { neq: toNullableRowNumberOperand(definition.neq) } : {}),
+    ...(definition.gt !== undefined ? { gt: toRowNumberOperand(definition.gt) } : {}),
+    ...(definition.gte !== undefined ? { gte: toRowNumberOperand(definition.gte) } : {}),
+    ...(definition.lt !== undefined ? { lt: toRowNumberOperand(definition.lt) } : {}),
+    ...(definition.lte !== undefined ? { lte: toRowNumberOperand(definition.lte) } : {}),
+    ...(definition.in !== undefined ? { in: definition.in.map(toNullableRowNumberOperand) } : {}),
     ...(definition.isNull !== undefined ? { isNull: definition.isNull } : {})
   };
 }
@@ -123,7 +160,11 @@ export function coerceRowFilter(filter: RowFilter | null, fieldRules: FieldRules
   }
 
   const normalizedEntries = Object.entries(filter).map(([field, definition]) => {
-    if (field === 'id' || field === 'rowNumber') {
+    if (field === 'rowNumber') {
+      return [field, canonicalizeRowNumberFilter(definition)] as const;
+    }
+
+    if (field === 'id') {
       return [field, definition] as const;
     }
 
@@ -142,9 +183,9 @@ function matchesConstrainedType(value: RowRecord[string] | undefined, expectedTy
     case 'boolean':
       return typeof value === 'boolean';
     case 'date':
-      return typeof value === 'string' && isIsoDateString(value);
+      return typeof value === 'string' && isoDateSchema.safeParse(value).success;
     case 'datetime':
-      return typeof value === 'string' && isIsoDateTimeString(value);
+      return typeof value === 'string' && isoDateTimeSchema.safeParse(value).success;
   }
 }
 
@@ -189,6 +230,15 @@ export function normalizeFieldValue(value: RowRecord[string], rule: FieldRule | 
   }
 
   return normalized;
+}
+
+/**
+ * The comparable form of a field value: the field's write-time normalization followed by its
+ * type coercion. Unique checks, indexed cache cells, scan filters, and sorting all compare this
+ * form, so `Alice@Example.com ` and `alice@example.com` collide on a trim+lowercase unique field.
+ */
+export function canonicalizeFieldValue(value: RowRecord[string], rule: FieldRule | undefined): RowRecord[string] {
+  return coerceFieldRuleValue(normalizeFieldValue(value, rule), rule) ?? null;
 }
 
 export function applyFieldRuleNormalization(values: RowRecord, fieldRules: FieldRules | undefined): RowRecord {

@@ -32,6 +32,7 @@ describe('timingSafeEqualSecret', () => {
   });
 });
 
+
 describe('CachedTableReads', () => {
   it('sets client-safe and Workers Cache headers for list rows', async () => {
     const { entrypoint } = createCachedTableReadsHarness(createEnv({ tableCacheTtlSeconds: 42 }));
@@ -2258,6 +2259,7 @@ describe('api routes', () => {
         rowCount: 2,
         lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
         lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
+        dataGeneration: 0,
         lastSyncError: null,
         validation: {
           status: 'ok',
@@ -2265,6 +2267,7 @@ describe('api routes', () => {
           issues: [],
           validatedAt: '2026-04-26T00:00:02.000Z'
         },
+        dataGeneration: 0,
         externalChange: {
           pending: false,
           lastChangedAt: null,
@@ -2464,6 +2467,7 @@ describe('api routes', () => {
         rowCount: 3,
         lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
         lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
+        dataGeneration: 0,
         lastSyncError: null,
         validation: {
           status: 'ok',
@@ -2471,6 +2475,7 @@ describe('api routes', () => {
           issues: [],
           validatedAt: '2026-04-26T00:00:03.000Z'
         },
+        dataGeneration: 0,
         externalChange: {
           pending: false,
           lastChangedAt: null,

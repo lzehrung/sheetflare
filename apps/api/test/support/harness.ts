@@ -735,6 +735,7 @@ export function createEnv(options?: {
             rowCount: 2,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
+            dataGeneration: 0,
             lastSyncError: null,
             validation: {
               status: 'ok',
@@ -767,6 +768,7 @@ export function createEnv(options?: {
             rowCount: 3,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
+            dataGeneration: 0,
             lastSyncError: null,
             validation: {
               status: 'ok',
@@ -799,6 +801,7 @@ export function createEnv(options?: {
             rowCount: 3,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
+            dataGeneration: 0,
             lastSyncError: null,
             validation: {
               status: 'ok',

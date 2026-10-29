@@ -10,6 +10,14 @@ export interface QueryValidationResult {
 
 const rangeOperators = ['gt', 'gte', 'lt', 'lte'] as const;
 
+// String-pattern operators cannot use the (field_name, value_text) index as a bounded range,
+// so they always run as scans guarded by TABLE_MAX_FULL_SCAN_ROWS.
+const scanHeavyOperators = ['contains', 'startsWith'] as const;
+
+function usesScanHeavyOperator(definition: FieldFilter) {
+  return scanHeavyOperators.some((operator) => definition[operator] !== undefined);
+}
+
 export function getIndexedFieldSet(indexedFields: readonly string[]) {
   return new Set(indexedFields);
 }
@@ -140,7 +148,7 @@ export function validateFilterCapabilities(filter: RowFilter | null, indexedFiel
   for (const [field, definition] of Object.entries(filter)) {
     assertQueryableField(field, indexedFields, { allowId: true, allowRowNumber: true });
 
-    if (definition.contains !== undefined) {
+    if (usesScanHeavyOperator(definition)) {
       requiresFullScan = true;
     }
   }
@@ -211,7 +219,7 @@ function applyRowNumberFilter(definition: FieldFilter, conditions: string[], par
   applyScalarFilter({
     fieldSql: 'cr.row_number',
     kindSql: null,
-    textSql: 'CAST(cr.row_number AS TEXT)',
+    textSql: null,
     numberSql: 'cr.row_number',
     booleanSql: null,
     definition,
@@ -250,7 +258,7 @@ function applyIndexedFieldFilter(alias: string, definition: FieldFilter) {
   return {
     conditions,
     parameters,
-    requiresFullScan: definition.contains !== undefined
+    requiresFullScan: usesScanHeavyOperator(definition)
   };
 }
 
@@ -307,13 +315,10 @@ function applyScalarFilter(options: {
     if (!options.textSql) {
       throw new BadRequestError('startsWith is not supported for this field.');
     }
-    if (options.kindSql) {
-      conditions.push(`${options.kindSql} = 'string' AND ${options.textSql} LIKE ? ESCAPE '\\'`);
-      parameters.push(`${escapeLikePattern(definition.startsWith)}%`);
-    } else {
-      conditions.push(`${options.textSql} LIKE ? ESCAPE '\\'`);
-      parameters.push(`${escapeLikePattern(definition.startsWith)}%`);
-    }
+    // instr compares characters exactly, unlike LIKE, which folds ASCII case in SQLite.
+    const prefixSql = `instr(${options.textSql}, ?) = 1`;
+    conditions.push(options.kindSql ? `${options.kindSql} = 'string' AND ${prefixSql}` : prefixSql);
+    parameters.push(definition.startsWith);
   }
 
   if (definition.contains !== undefined) {

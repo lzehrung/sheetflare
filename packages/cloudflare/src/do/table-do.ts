@@ -17,6 +17,7 @@ import {
   type TableRequestContext,
   type TableDoResponse,
   type ResolvedTableConfigSnapshot,
+  type TableDataGeneration,
   type TableExternalChange,
   type TableValidationSummary,
   type TableValidationIssue
@@ -25,6 +26,7 @@ import {
   applyFieldRuleNormalization,
   assertQueryableField,
   buildFilterSql,
+  canonicalizeFieldValue,
   compareStableStrings,
   compareQueryValues,
   compareRangeQueryValues,
@@ -45,6 +47,7 @@ import {
 } from '@sheetflare/domain';
 import {
   GoogleSheetsService,
+  isUnconfirmedWriteFailure,
   type GoogleSheetHeaderLayout,
   type GoogleSheetTableConfig
 } from '@sheetflare/google-sheets';
@@ -84,6 +87,22 @@ const emptyExternalChangeState: TableExternalChange = {
   debounceUntil: null,
   lastAutoReindexAt: null
 };
+
+// dataGeneration is a monotonic counter that advances on every event that can change what a read
+// returns or how stale it is: sync promotion or failure, a committed create/update/delete (or a
+// cache row repaired from Google) applied to the cache, cache clear, an observed config change,
+// and recording or clearing an external change. The gateway keys cached reads by it, so committed
+// changes never depend on edge purges. It survives cache clears so a value is never reused.
+const dataGenerationMetaKey = 'data.generation';
+// contentRevision advances only when cached rows or their indexed values may have changed
+// (a sync that changed data, a mutation or repair applied to the cache, a cache clear).
+// Pagination cursors carry it, so a resync that changes nothing keeps cursors valid.
+const contentRevisionMetaKey = 'cache.contentRevision';
+// externalChangeGeneration advances on every recorded external change (Drive notification or an
+// unconfirmed write). A sync clears the pending change only if no newer one arrived after it began.
+const externalChangeGenerationMetaKey = 'externalChange.generation';
+const monotonicCounterMetaKeys = [dataGenerationMetaKey, contentRevisionMetaKey, externalChangeGenerationMetaKey];
+const readConfigSignatureMetaKey = 'config.readSignature';
 
 type ResolvedTableConfig = GoogleSheetTableConfig & {
   googleCredentialRef: string;
@@ -216,6 +235,9 @@ function buildCacheConfigSignature(config: {
   dataStartRow: number;
 }) {
   return JSON.stringify({
+    // Bump when the cached cell encoding changes so existing caches resync on next access.
+    // 2: indexed cells hold normalized (trim/lowercase) values.
+    cacheFormat: 2,
     spreadsheetId: config.spreadsheetId,
     googleCredentialRef: config.googleCredentialRef,
     sheetTabName: config.sheetTabName,
@@ -241,7 +263,7 @@ function getProjectStub(env: CloudflareEnv, projectSlug: string) {
 
 export class TableDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
-  private activeSync: Promise<TableCacheStatus> | null = null;
+  private activeSync: { configSignature: string; promise: Promise<TableCacheStatus> } | null = null;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -437,12 +459,14 @@ export class TableDO {
         return {
           type: 'table.reindex.result',
           result: await this.syncCache(
-            body.projectSlug,
-            body.tableSlug,
-            body.resolvedConfig
-              ? { force: true, resolvedConfig: body.resolvedConfig, requestContext }
-              : { force: true, requestContext }
+            await this.getTableConfig(body.projectSlug, body.tableSlug, body.resolvedConfig),
+            { force: true, requestContext }
           )
+        };
+      case 'table.generation.get':
+        return {
+          type: 'table.generation.get.result',
+          result: await this.getDataGeneration(body.projectSlug, body.tableSlug, body.resolvedConfig)
         };
     }
   }
@@ -457,6 +481,7 @@ export class TableDO {
         throw new BadRequestError(`Resolved config does not match ${projectSlug}/${tableSlug}.`);
       }
 
+      this.observeConfig(resolvedConfig);
       return resolvedConfig;
     }
 
@@ -474,7 +499,40 @@ export class TableDO {
       projectSlug,
       tableSlug
     });
+    this.observeConfig(result.result.data.resolvedConfig);
     return result.result.data.resolvedConfig;
+  }
+
+  // Advances dataGeneration when a request carries a config that changes what reads return or
+  // how long they stay fresh, so readers keyed by the generation never mix configurations.
+  private observeConfig(config: ResolvedTableConfig) {
+    const signature = JSON.stringify({
+      cache: buildCacheConfigSignature(config),
+      cacheTtlSeconds: config.cacheTtlSeconds,
+      readEnabled: config.readEnabled
+    });
+    const previousSignature = this.getMeta(readConfigSignatureMetaKey);
+    if (previousSignature === signature) {
+      return;
+    }
+
+    this.setMeta(readConfigSignatureMetaKey, signature);
+    if (previousSignature !== null) {
+      this.incrementCounter(dataGenerationMetaKey);
+    }
+  }
+
+  private async getDataGeneration(
+    projectSlug: string,
+    tableSlug: string,
+    resolvedConfig?: ResolvedTableConfigSnapshot
+  ): Promise<TableDataGeneration> {
+    const config = await this.getTableConfig(projectSlug, tableSlug, resolvedConfig);
+    return {
+      dataGeneration: this.getCounter(dataGenerationMetaKey),
+      lastSyncCompletedAt: this.getSyncMeta().lastSyncCompletedAt,
+      cacheTtlSeconds: config.cacheTtlSeconds
+    };
   }
 
   private getSheetsClient(config: { googleCredentialRef: string }) {
@@ -583,28 +641,41 @@ export class TableDO {
     normalizedCandidate[config.idColumn] = rowId;
     this.assertFieldRules(normalizedCandidate, config);
     this.assertUniqueFieldRules(normalizedCandidate, config);
-    let rowNumber: number | null = null;
+    const writableValues = Object.fromEntries(
+      Object.entries(normalizedCandidate).filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
+    ) as Partial<RowRecord>;
+    let appendedRowNumber: number | null = null;
     let liveRow: RowEnvelope;
     try {
-      rowNumber = await sheets.appendRowSkeleton(config, rowId, layout);
-      const writableValues = Object.fromEntries(
-        Object.entries(normalizedCandidate).filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
-      ) as Partial<RowRecord>;
-      await sheets.writeRowPatch(config, rowNumber, writableValues, layout);
-      liveRow = await sheets.readSingleRow(config, rowNumber, layout);
-    } catch (error) {
-      if (rowNumber !== null) {
-        await this.rollbackAppendedCreateRow(config, rowId, rowNumber, layout, error);
+      appendedRowNumber = await sheets.appendRowSkeleton(config, rowId, layout);
+      // Rows inserted or removed above the append shift it, so re-resolve the skeleton by ID
+      // instead of patching the row number the append reported.
+      const skeleton = await sheets.findRowById(config, rowId, appendedRowNumber, { layout, verifyUnique: false });
+      if (!skeleton) {
+        throw new ConflictError(`Row ${rowId} disappeared before its values were written.`, { rowId });
       }
 
+      await sheets.writeRowPatch(config, skeleton.row.rowNumber, writableValues, layout);
+      liveRow = await this.readWrittenRow(config, rowId, skeleton.row.rowNumber, layout);
+    } catch (error) {
+      if (appendedRowNumber === null && !isUnconfirmedWriteFailure(error)) {
+        throw error;
+      }
+
+      this.markCacheStaleAfterUnconfirmedWrite(config, 'create', rowId, error);
+      await this.rollbackCreatedRow(config, rowId, appendedRowNumber, layout, error);
       throw error;
     }
 
-    this.upsertRowIndex(rowId, rowNumber);
+    this.upsertRowIndex(rowId, liveRow.rowNumber);
     this.upsertCachedRow(liveRow);
     this.upsertCachedCells(config, liveRow);
     this.invalidateSchemaMeta();
     this.markCacheFreshAfterMutation(config, headers);
+    if (liveRow.rowNumber !== appendedRowNumber) {
+      // The skeleton moved, so rows shifted under the cached row numbers.
+      this.recordPendingExternalChange(new Date().toISOString(), null);
+    }
 
     return {
       data: liveRow,
@@ -618,14 +689,16 @@ export class TableDO {
       throw new ForbiddenError(`Updates are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensureMutationValidationReady(config, requestContext);
+    const cacheState = await this.ensureMutationValidationReady(config, requestContext);
     const sheets = this.getSheetsClient(config);
     const layout = await sheets.getHeaderLayout(config);
     const headers = layout.headers;
     const normalizedPatch = normalizePartialRowValues(patch);
     assertManagedIdFieldIsNotWritten(normalizedPatch, config.idColumn);
     assertWritableFields(normalizedPatch, config.readOnlyFields);
-    const existingRow = await this.resolveRowById(config, rowId, { layout });
+    // A fresh cache was verified by its last sync, so the cached row-number hint only needs a
+    // single-row ID check; on a miss or a stale cache, findRowById scans the ID column.
+    const existingRow = await this.resolveRowById(config, rowId, { layout, verifyUnique: cacheState.staleReason !== 'fresh' });
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
@@ -645,8 +718,20 @@ export class TableDO {
         .filter(([fieldName]) => fieldName !== config.idColumn && !config.readOnlyFields.includes(fieldName))
         .map(([fieldName]) => [fieldName, normalizedCandidate[fieldName]])
     ) as Partial<RowRecord>;
-    await sheets.writeRowPatch(config, existingRow.rowNumber, writableValues, layout);
-    const liveRow = await sheets.readSingleRow(config, existingRow.rowNumber, layout);
+    let writeCommitted = false;
+    let liveRow: RowEnvelope;
+    try {
+      await sheets.writeRowPatch(config, existingRow.rowNumber, writableValues, layout);
+      writeCommitted = true;
+      liveRow = await this.readWrittenRow(config, rowId, existingRow.rowNumber, layout);
+    } catch (error) {
+      if (writeCommitted || isUnconfirmedWriteFailure(error)) {
+        this.markCacheStaleAfterUnconfirmedWrite(config, 'update', rowId, error);
+      }
+
+      throw error;
+    }
+
     this.upsertRowIndex(rowId, existingRow.rowNumber);
     this.upsertCachedRow(liveRow);
     this.upsertCachedCells(config, liveRow);
@@ -670,12 +755,24 @@ export class TableDO {
     const sheets = this.getSheetsClient(config);
     const layout = await sheets.getHeaderLayout(config);
     const headers = layout.headers;
-    const existingRow = await this.resolveRowById(config, rowId, { layout });
+    const existingRow = await this.resolveRowById(config, rowId, { layout, verifyUnique: cacheState.staleReason !== 'fresh' });
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
 
-    await sheets.deleteRow(config, existingRow.rowNumber);
+    let deleteCommitted = false;
+    try {
+      await sheets.deleteRow(config, existingRow.rowNumber);
+      deleteCommitted = true;
+      await this.assertRowDeleted(config, rowId, existingRow.rowNumber, layout);
+    } catch (error) {
+      if (deleteCommitted || isUnconfirmedWriteFailure(error)) {
+        this.markCacheStaleAfterUnconfirmedWrite(config, 'delete', rowId, error);
+      }
+
+      throw error;
+    }
+
     this.deleteRowIndex(rowId);
     this.deleteCachedRow(rowId);
     if (cacheState.staleReason === 'fresh' && cachedHeaders === JSON.stringify(headers)) {
@@ -683,7 +780,8 @@ export class TableDO {
       this.invalidateSchemaMeta();
       this.markCacheFreshAfterMutation(config, headers);
     } else {
-      await this.syncCache(projectSlug, tableSlug, { force: true, resolvedConfig: config, requestContext: requestContext ?? null });
+      this.noteCacheContentChanged();
+      await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
     }
 
     return {
@@ -730,9 +828,8 @@ export class TableDO {
     const cacheState = this.getCacheState(config);
 
     if (cacheState.staleReason !== 'fresh') {
-      await this.syncCache(projectSlug, tableSlug, {
+      await this.syncCache(config, {
         force: cacheState.staleReason === 'never-synced' || cacheState.staleReason === 'error',
-        resolvedConfig: config,
         requestContext: requestContext ?? null
       });
     }
@@ -747,17 +844,43 @@ export class TableDO {
 
   private async recordExternalChange(projectSlug: string, tableSlug: string, changedAt: string, debounceUntil: string | null) {
     await this.getTableConfig(projectSlug, tableSlug);
+    this.recordPendingExternalChange(changedAt, debounceUntil);
+
+    return { ok: true as const };
+  }
+
+  private recordPendingExternalChange(changedAt: string, debounceUntil: string | null) {
     this.setExternalChangeState({
       ...this.getExternalChangeState(),
       pending: true,
       lastChangedAt: changedAt,
       debounceUntil
     });
-
-    return { ok: true as const };
+    this.incrementCounter(externalChangeGenerationMetaKey);
+    this.incrementCounter(dataGenerationMetaKey);
   }
 
-  private async ensureQueryCacheReady(config: GoogleSheetTableConfig, requestContext?: TableRequestContext | null) {
+  // Google may have applied a write that failed or could not be confirmed, so the cache can no
+  // longer be trusted. Record it like an undebounced external change: the next read resyncs.
+  private markCacheStaleAfterUnconfirmedWrite(
+    config: ResolvedTableConfig,
+    operation: 'create' | 'update' | 'delete',
+    rowId: string,
+    error: unknown
+  ) {
+    this.recordPendingExternalChange(new Date().toISOString(), null);
+    console.warn(JSON.stringify({
+      event: 'table.write.unconfirmed',
+      projectSlug: config.projectSlug,
+      tableSlug: config.tableSlug,
+      operation,
+      rowId,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message : String(error)
+    }));
+  }
+
+  private async ensureQueryCacheReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
     const cacheState = this.getCacheState(config);
     if (
       cacheState.staleReason === 'fresh' ||
@@ -766,14 +889,14 @@ export class TableDO {
       return cacheState;
     }
 
-    await this.syncCache(config.projectSlug, config.tableSlug, {
+    await this.syncCache(config, {
       force: cacheState.staleReason === 'never-synced' || cacheState.staleReason === 'error',
       requestContext: requestContext ?? null
     });
     return this.getCacheState(config);
   }
 
-  private async ensurePointReadReady(config: GoogleSheetTableConfig, requestContext?: TableRequestContext | null) {
+  private async ensurePointReadReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
     const cacheState = this.getCacheState(config);
     if (
       cacheState.staleReason === 'fresh' ||
@@ -783,23 +906,23 @@ export class TableDO {
       return cacheState;
     }
 
-    await this.syncCache(config.projectSlug, config.tableSlug, { force: true, requestContext: requestContext ?? null });
+    await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
     return this.getCacheState(config);
   }
 
-  private async ensurePointOperationReady(config: GoogleSheetTableConfig, requestContext?: TableRequestContext | null) {
+  private async ensurePointOperationReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
     const cacheState = this.getCacheState(config);
     if (cacheState.staleReason === 'fresh' || cacheState.staleReason === 'ttl-expired') {
       return cacheState;
     }
 
-    await this.syncCache(config.projectSlug, config.tableSlug, { force: true, requestContext: requestContext ?? null });
+    await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
     return this.getCacheState(config);
   }
 
   private async ensureMutationValidationReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
     if (this.getCacheState(config).staleReason === 'external-change') {
-      await this.syncCache(config.projectSlug, config.tableSlug, { force: true, requestContext: requestContext ?? null });
+      await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
       return this.getCacheState(config);
     }
 
@@ -810,23 +933,26 @@ export class TableDO {
     return this.ensurePointOperationReady(config, requestContext);
   }
 
-  private async syncCache(
-    projectSlug: string,
-    tableSlug: string,
-    options: { force: boolean; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext | null | undefined }
-  ) {
-    if (this.activeSync) {
-      const cache = await this.activeSync;
-      if (!options.force || !cache.stale) {
-        return {
-          ok: true as const,
-          rowCount: cache.rowCount,
-          cache
-        };
+  private async syncCache(config: ResolvedTableConfig, options: { force: boolean; requestContext: TableRequestContext | null }) {
+    const configSignature = buildCacheConfigSignature(config);
+    let active = this.activeSync;
+    while (active) {
+      if (active.configSignature === configSignature) {
+        const cache = await active.promise;
+        if (!options.force || !cache.stale) {
+          const status = this.computeCacheStatus(config);
+          return { ok: true as const, rowCount: status.rowCount, cache: status };
+        }
+
+        break;
       }
+
+      // A sync for another table config is in flight. Its outcome says nothing about this config,
+      // so wait for it to finish (syncs share the staging tables) and then evaluate this config.
+      await active.promise.catch(() => undefined);
+      active = this.activeSync === active ? null : this.activeSync;
     }
 
-    const config = await this.getTableConfig(projectSlug, tableSlug, options.resolvedConfig);
     const currentStatus = this.computeCacheStatus(config);
     if (!options.force && currentStatus.status === 'ready' && !currentStatus.stale) {
       return {
@@ -836,18 +962,18 @@ export class TableDO {
       };
     }
 
-    const syncPromise = this.performSync(config, options.requestContext ?? null);
-    this.activeSync = syncPromise;
+    const sync = { configSignature, promise: this.performSync(config, options.requestContext) };
+    this.activeSync = sync;
 
     try {
-      const cache = await syncPromise;
+      const cache = await sync.promise;
       return {
         ok: true as const,
         rowCount: cache.rowCount,
         cache
       };
     } finally {
-      if (this.activeSync === syncPromise) {
+      if (this.activeSync === sync) {
         this.activeSync = null;
       }
     }
@@ -856,6 +982,7 @@ export class TableDO {
   private async performSync(config: ResolvedTableConfig, requestContext: TableRequestContext | null): Promise<TableCacheStatus> {
     const startedAt = new Date().toISOString();
     const syncStartedAtMs = Date.now();
+    const observedExternalChangeGeneration = this.getCounter(externalChangeGenerationMetaKey);
     this.setSyncMeta({
       ...this.getSyncMeta(),
       status: 'syncing',
@@ -878,15 +1005,17 @@ export class TableDO {
         this.upsertCachedCells(config, row, 'staging');
       }
 
+      const configSignature = buildCacheConfigSignature(config);
+      const contentChanged = this.getMeta('config.signature') !== configSignature || this.stagedRowsDifferFromLive();
       this.promoteStagingCache();
 
       const completedAt = new Date().toISOString();
       const validation = this.buildValidationSummary(rows, config, completedAt);
       this.setMeta('headers', JSON.stringify(headers));
       this.setMeta('schema', JSON.stringify(schema));
-      this.setMeta('config.signature', buildCacheConfigSignature(config));
+      this.setMeta('config.signature', configSignature);
       this.setMeta('validation.summary', JSON.stringify(validation));
-      this.completeExternalChangeSync(completedAt, requestContext?.syncSource === 'external-change');
+      this.completeExternalChangeSync(completedAt, requestContext?.syncSource === 'external-change', observedExternalChangeGeneration);
       this.setSyncMeta({
         status: 'ready',
         rowCount: rows.length,
@@ -894,6 +1023,10 @@ export class TableDO {
         lastSyncCompletedAt: completedAt,
         lastSyncError: null
       });
+      if (contentChanged) {
+        this.incrementCounter(contentRevisionMetaKey);
+      }
+      this.incrementCounter(dataGenerationMetaKey);
       console.info(JSON.stringify({
         event: 'table.sync.complete',
         projectSlug: config.projectSlug,
@@ -916,6 +1049,7 @@ export class TableDO {
         lastSyncStartedAt: startedAt,
         lastSyncError: error instanceof Error ? error.message : 'Unknown sync error'
       });
+      this.incrementCounter(dataGenerationMetaKey);
       console.error(JSON.stringify({
         event: 'table.sync.failed',
         projectSlug: config.projectSlug,
@@ -941,8 +1075,12 @@ export class TableDO {
     const rowNumberHint = cached?.rowNumber ?? this.lookupRowNumber(rowId);
     const result = await this.getSheetsClient(config).findRowById(config, rowId, rowNumberHint, options);
     if (!result) {
-      this.deleteRowIndex(rowId);
-      this.deleteCachedRow(rowId);
+      if (cached || rowNumberHint !== null) {
+        this.deleteRowIndex(rowId);
+        this.deleteCachedRow(rowId);
+        this.noteCacheContentChanged();
+      }
+
       return null;
     }
 
@@ -953,16 +1091,25 @@ export class TableDO {
       );
     }
 
-    this.upsertRowIndex(rowId, result.row.rowNumber);
-    this.upsertCachedRow(result.row);
-    this.upsertCachedCells(config, result.row);
+    const cacheIsCurrent = cached !== null
+      && cached.rowNumber === result.row.rowNumber
+      && JSON.stringify(cached.values) === JSON.stringify(result.row.values);
+    if (!cacheIsCurrent) {
+      this.upsertRowIndex(rowId, result.row.rowNumber);
+      this.upsertCachedRow(result.row);
+      this.upsertCachedCells(config, result.row);
+      this.noteCacheContentChanged();
+    }
+
     return result.row;
   }
 
-  private async rollbackAppendedCreateRow(
+  // Removes a created row after a failed create. appendedRowNumber is null when the append
+  // response was lost, so the skeleton (if Google committed it) is found by managed ID alone.
+  private async rollbackCreatedRow(
     config: ResolvedTableConfig,
     rowId: string,
-    appendedRowNumber: number,
+    appendedRowNumber: number | null,
     layout: GoogleSheetHeaderLayout,
     createError: unknown
   ) {
@@ -975,7 +1122,7 @@ export class TableDO {
       );
 
       if (!rollbackTarget) {
-        throw new Error(`Appended row ${rowId} could not be found for rollback.`);
+        return;
       }
 
       if (rollbackTarget.duplicateCount !== 1) {
@@ -983,13 +1130,52 @@ export class TableDO {
       }
 
       await this.getSheetsClient(config).deleteRow(config, rollbackTarget.row.rowNumber);
+      await this.assertRowDeleted(config, rowId, rollbackTarget.row.rowNumber, layout);
     } catch (rollbackError) {
-      throw new ServiceUnavailableError('Create failed after Google Sheets row append and automatic rollback could not safely remove the partial row.', {
+      console.error(JSON.stringify({
+        event: 'table.create.rollback_failed',
+        projectSlug: config.projectSlug,
+        tableSlug: config.tableSlug,
         rowId,
         appendedRowNumber,
         createError: createError instanceof Error ? createError.message : String(createError),
         rollbackError: rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+      }));
+      throw new ServiceUnavailableError('Create failed after Google Sheets row append and automatic rollback could not safely remove the partial row.', {
+        rowId,
+        appendedRowNumber
       });
+    }
+  }
+
+  // Row-number writes are not conditional in the Sheets API, so confirm the written row still
+  // carries the target ID; otherwise rows moved and the write may have hit a different row.
+  private async readWrittenRow(config: ResolvedTableConfig, rowId: string, rowNumber: number, layout: GoogleSheetHeaderLayout) {
+    const row = await this.getSheetsClient(config).readSingleRow(config, rowNumber, layout);
+    if (row.id !== rowId) {
+      throw new ConflictError(
+        `Row ${rowId} moved while it was being written, so the write may have changed a different row. Verify the sheet before retrying.`,
+        { rowId, rowNumber }
+      );
+    }
+
+    return row;
+  }
+
+  // Deletes are by row index, so check the neighbouring managed IDs: if the target ID is still
+  // there, rows shifted during the delete and a different row was removed.
+  private async assertRowDeleted(config: ResolvedTableConfig, rowId: string, deletedRowNumber: number, layout: GoogleSheetHeaderLayout) {
+    const neighbours = await this.getSheetsClient(config).readRowReferencesInRange(
+      config,
+      Math.max(config.dataStartRow, deletedRowNumber - 1),
+      deletedRowNumber + 1,
+      layout
+    );
+    if (neighbours.some((entry) => entry.rowId === rowId)) {
+      throw new ConflictError(
+        `Row ${rowId} moved while it was being deleted, so a different row may have been deleted. Verify the sheet.`,
+        { rowId, rowNumber: deletedRowNumber }
+      );
     }
   }
 
@@ -1160,7 +1346,8 @@ export class TableDO {
       lastSyncCompletedAt: meta.lastSyncCompletedAt,
       lastSyncError: meta.lastSyncError,
       validation: this.getValidationSummary(),
-      externalChange
+      externalChange,
+      dataGeneration: this.getCounter(dataGenerationMetaKey)
     };
   }
 
@@ -1236,12 +1423,14 @@ export class TableDO {
     this.setMeta('externalChange.state', JSON.stringify(state));
   }
 
-  private completeExternalChangeSync(completedAt: string, automatic: boolean) {
+  private completeExternalChangeSync(completedAt: string, automatic: boolean, observedGeneration: number) {
     const state = this.getExternalChangeState();
+    // A change recorded after this sync read its snapshot is not reflected in it; keep it pending.
+    const laterChangePending = this.getCounter(externalChangeGenerationMetaKey) !== observedGeneration && state.pending;
     this.setExternalChangeState({
-      pending: false,
+      pending: laterChangePending,
       lastChangedAt: state.lastChangedAt,
-      debounceUntil: null,
+      debounceUntil: laterChangePending ? state.debounceUntil : null,
       lastAutoReindexAt: automatic ? completedAt : state.lastAutoReindexAt
     });
   }
@@ -1267,8 +1456,10 @@ export class TableDO {
   private clearCacheState() {
     this.clearCacheTables('live');
     this.clearCacheTables('staging');
-    this.ctx.storage.sql.exec(`DELETE FROM meta`);
+    const preservedKeyPlaceholders = monotonicCounterMetaKeys.map(() => '?').join(', ');
+    this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key NOT IN (${preservedKeyPlaceholders})`, ...monotonicCounterMetaKeys);
     this.activeSync = null;
+    this.noteCacheContentChanged();
   }
 
   private getSyncMeta(): SyncMeta {
@@ -1296,6 +1487,20 @@ export class TableDO {
     this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, key);
   }
 
+  private getCounter(key: string) {
+    const value = Number(this.getMeta(key) ?? '0');
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  }
+
+  private incrementCounter(key: string) {
+    this.setMeta(key, String(this.getCounter(key) + 1));
+  }
+
+  private noteCacheContentChanged() {
+    this.incrementCounter(contentRevisionMetaKey);
+    this.incrementCounter(dataGenerationMetaKey);
+  }
+
   private computeCacheStatus(config: GoogleSheetTableConfig & { googleCredentialRef?: string }): TableCacheStatus {
     const cacheState = this.getCacheState(config);
     return {
@@ -1308,7 +1513,8 @@ export class TableDO {
       lastSyncCompletedAt: cacheState.lastSyncCompletedAt,
       lastSyncError: cacheState.lastSyncError,
       validation: cacheState.validation,
-      externalChange: cacheState.externalChange
+      externalChange: cacheState.externalChange,
+      dataGeneration: cacheState.dataGeneration
     };
   }
 
@@ -1324,6 +1530,7 @@ export class TableDO {
       lastSyncCompletedAt: completedAt,
       lastSyncError: null
     });
+    this.noteCacheContentChanged();
   }
 
   private buildValidationSummary(
@@ -1426,7 +1633,7 @@ export class TableDO {
     this.ctx.storage.sql.exec(`DELETE FROM ${tables.cachedCells} WHERE row_id = ?`, row.id);
 
     for (const fieldName of config.indexedFields) {
-      const value = coerceFieldRuleValue(row.values[fieldName] ?? null, config.fieldRules[fieldName]) ?? null;
+      const value = canonicalizeFieldValue(row.values[fieldName] ?? null, config.fieldRules[fieldName]);
       const normalized = this.normalizeIndexedCellValue(value);
       this.ctx.storage.sql.exec(
         `
@@ -1448,6 +1655,25 @@ export class TableDO {
     this.ctx.storage.sql.exec(`DELETE FROM ${tables.rowIndex}`);
     this.ctx.storage.sql.exec(`DELETE FROM ${tables.cachedRows}`);
     this.ctx.storage.sql.exec(`DELETE FROM ${tables.cachedCells}`);
+  }
+
+  // True when the staged snapshot differs from the live cache in any row id, row number, or
+  // value. Row ids are primary keys, so equal counts plus no unmatched staged row means equal sets.
+  private stagedRowsDifferFromLive() {
+    const difference = this.selectOptionalRow<{ changed: number }>(`
+      SELECT 1 AS changed
+      WHERE (SELECT COUNT(*) FROM cached_rows) != (SELECT COUNT(*) FROM cached_rows_staging)
+        OR EXISTS (
+          SELECT 1
+          FROM cached_rows_staging staged
+          LEFT JOIN cached_rows live ON live.row_id = staged.row_id
+          WHERE live.row_id IS NULL
+            OR live.row_number != staged.row_number
+            OR live.values_json != staged.values_json
+        )
+    `);
+
+    return difference !== null;
   }
 
   private promoteStagingCache() {
@@ -1534,7 +1760,8 @@ export class TableDO {
   private queryCachedRows(config: GoogleSheetTableConfig, rawQuery: ListRowsQuery) {
     const query = this.normalizeQueryForConfig(config, rawQuery);
     const fingerprint = getListQueryFingerprint(query);
-    const cursor = decodeQueryCursor(query.cursor, fingerprint, query.sort);
+    const revision = this.getCounter(contentRevisionMetaKey);
+    const cursor = decodeQueryCursor(query.cursor, fingerprint, query.sort, revision);
     const filterPlan = buildFilterSql(query.filter, config.indexedFields);
     const capability = validateFilterCapabilities(query.filter, config.indexedFields);
     const requiresScan = capability.requiresFullScan || filterPlan.requiresFullScan;
@@ -1551,7 +1778,7 @@ export class TableDO {
           }
         );
       }
-      return this.queryCachedRowsByScan(config, query, fingerprint, cursor);
+      return this.queryCachedRowsByScan(config, query, fingerprint, revision, cursor);
     }
 
     const sortPlan = this.buildSortPlan(config, query.sort.field, query.sort.direction);
@@ -1595,6 +1822,7 @@ export class TableDO {
         rows.length > query.limit && lastRow
           ? encodeQueryCursor({
               fingerprint,
+              revision,
               sortField: query.sort.field,
               sortDirection: query.sort.direction,
               rowId: lastRow.row_id,
@@ -1609,6 +1837,7 @@ export class TableDO {
     config: GoogleSheetTableConfig,
     query: ReturnType<typeof normalizeListQuery>,
     fingerprint: string,
+    revision: number,
     cursor: ReturnType<typeof decodeQueryCursor>
   ) {
     const sortField = query.sort.field;
@@ -1654,6 +1883,7 @@ export class TableDO {
         hasMore && lastRow
           ? encodeQueryCursor({
               fingerprint,
+              revision,
               sortField: query.sort.field,
               sortDirection: query.sort.direction,
               rowId: lastRow.id,
@@ -1809,8 +2039,8 @@ export class TableDO {
         continue;
       }
 
-      const value = coerceFieldRuleValue(values[fieldName], rule);
-      if (value === undefined || value === null || (typeof value === 'string' && value.length === 0)) {
+      const value = canonicalizeFieldValue(values[fieldName] ?? null, rule);
+      if (value === null || (typeof value === 'string' && value.length === 0)) {
         continue;
       }
 
@@ -1932,7 +2162,7 @@ export class TableDO {
       return row.id;
     }
 
-    return coerceFieldRuleValue(row.values[field] ?? null, config.fieldRules[field]) ?? null;
+    return canonicalizeFieldValue(row.values[field] ?? null, config.fieldRules[field]);
   }
 
   private getSortFieldValue(row: RowEnvelope, sortField: string, config: GoogleSheetTableConfig) {
@@ -1945,7 +2175,7 @@ export class TableDO {
     }
 
     return this.normalizeCursorSourceValue(
-      coerceFieldRuleValue(row.values[sortField], config.fieldRules[sortField])
+      canonicalizeFieldValue(row.values[sortField] ?? null, config.fieldRules[sortField])
     );
   }
 

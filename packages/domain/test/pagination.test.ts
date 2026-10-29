@@ -15,6 +15,7 @@ function encodeRawCursorPayload(payload: unknown) {
 function createCursorPayload(overrides?: Partial<Parameters<typeof encodeQueryCursor>[0]>) {
   return {
     fingerprint: 'query',
+    revision: 7,
     sortField: 'score',
     sortDirection: 'asc' as const,
     rowId: 'row-1',
@@ -43,6 +44,7 @@ describe('query cursors', () => {
     const fingerprint = getListQueryFingerprint(query);
     const cursor = encodeQueryCursor({
       fingerprint,
+      revision: 7,
       sortField: 'score',
       sortDirection: 'desc',
       rowId: 'row-1',
@@ -53,8 +55,9 @@ describe('query cursors', () => {
       }
     });
 
-    expect(decodeQueryCursor(cursor, fingerprint, query.sort)).toEqual({
+    expect(decodeQueryCursor(cursor, fingerprint, query.sort, 7)).toEqual({
       fingerprint,
+      revision: 7,
       sortField: 'score',
       sortDirection: 'desc',
       rowId: 'row-1',
@@ -74,6 +77,7 @@ describe('query cursors', () => {
     const fingerprint = getListQueryFingerprint(query);
     const cursor = encodeQueryCursor({
       fingerprint,
+      revision: 0,
       sortField: 'café',
       sortDirection: 'asc',
       rowId: 'row-é',
@@ -84,8 +88,9 @@ describe('query cursors', () => {
       }
     });
 
-    expect(decodeQueryCursor(cursor, fingerprint, query.sort)).toEqual({
+    expect(decodeQueryCursor(cursor, fingerprint, query.sort, 0)).toEqual({
       fingerprint,
+      revision: 0,
       sortField: 'café',
       sortDirection: 'asc',
       rowId: 'row-é',
@@ -112,7 +117,7 @@ describe('query cursors', () => {
 
   it('rejects invalid cursors', () => {
     const query = normalizeListQuery({ sort: 'score:desc' });
-    expect(() => decodeQueryCursor('bad', getListQueryFingerprint(query), query.sort)).toThrow(BadRequestError);
+    expect(() => decodeQueryCursor('bad', getListQueryFingerprint(query), query.sort, 7)).toThrow(BadRequestError);
   });
 
   it('rejects structurally invalid cursor payloads', () => {
@@ -129,6 +134,10 @@ describe('query cursors', () => {
       [],
       'cursor',
       { ...basePayload, fingerprint: 123 },
+      { ...basePayload, revision: undefined },
+      { ...basePayload, revision: -1 },
+      { ...basePayload, revision: 1.5 },
+      { ...basePayload, revision: '7' },
       { ...basePayload, sortField: '' },
       { ...basePayload, sortField: null },
       { ...basePayload, sortDirection: 'sideways' },
@@ -148,13 +157,14 @@ describe('query cursors', () => {
     ];
 
     for (const payload of invalidPayloads) {
-      expect(() => decodeQueryCursor(encodeRawCursorPayload(payload), fingerprint, query.sort)).toThrow(BadRequestError);
+      expect(() => decodeQueryCursor(encodeRawCursorPayload(payload), fingerprint, query.sort, 7)).toThrow(BadRequestError);
     }
   });
 
   it('rejects structurally invalid cursor payloads before encoding', () => {
     const invalidPayloads = [
       { sortField: '' },
+      { revision: -1 },
       { sortDirection: 'sideways' },
       { rowId: '' },
       { rowNumber: 0 },
@@ -175,6 +185,7 @@ describe('query cursors', () => {
     const otherQuery = normalizeListQuery({ sort: 'score:asc' });
     const cursor = encodeQueryCursor({
       fingerprint: getListQueryFingerprint(otherQuery),
+      revision: 7,
       sortField: otherQuery.sort.field,
       sortDirection: otherQuery.sort.direction,
       rowId: 'row-1',
@@ -185,6 +196,16 @@ describe('query cursors', () => {
       }
     });
 
-    expect(() => decodeQueryCursor(cursor, getListQueryFingerprint(query), query.sort)).toThrow(BadRequestError);
+    expect(() => decodeQueryCursor(cursor, getListQueryFingerprint(query), query.sort, 7)).toThrow(BadRequestError);
+  });
+
+  it('rejects cursors issued before the cached table data changed', () => {
+    const query = normalizeListQuery({ sort: 'score:asc' });
+    const fingerprint = getListQueryFingerprint(query);
+    const cursor = encodeQueryCursor(createCursorPayload({ fingerprint, revision: 7 }));
+
+    expect(() => decodeQueryCursor(cursor, fingerprint, query.sort, 8)).toThrow(
+      'Pagination cursor is stale because the table data changed after it was issued. Restart pagination without a cursor.'
+    );
   });
 });

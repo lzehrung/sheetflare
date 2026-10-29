@@ -97,6 +97,7 @@ export function createCacheStatus(): TableCacheStatus {
     rowCount: 3,
     lastSyncStartedAt: timestamp,
     lastSyncCompletedAt: timestamp,
+    dataGeneration: 0,
     lastSyncError: null,
     validation: {
       status: 'ok',

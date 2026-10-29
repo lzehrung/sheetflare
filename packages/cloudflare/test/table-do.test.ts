@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { BadRequestError, type ProjectDoResponse, type TableDoResponse } from '@sheetflare/contracts';
+import {
+  BadRequestError,
+  type CreateTableInput,
+  type ListRowsQuery,
+  type ProjectDoResponse,
+  type ResolvedTableConfigSnapshot,
+  type TableDoRequest,
+  type TableDoResponse
+} from '@sheetflare/contracts';
 import { ControlPlaneDO, ProjectDO, TableDO, doRpc, type CloudflareEnv } from '../src';
 import { createDurableObjectNamespace } from './support/do-harness';
 
@@ -183,6 +191,17 @@ function createSheetsFetch(sheet: SheetState) {
       });
     }
 
+    const boundedRectangleMatch = range.match(/^'Users'!([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
+    if (boundedRectangleMatch && boundedRectangleMatch[2] !== boundedRectangleMatch[4]) {
+      const startColumnIndex = columnLettersToIndex(boundedRectangleMatch[1]);
+      const endColumnIndex = columnLettersToIndex(boundedRectangleMatch[3]);
+      return Response.json({
+        values: sheet.rows
+          .slice(Number(boundedRectangleMatch[2]) - 1, Number(boundedRectangleMatch[4]))
+          .map((row) => row.slice(startColumnIndex, endColumnIndex + 1))
+      });
+    }
+
     const boundedSingleRowMatch = range.match(/^'Users'!A(\d+):([A-Z]+)\d+$/);
     if (boundedSingleRowMatch) {
       const rowIndex = Number(boundedSingleRowMatch[1]) - 1;
@@ -237,6 +256,115 @@ function createTestEnv(overrides?: Partial<CloudflareEnv>) {
   env.TABLE_DO = createDurableObjectNamespace(env, TableDO) as never;
   env.RATE_LIMIT_DO = null as never;
   return env;
+}
+
+const usersTable = {
+  projectSlug: 'demo',
+  tableSlug: 'users'
+};
+
+type TableDoResult<TType extends TableDoResponse['type']> = Extract<TableDoResponse, { type: TType }>['result'];
+
+function isTableDoResponse<TType extends TableDoResponse['type']>(
+  response: TableDoResponse,
+  type: TType
+): response is Extract<TableDoResponse, { type: TType }> {
+  return response.type === type;
+}
+
+function getUsersTableStub(env: CloudflareEnv) {
+  return env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users'));
+}
+
+async function callUsersTable<TType extends TableDoResponse['type']>(
+  env: CloudflareEnv,
+  body: TableDoRequest,
+  expectedType: TType
+): Promise<TableDoResult<TType>> {
+  const response = await doRpc<TableDoResponse>(getUsersTableStub(env), body);
+  if (!isTableDoResponse(response, expectedType)) {
+    throw new Error(`Expected ${expectedType} but received ${response.type}.`);
+  }
+
+  return response.result;
+}
+
+async function createUsersTable(env: CloudflareEnv, input: Omit<CreateTableInput, 'tableSlug' | 'sheetTabName'>) {
+  const projectStub = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo'));
+  await doRpc<ProjectDoResponse>(projectStub, {
+    type: 'project.create',
+    allowExisting: true,
+    input: {
+      slug: 'demo',
+      name: 'Demo',
+      spreadsheetId: 'sheet-1'
+    }
+  });
+  await doRpc<ProjectDoResponse>(projectStub, {
+    type: 'project.table.create',
+    allowExisting: true,
+    projectSlug: 'demo',
+    input: {
+      tableSlug: 'users',
+      sheetTabName: 'Users',
+      ...input
+    }
+  });
+}
+
+function buildResolvedUsersConfig(overrides?: Partial<ResolvedTableConfigSnapshot>): ResolvedTableConfigSnapshot {
+  return {
+    projectSlug: 'demo',
+    tableSlug: 'users',
+    spreadsheetId: 'sheet-1',
+    googleCredentialRef: 'default',
+    sheetTabName: 'Users',
+    idColumn: '_id',
+    indexedFields: ['_id'],
+    readOnlyFields: [],
+    fieldRules: {},
+    headerRow: 1,
+    dataStartRow: 2,
+    readEnabled: true,
+    createEnabled: true,
+    updateEnabled: true,
+    deleteEnabled: true,
+    cacheTtlSeconds: 3600,
+    createdAt: '2026-10-28T00:00:00.000Z',
+    updatedAt: '2026-10-28T00:00:00.000Z',
+    ...overrides
+  };
+}
+
+function listUsers(env: CloudflareEnv, query: ListRowsQuery = {}) {
+  return callUsersTable(env, { type: 'table.rows.list', ...usersTable, query }, 'table.rows.list.result');
+}
+
+async function getUsersCacheStatus(env: CloudflareEnv) {
+  const result = await callUsersTable(env, { type: 'table.cache.get', ...usersTable }, 'table.cache.get.result');
+  return result.data;
+}
+
+function createUser(env: CloudflareEnv, values: Record<string, string>) {
+  return callUsersTable(env, { type: 'table.row.create', ...usersTable, input: { values } }, 'table.row.create.result');
+}
+
+function updateUser(env: CloudflareEnv, rowId: string, values: Record<string, string>) {
+  return callUsersTable(env, { type: 'table.row.update', ...usersTable, rowId, input: { values } }, 'table.row.update.result');
+}
+
+function deleteUser(env: CloudflareEnv, rowId: string) {
+  return callUsersTable(env, { type: 'table.row.delete', ...usersTable, rowId }, 'table.row.delete.result');
+}
+
+// The workspace TypeScript lib is ES2022, so Promise.withResolvers is not typed here.
+function createSignal() {
+  let resolve: () => void = () => {};
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+
+  return { promise, resolve };
 }
 
 describe('TableDO', () => {
@@ -2075,7 +2203,7 @@ describe('TableDO', () => {
         }
       }
     });
-    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+    expect(sheet.requestedRanges).not.toContain("'Users'!A2:A");
     expect(sheet.requestedRanges.filter((range) => range === "'Users'!1:1")).toHaveLength(1);
     expect(sheet.requestedRanges).not.toContain("'Users'");
   });
@@ -2306,7 +2434,7 @@ describe('TableDO', () => {
       }
     });
     expect(sheet.requestedRanges).not.toContain("'Users'");
-    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+    expect(sheet.requestedRanges).not.toContain("'Users'!A2:A");
     expect(sheet.requestedRanges.filter((range) => range === "'Users'!1:1")).toHaveLength(1);
 
     const listed = await doRpc<TableDoResponse>(
@@ -3097,7 +3225,7 @@ describe('TableDO', () => {
     ).rejects.toBeInstanceOf(BadRequestError);
   });
 
-  it('rejects updates when a cached row id has become duplicated upstream', async () => {
+  it('rejects updates when a cached row id has become duplicated upstream and a change was signaled', async () => {
     const sheet: SheetState = {
       rows: [
         ['_id', 'name'],
@@ -3151,6 +3279,12 @@ describe('TableDO', () => {
       ['row-1', 'Ada'],
       ['row-1', 'Duplicate']
     ];
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: '2026-10-28T00:00:00.000Z',
+      debounceUntil: null
+    }, 'table.external-change.record.result');
 
     await expect(
       doRpc<TableDoResponse>(
@@ -4095,7 +4229,7 @@ describe('TableDO', () => {
     });
   });
 
-  it('keeps scan-based pagination stable when the cursor row disappears between pages', async () => {
+  it('rejects scan-based pagination cursors once the cursor row disappears between pages', async () => {
     const sheet: SheetState = {
       rows: [
         ['_id', 'name'],
@@ -4179,35 +4313,31 @@ describe('TableDO', () => {
       }
     );
 
-    const secondPage = await doRpc<TableDoResponse>(
-      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
-      {
-        type: 'table.rows.list',
-        projectSlug: 'demo',
-        tableSlug: 'users',
-        query: {
-          limit: 2,
-          sort: 'name:asc',
-          filter: {
-            name: {
-              contains: 'a'
-            }
-          },
-          cursor: firstResult.result.nextCursor
+    await expect(listUsers(env, {
+      limit: 2,
+      sort: 'name:asc',
+      filter: {
+        name: {
+          contains: 'a'
+        }
+      },
+      cursor: firstResult.result.nextCursor
+    })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      details: { reason: 'stale-cursor' }
+    });
+
+    const restarted = await listUsers(env, {
+      limit: 2,
+      sort: 'name:asc',
+      filter: {
+        name: {
+          contains: 'a'
         }
       }
-    );
-
-    const secondResult = secondPage as {
-      type: 'table.rows.list.result';
-      result: {
-        data: Array<{ id: string }>;
-        nextCursor: string | null;
-      };
-    };
-
-    expect(secondResult.result.data.map((row) => row.id)).toEqual(['row-3']);
-    expect(secondResult.result.nextCursor).toBeNull();
+    });
+    expect(restarted.data.map((row) => row.id)).toEqual(['row-1', 'row-3']);
+    expect(restarted.nextCursor).toBeNull();
   });
 
   it('rejects list projections that request unknown fields', async () => {
@@ -4966,5 +5096,668 @@ describe('TableDO', () => {
         }
       }
     });
+  });
+
+  it('rejects resolved table configs whose cache TTL exceeds one hour', async () => {
+    const env = createTestEnv();
+
+    await expect(
+      callUsersTable(
+        env,
+        { type: 'table.cache.get', ...usersTable, resolvedConfig: buildResolvedUsersConfig({ cacheTtlSeconds: 3601 }) },
+        'table.cache.get.result'
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Request validation failed.'
+    });
+
+    await expect(
+      callUsersTable(
+        env,
+        { type: 'table.cache.get', ...usersTable, resolvedConfig: buildResolvedUsersConfig({ cacheTtlSeconds: 3600 }) },
+        'table.cache.get.result'
+      )
+    ).resolves.toMatchObject({
+      data: {
+        cacheTtlSeconds: 3600
+      }
+    });
+  });
+
+  it('rejects creates and updates whose date or datetime values are impossible calendar values', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'dueDate', 'updatedAt'],
+        ['row-1', '2026-02-28', '2026-02-28T10:00:00Z']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      fieldRules: {
+        dueDate: { type: 'date' },
+        updatedAt: { type: 'datetime' }
+      },
+      cacheTtlSeconds: 3600
+    });
+
+    await expect(createUser(env, { dueDate: '2026-02-30', updatedAt: '2026-02-30T10:00:00Z' })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Table row failed validation.',
+      details: {
+        fieldErrors: [
+          { field: 'dueDate', code: 'TYPE' },
+          { field: 'updatedAt', code: 'TYPE' }
+        ]
+      }
+    });
+    await expect(updateUser(env, 'row-1', { updatedAt: '2026-04-26T24:00:00Z' })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      details: {
+        fieldErrors: [{ field: 'updatedAt', code: 'TYPE' }]
+      }
+    });
+    expect(sheet.rows).toEqual([
+      ['_id', 'dueDate', 'updatedAt'],
+      ['row-1', '2026-02-28', '2026-02-28T10:00:00Z']
+    ]);
+  });
+
+  it('never returns raw Google error text in TableDO error responses or cache status', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sentinel = 'SENSITIVE_UPSTREAM_TEXT project 123456789012';
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let rejectReads = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (rejectReads && String(input).includes('/values/')) {
+        return Response.json({ error: { code: 403, message: sentinel, status: 'PERMISSION_DENIED' } }, { status: 403 });
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    rejectReads = true;
+
+    const response = await getUsersTableStub(env).fetch('https://do.internal/rpc', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'table.rows.list', ...usersTable, query: {} })
+    });
+    const body = await response.text();
+
+    expect(response.status).toBe(502);
+    expect(body).not.toContain('SENSITIVE_UPSTREAM_TEXT');
+    expect(JSON.parse(body)).toEqual({
+      error: {
+        code: 'BAD_GATEWAY',
+        message: 'Google Sheets authentication or permission check failed.',
+        details: { status: 403, googleStatus: 'PERMISSION_DENIED' }
+      }
+    });
+    expect(JSON.stringify(await getUsersCacheStatus(env))).not.toContain('SENSITIVE_UPSTREAM_TEXT');
+  });
+
+  it('treats startsWith as a case-sensitive, scan-heavy operator on indexed fields', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Apple'],
+        ['row-2', 'apricot'],
+        ['row-3', 'banana']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+
+    const result = await listUsers(env, { filter: { name: { startsWith: 'a' } } });
+    expect(result.data.map((row) => row.id)).toEqual(['row-2']);
+
+    const limitedEnv = createTestEnv({ TABLE_MAX_FULL_SCAN_ROWS: '2' });
+    await createUsersTable(limitedEnv, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+    await expect(listUsers(limitedEnv, { filter: { name: { startsWith: 'A' } } })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'This query requires a full scan and exceeds the configured scan threshold of 2 cached rows.'
+    });
+  });
+
+  it('applies rowNumber filters identically on indexed and scan paths', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+
+    const indexed = await listUsers(env, { filter: { rowNumber: { eq: '3' } } });
+    const scanned = await listUsers(env, { filter: { rowNumber: { eq: '3' }, name: { contains: 'a' } } });
+    const rangedScan = await listUsers(env, { filter: { rowNumber: { gte: '3' }, name: { contains: 'a' } } });
+
+    expect(indexed.data.map((row) => row.id)).toEqual(['row-2']);
+    expect(scanned.data.map((row) => row.id)).toEqual(['row-2']);
+    expect(rangedScan.data.map((row) => row.id)).toEqual(['row-2', 'row-3']);
+    await expect(listUsers(env, { filter: { rowNumber: { contains: '2' } } })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'rowNumber filters do not support startsWith or contains.'
+    });
+    await expect(listUsers(env, { filter: { rowNumber: { eq: 'two' } } })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'rowNumber filters require numeric values.'
+    });
+  });
+
+  it('compares unique and filtered values through the field normalization rules', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'email'],
+        ['row-1', 'Alice@Example.com ']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      indexedFields: ['email'],
+      fieldRules: {
+        email: {
+          unique: true,
+          normalize: ['trim', 'lowercase']
+        }
+      },
+      cacheTtlSeconds: 3600
+    });
+    await listUsers(env);
+
+    await expect(createUser(env, { email: ' alice@example.com ' })).rejects.toMatchObject({
+      name: 'ConflictError',
+      message: 'email must be unique.',
+      details: {
+        field: 'email',
+        value: 'alice@example.com',
+        conflictingRowIds: ['row-1']
+      }
+    });
+    expect(sheet.rows).toEqual([
+      ['_id', 'email'],
+      ['row-1', 'Alice@Example.com ']
+    ]);
+
+    const indexed = await listUsers(env, { filter: { email: { eq: 'ALICE@example.com' } } });
+    const scanned = await listUsers(env, { filter: { email: { eq: 'ALICE@example.com' }, _id: { contains: 'row' } } });
+    expect(indexed.data.map((row) => row.id)).toEqual(['row-1']);
+    expect(scanned.data.map((row) => row.id)).toEqual(['row-1']);
+  });
+
+  it('reports a cheap, monotonic data generation that advances whenever reads could change', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let googleRequestCount = 0;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      googleRequestCount += 1;
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+    const getGeneration = () => callUsersTable(env, { type: 'table.generation.get', ...usersTable }, 'table.generation.get.result');
+
+    let requestsBefore = googleRequestCount;
+    const initial = await getGeneration();
+    expect(googleRequestCount).toBe(requestsBefore);
+    expect(initial).toEqual({ dataGeneration: 0, lastSyncCompletedAt: null, cacheTtlSeconds: 3600 });
+
+    let lastGeneration = initial.dataGeneration;
+    const expectGenerationAdvanced = async () => {
+      const next = await getGeneration();
+      expect(next.dataGeneration).toBeGreaterThan(lastGeneration);
+      lastGeneration = next.dataGeneration;
+      return next;
+    };
+
+    await listUsers(env);
+    const afterSync = await expectGenerationAdvanced();
+    expect(afterSync.lastSyncCompletedAt).not.toBeNull();
+    expect((await getUsersCacheStatus(env)).dataGeneration).toBe(lastGeneration);
+
+    const created = await createUser(env, { name: 'Grace' });
+    await expectGenerationAdvanced();
+    await updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+    await expectGenerationAdvanced();
+    await deleteUser(env, created.data.id);
+    await expectGenerationAdvanced();
+
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: '2026-10-28T00:00:00.000Z',
+      debounceUntil: null
+    }, 'table.external-change.record.result');
+    await expectGenerationAdvanced();
+    await callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result');
+    await expectGenerationAdvanced();
+
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 60 });
+    const afterConfigChange = await expectGenerationAdvanced();
+    expect(afterConfigChange.cacheTtlSeconds).toBe(60);
+
+    await callUsersTable(env, { type: 'table.cache.clear', ...usersTable }, 'table.cache.clear.result');
+    const afterClear = await expectGenerationAdvanced();
+    expect(afterClear.lastSyncCompletedAt).toBeNull();
+
+    requestsBefore = googleRequestCount;
+    expect((await getGeneration()).dataGeneration).toBe(lastGeneration);
+    expect(googleRequestCount).toBe(requestsBefore);
+  });
+
+  it('rejects pagination cursors after a row changes sort position between pages', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'score'],
+        ['row-a', '1'],
+        ['row-b', '2'],
+        ['row-c', '3']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      indexedFields: ['score'],
+      fieldRules: { score: { type: 'number' } },
+      cacheTtlSeconds: 3600
+    });
+
+    const firstPage = await listUsers(env, { sort: 'score:asc', limit: 1 });
+    expect(firstPage.data.map((row) => row.id)).toEqual(['row-a']);
+
+    await updateUser(env, 'row-b', { score: '0' });
+
+    await expect(listUsers(env, { sort: 'score:asc', limit: 1, cursor: firstPage.nextCursor })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Pagination cursor is stale because the table data changed after it was issued. Restart pagination without a cursor.',
+      details: { reason: 'stale-cursor' }
+    });
+  });
+
+  it('keeps pagination cursors valid across a resync that leaves the cached rows unchanged', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-28T12:00:00.000Z'));
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'score'],
+        ['row-a', '1'],
+        ['row-b', '2']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      indexedFields: ['score'],
+      fieldRules: { score: { type: 'number' } },
+      cacheTtlSeconds: 1
+    });
+
+    const firstPage = await listUsers(env, { sort: 'score:asc', limit: 1 });
+    vi.setSystemTime(new Date('2026-10-28T12:00:05.000Z'));
+    sheet.requestedRanges = [];
+    const secondPage = await listUsers(env, { sort: 'score:asc', limit: 1, cursor: firstPage.nextCursor });
+
+    expect(sheet.requestedRanges).toContain("'Users'!A1:B");
+    expect(secondPage.data.map((row) => row.id)).toEqual(['row-b']);
+    vi.useRealTimers();
+  });
+
+  it('keeps an external change recorded during a sync pending after that sync completes', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    const snapshotRead = createSignal();
+    const releaseSnapshot = createSignal();
+    let gateNextSnapshot = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (gateNextSnapshot && decodeRangeFromUrl(String(input)) === "'Users'!A1:B") {
+        gateNextSnapshot = false;
+        const snapshot = await baseFetch(input, init);
+        snapshotRead.resolve();
+        await releaseSnapshot.promise;
+        return snapshot;
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    gateNextSnapshot = true;
+    const reindex = callUsersTable(env, {
+      type: 'table.reindex',
+      ...usersTable,
+      requestContext: {
+        requestId: 'req-auto',
+        route: 'control.spreadsheet-watch.alarm',
+        principal: 'system:drive-watch',
+        syncSource: 'external-change'
+      }
+    }, 'table.reindex.result');
+    await snapshotRead.promise;
+
+    sheet.rows = [
+      ['_id', 'name'],
+      ['row-1', 'Ada Lovelace']
+    ];
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: '2026-10-28T12:00:00.000Z',
+      debounceUntil: null
+    }, 'table.external-change.record.result');
+    releaseSnapshot.resolve();
+    await reindex;
+
+    const status = await getUsersCacheStatus(env);
+    expect(status).toMatchObject({
+      stale: true,
+      staleReason: 'external-change',
+      externalChange: {
+        pending: true,
+        lastChangedAt: '2026-10-28T12:00:00.000Z'
+      }
+    });
+    expect(status.externalChange.lastAutoReindexAt).not.toBeNull();
+
+    const rows = await listUsers(env);
+    expect(rows.data.map((row) => row.values.name)).toEqual(['Ada Lovelace']);
+    expect((await getUsersCacheStatus(env)).externalChange.pending).toBe(false);
+  });
+
+  it('runs its own sync when the in-flight sync was started for a different table config', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name', 'status'],
+        ['row-1', 'Ada', 'active'],
+        ['row-2', 'Bea', 'draft']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    const snapshotRead = createSignal();
+    const releaseSnapshot = createSignal();
+    let gateNextSnapshot = false;
+    let snapshotReads = 0;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (decodeRangeFromUrl(String(input)) === "'Users'!A1:C") {
+        snapshotReads += 1;
+        if (gateNextSnapshot) {
+          gateNextSnapshot = false;
+          const snapshot = await baseFetch(input, init);
+          snapshotRead.resolve();
+          await releaseSnapshot.promise;
+          return snapshot;
+        }
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+
+    gateNextSnapshot = true;
+    const configAList = listUsers(env);
+    await snapshotRead.promise;
+    await createUsersTable(env, { indexedFields: ['name', 'status'], cacheTtlSeconds: 3600 });
+    const configBList = listUsers(env, { filter: { status: { eq: 'active' } } });
+    // Let request B reach the in-flight config-A sync before releasing it. setImmediate yields
+    // event-loop turns without a wall-clock delay; nothing observable marks "waiting on a sync".
+    for (let turn = 0; turn < 10; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    releaseSnapshot.resolve();
+    await configAList;
+
+    expect((await configBList).data.map((row) => row.id)).toEqual(['row-1']);
+    expect(snapshotReads).toBe(2);
+  });
+
+  it('rejects a sync whose data read returns a different header row than the layout read', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let serveStaleHeaderRow = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (serveStaleHeaderRow && decodeRangeFromUrl(String(input)) === "'Users'!1:1") {
+        return Response.json({ values: [['_id', 'name']] });
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+    const before = await getUsersCacheStatus(env);
+
+    sheet.rows = [
+      ['_id', 'email', 'name'],
+      ['row-1', 'ada@example.com', 'Ada']
+    ];
+    serveStaleHeaderRow = true;
+
+    await expect(callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result')).rejects.toMatchObject({
+      name: 'ServiceUnavailableError',
+      message: 'The sheet header row changed while the table snapshot was being read. Retry the request.'
+    });
+    expect(await getUsersCacheStatus(env)).toMatchObject({
+      status: 'error',
+      rowCount: 1,
+      lastSyncCompletedAt: before.lastSyncCompletedAt
+    });
+  });
+
+  it('verifies fresh point updates and deletes without reading the whole managed id column', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    sheet.requestedRanges = [];
+    await updateUser(env, 'row-2', { name: 'Bea Smith' });
+    await deleteUser(env, 'row-3');
+    expect(sheet.requestedRanges).not.toContain("'Users'!A2:A");
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-1', 'Ada'],
+      ['row-2', 'Bea Smith']
+    ]);
+
+    sheet.rows = [
+      ['_id', 'name'],
+      ['row-2', 'Bea Smith'],
+      ['row-1', 'Ada']
+    ];
+    sheet.requestedRanges = [];
+    const moved = await updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+
+    expect(moved.data.rowNumber).toBe(3);
+    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-2', 'Bea Smith'],
+      ['row-1', 'Ada Lovelace']
+    ]);
+  });
+
+  it('re-resolves the appended row before patching when rows are inserted above it during create', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let insertAfterAppend = true;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await baseFetch(input, init);
+      if (insertAfterAppend && String(input).includes(':append')) {
+        insertAfterAppend = false;
+        sheet.rows.splice(1, 0, ['row-manual', 'Manual']);
+      }
+
+      return response;
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    const created = await createUser(env, { name: 'Grace' });
+
+    expect(created.data).toMatchObject({ rowNumber: 4, values: { name: 'Grace' } });
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-manual', 'Manual'],
+      ['row-1', 'Ada'],
+      [created.data.id, 'Grace']
+    ]);
+    expect((await getUsersCacheStatus(env)).staleReason).toBe('external-change');
+  });
+
+  it('fails closed and marks the cache stale when the written row no longer has the target id', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let insertBeforePatch = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (insertBeforePatch && String(input).includes('/values:batchUpdate')) {
+        insertBeforePatch = false;
+        sheet.rows.splice(1, 0, ['row-manual', 'Manual']);
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    insertBeforePatch = true;
+    await expect(updateUser(env, 'row-1', { name: 'Ada Lovelace' })).rejects.toMatchObject({
+      name: 'ConflictError',
+      details: { rowId: 'row-1', rowNumber: 2 }
+    });
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: true, staleReason: 'external-change' });
+  });
+
+  it('removes an orphaned skeleton and marks the cache stale when an append response is lost', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let loseAppendResponse = true;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await baseFetch(input, init);
+      if (loseAppendResponse && String(input).includes(':append')) {
+        loseAppendResponse = false;
+        throw new Error('socket hang up');
+      }
+
+      return response;
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    await expect(createUser(env, { name: 'Grace' })).rejects.toMatchObject({ name: 'ServiceUnavailableError' });
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-1', 'Ada']
+    ]);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: true, staleReason: 'external-change' });
+  });
+
+  it('does not serve stale cache after update or delete responses are lost', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let loseResponseFor: string | null = null;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await baseFetch(input, init);
+      if (loseResponseFor && String(input).includes(loseResponseFor)) {
+        loseResponseFor = null;
+        throw new Error('socket hang up');
+      }
+
+      return response;
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    loseResponseFor = '/values:batchUpdate';
+    await expect(updateUser(env, 'row-1', { name: 'Ada Lovelace' })).rejects.toMatchObject({ name: 'ServiceUnavailableError' });
+    expect((await listUsers(env)).data.map((row) => row.values.name)).toEqual(['Ada Lovelace', 'Bea']);
+
+    loseResponseFor = ':batchUpdate';
+    await expect(deleteUser(env, 'row-2')).rejects.toMatchObject({ name: 'ServiceUnavailableError' });
+    expect((await listUsers(env)).data.map((row) => row.id)).toEqual(['row-1']);
   });
 });
