@@ -236,6 +236,27 @@ describe('bootstrapApiKeys', () => {
     expect(api.requests.filter((entry) => entry.startsWith('DELETE ')).at(-1)).toBe(`DELETE /v1/admin/keys/${adminId}`);
   });
 
+  it('revokes the authenticating key exactly once, last, when a configured name repeats', async () => {
+    const adminId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const readId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    api.seed('setup-admin', adminId);
+    api.seed('setup-read', readId);
+    const bearer = `sfk_${adminId}.${'ab'.repeat(32)}`;
+
+    const result = await bootstrapApiKeys({
+      baseUrl,
+      bearer,
+      apiKeys: [desiredKeys[0]!, desiredKeys[1]!, desiredKeys[0]!],
+      rotate: true
+    });
+
+    expect(result.revoked.map((entry) => entry.id)).toEqual([readId, adminId]);
+    expect(api.requests.filter((entry) => entry.startsWith('DELETE '))).toEqual([
+      `DELETE /v1/admin/keys/${readId}`,
+      `DELETE /v1/admin/keys/${adminId}`
+    ]);
+  });
+
   it('returns keys already created when a later create fails', async () => {
     api.failCreatesAfter = 1;
 
