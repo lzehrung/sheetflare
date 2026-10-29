@@ -532,6 +532,78 @@ async function startDeleteSupersedingListSync(options: { denyRebuild?: boolean }
   return { env, sheet, list, joinedList, lateList, latePointRead, deletion, rebuild };
 }
 
+// A write has passed its cache check and waits on Google for the read-back of the row it wrote. One request then
+// starts a sync, which reads its snapshot and holds it, and four more requests that must sync before they are
+// answered join it: the write has not reached the cache yet, so the sync is still current for all five. The write
+// then reaches the cache and the sync is released. It finds the cache moved under it, drops its snapshot and leaves
+// the cache stale, so all five need a sync that began after it. Resolves once the sync that replaces it has read its
+// snapshot and is held, with every request still waiting. replacementReads() counts the snapshot reads Google has
+// answered since the first sync's. recordExternalChange marks the cache as needing a resync first, which is what
+// makes point reads sync at all.
+async function startForcedRequestsOnASyncAWriteSupersedes<TResult>(options: {
+  recordExternalChange: boolean;
+  request: (env: CloudflareEnv) => Promise<TResult>;
+}) {
+  const sheet: SheetState = {
+    rows: [
+      ['_id', 'name'],
+      ['row-1', 'Ada'],
+      ['row-2', 'Bea']
+    ],
+    requestedRanges: []
+  };
+  const snapshotRange = "'Users'!A1:B";
+  // Holds the write's read-back, then the first sync's snapshot read, then the replacement's. The two snapshot gates
+  // watch the same range: the outer one is armed last, so it catches the later read.
+  const readBack = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A2:B2");
+  const firstSync = createSnapshotGate(readBack.fetch, snapshotRange);
+  const replacement = createSnapshotGate(firstSync.fetch, snapshotRange);
+  vi.stubGlobal('fetch', replacement.fetch);
+  const env = createTestEnv();
+  await createUsersTable(env, { cacheTtlSeconds: 3600 });
+  await listUsers(env);
+
+  readBack.arm();
+  const write = updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+  await readBack.reached;
+  if (options.recordExternalChange) {
+    // Drive reports an edit without a debounce window, so the cache has to resync before it answers anything.
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: new Date().toISOString(),
+      debounceUntil: null
+    }, 'table.external-change.record.result');
+  }
+
+  firstSync.arm();
+  const requests = [options.request(env)];
+  await firstSync.reached;
+  for (let joiner = 0; joiner < 4; joiner += 1) {
+    requests.push(options.request(env));
+  }
+
+  for (const request of requests) {
+    expect(await answerOrWaiting(request)).toBe('waiting');
+  }
+
+  const readsBeforeReplacement = sheet.requestedRanges.filter((range) => range === snapshotRange).length;
+  replacement.arm();
+  readBack.release();
+  await write;
+  firstSync.release();
+  await replacement.reached;
+  // Requests that start a sync of their own reach Google in the next few turns, so let them.
+  await yieldEventLoopTurns();
+
+  return {
+    env,
+    requests,
+    replacement,
+    replacementReads: () => sheet.requestedRanges.filter((range) => range === snapshotRange).length - readsBeforeReplacement
+  };
+}
+
 describe('TableDO', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -7165,6 +7237,73 @@ describe('TableDO', () => {
       ['row-3', 4, 'Cora']
     ]);
     expect(infoSpy).not.toHaveBeenCalledWith(expect.stringContaining('"event":"table.sync.superseded"'));
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh' });
+  });
+
+  it('shares one replacement sync between the point reads that joined a sync a write superseded, instead of starting one each', async () => {
+    const { env, requests, replacement, replacementReads } = await startForcedRequestsOnASyncAWriteSupersedes({
+      recordExternalChange: true,
+      request: (testEnv) => callUsersTable(testEnv, { type: 'table.row.get', ...usersTable, rowId: 'row-2' }, 'table.row.get.result')
+    });
+
+    // All five point reads need a sync that began after the superseded one. One of them starts it and the rest join it,
+    // so Google has answered one snapshot read for it, not one per read.
+    expect(replacementReads()).toBe(1);
+
+    replacement.release();
+    for (const read of await Promise.all(requests)) {
+      expect(read.data).toMatchObject({ id: 'row-2', rowNumber: 3, values: { name: 'Bea' } });
+    }
+    expect(replacementReads()).toBe(1);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', externalChange: { pending: false } });
+  });
+
+  it('shares one replacement sync between the reindex requests that joined a sync a write superseded, instead of starting one each', async () => {
+    const { env, requests, replacement, replacementReads } = await startForcedRequestsOnASyncAWriteSupersedes({
+      recordExternalChange: false,
+      request: (testEnv) => callUsersTable(testEnv, { type: 'table.reindex', ...usersTable }, 'table.reindex.result')
+    });
+
+    expect(replacementReads()).toBe(1);
+
+    replacement.release();
+    const [starter, ...joiners] = await Promise.all(requests);
+    // The reindex that started the superseded sync reports it: the cache kept the write's rows and is stale. The four
+    // that joined it are answered by the one replacement.
+    expect(starter).toMatchObject({ ok: true, cache: { stale: true, staleReason: 'external-change' } });
+    for (const joiner of joiners) {
+      expect(joiner).toMatchObject({ ok: true, rowCount: 2, cache: { stale: false, staleReason: 'fresh' } });
+    }
+    expect(replacementReads()).toBe(1);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh' });
+  });
+
+  it('gives a reindex request that took a stale result one replacement sync and no more, even when that sync leaves the cache stale as well', async () => {
+    const { env, requests, replacement, replacementReads } = await startForcedRequestsOnASyncAWriteSupersedes({
+      recordExternalChange: false,
+      request: (testEnv) => callUsersTable(testEnv, { type: 'table.reindex', ...usersTable }, 'table.reindex.result')
+    });
+
+    // Another edit is reported while the replacement reads the sheet, so its snapshot may lack it and the cache stays
+    // stale after it.
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: new Date().toISOString(),
+      debounceUntil: null
+    }, 'table.external-change.record.result');
+    replacement.release();
+    const [, ...joiners] = await Promise.all(requests);
+
+    // The replacement is the sync those four requests were owed, so none of them starts another to cover that edit.
+    expect(replacementReads()).toBe(1);
+    for (const joiner of joiners) {
+      expect(joiner).toMatchObject({ ok: true, cache: { stale: true, staleReason: 'external-change' } });
+    }
+
+    // The next read resyncs once and the table settles.
+    await listUsers(env);
+    expect(replacementReads()).toBe(2);
     expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh' });
   });
 });
