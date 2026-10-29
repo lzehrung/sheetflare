@@ -82,10 +82,17 @@ export function resolveGoogleCredential(env: CloudflareEnv, requestedRef: string
   const credentialRef = requestedRef.trim() || defaultGoogleCredentialRef;
 
   if (credentialRef === defaultGoogleCredentialRef) {
-    return normalizeGoogleCredential({
-      clientEmail: env.GOOGLE_CLIENT_EMAIL,
-      privateKey: env.GOOGLE_PRIVATE_KEY
-    }, defaultGoogleCredentialRef);
+    const clientEmail = env.GOOGLE_CLIENT_EMAIL?.trim() ?? '';
+    const privateKey = env.GOOGLE_PRIVATE_KEY?.trim() ?? '';
+    if (!clientEmail || !privateKey) {
+      // Missing gateway credentials are a deployment problem. The message names the configuration, never the values.
+      throw new ServiceUnavailableError('The default Google credential is not configured. Set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY.');
+    }
+
+    return {
+      clientEmail,
+      privateKey
+    };
   }
 
   const credentials = parseGoogleCredentialMap(env);
