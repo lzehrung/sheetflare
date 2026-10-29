@@ -83,6 +83,11 @@ Severity: **P1** likely wrong behavior or significant risk; **P2** real but boun
 ## Found during fixes
 
 - [x] **P1 · security** After a project delete, the deleting isolate kept honoring the project's keys from its principal cache; a re-created slug served data to the old key. *(proven: real-stack test; fixed)*
+- [x] **P2 · logic** Concurrent project creates could both pass the shared-spreadsheet credential-ref check; the pairing is now reserved atomically in the control plane, with release on failure and a 5-minute expiry. *(Copilot review; proven: interleaved real-DO test)*
+- [x] **P2 · logic** A bootstrap failure after some keys were minted lost those keys' secrets; bootstrap now emits partial results and setup hands them off. *(Copilot review)*
+- [x] **P2 · logic** Key rotation revoked the authenticating admin key before the others, so later revocations failed with 401; it is now revoked last. *(Copilot review)*
+- [x] **P2 · logic** An inherited `SHEETFLARE_BOOTSTRAP_ROTATE_KEYS=true` could rotate keys without `--rotate-keys`; setup now sets the child flag explicitly. *(Copilot review)*
+- [x] **P2 · tests** Smoke read-back compared raw configured values, failing on normalized fields and arrays; it now applies the table's field rules and Sheets serialization. *(Copilot review)*
 - [ ] **P2 · tests** `apps/api/tsconfig.json` type-checks only `src`, so test files are never type-checked (`test/support/harness.ts` already carries a hidden type error).
 - [ ] **P2 · logic** A sync in flight while a write commits can promote the older snapshot, briefly serving pre-write data.
 - [ ] **P2 · logic** `id` filters have the same numeric-operand mismatch between indexed and scan paths that `rowNumber` had.

@@ -308,7 +308,7 @@ Operational notes:
 - `npm run ops:watch:drive:retry-advice` shows the current helper view of whether a spreadsheet is still cooling down and the earliest conservative retry time
 - Workers Logs are enabled in both Wrangler configs. When a watch or reindex misbehaves, filter for these structured events: `drive.reindex.failed`, `drive.watch.renew.failed`, `drive.watch.stop.failed`, and `drive.notification.rejected`
 - a Google quota rejection is stored in `lastWatchError` as `Google Drive rate limit exceeded for creating file subscriptions.`
-- projects that share one spreadsheet must use the same Google credential ref; creating a project whose spreadsheet is already registered under a different ref returns 409
+- projects that share one spreadsheet must use the same Google credential ref; creating a project returns 409 when the spreadsheet is registered, or is being created by another project, under a different ref. A failed create releases its claim at once; a create that crashed mid-way releases it after 5 minutes, or immediately when you delete that project slug
 - reindex failures back off exponentially per watch: 30 seconds minimum, 1 hour cap; failed watch stops are retried from the control-plane alarm
 - Google Drive watch behavior is documented at:
   - https://developers.google.com/workspace/drive/api/guides/push
