@@ -129,6 +129,46 @@ Emitted by `ControlPlaneDO` as a warning when a Drive notification names a chann
 
 A replaced or stopped channel can keep delivering briefly until its stop succeeds or it expires, so isolated events are expected.
 
+### Failed Google request
+
+Emitted by the Google Sheets adapter for each failed Google API response:
+
+- `event: "google.request.failed"`
+- `operation`: the Google call that failed
+- `status`: the HTTP status Google returned
+- `googleStatus`, `reason`: Google's `error.status` and first `error.errors[].reason`, when present
+- `driveSubscriptionQuotaExceeded`: `true` when Drive rejected a watch for the file-subscription rate limit
+- `upstreamMessage`: Google's error message or raw response body, truncated to 2000 characters
+
+API error responses for Google failures return only `status`, `googleStatus`, `reason`, and `driveSubscriptionQuotaExceeded` in `error.details`. The upstream text appears only in this event.
+
+Operator action: `401` or `403` means Google rejected the credential or its access to the spreadsheet; check the service account's sharing and the `googleCredentialRef` ([google-service-accounts.md](./google-service-accounts.md)). `429` means Google quota was exceeded; reduce load, and for `driveSubscriptionQuotaExceeded` follow [Register Drive Watches](./operator-runbook.md#register-drive-watches). `5xx` is usually transient; investigate only when it persists.
+
+### Unconfirmed table write
+
+Emitted by `TableDO` when a create, update, or delete may have been applied by Google but could not be confirmed, for example after a lost response or a 5xx:
+
+- `event: "table.write.unconfirmed"`
+- `projectSlug`, `tableSlug`
+- `operation`: `create`, `update`, or `delete`
+- `rowId`
+- `errorName`, `errorMessage`
+
+The table is marked for resync, so the next read reloads it from the sheet. The API still returns the original write error. Operator action: compare the row with `rowId` in the sheet against the intended change, and correct the sheet if needed. Repeated events for one table point to Google or network instability; check the matching `google.request.failed` events.
+
+### Failed create rollback
+
+Emitted by `TableDO` when a create fails after Google appended the row and the automatic rollback could not remove it. The API returns `503`:
+
+- `event: "table.create.rollback_failed"`
+- `projectSlug`, `tableSlug`
+- `rowId`
+- `appendedRowNumber`: the appended sheet row, or `null` when Google's append response was lost
+- `createError`, `rollbackError`: the original and rollback error messages
+
+The table is marked for resync, and the partial row stays in the sheet, so the next resync caches it. Operator action: find the row whose managed ID is `rowId` (use `appendedRowNumber` when it is not `null`), delete it if it is partial, then [force a reindex](./operator-runbook.md#force-reindex).
+
+
 ## Minimum Alert Conditions
 
 Alert on these conditions before broad production use:
@@ -147,7 +187,7 @@ Alert on these conditions before broad production use:
    Alert when `request.complete` with `status: 429` exceeds your expected threshold for the same `path` and `principal` in a 5 minute window.
 
 4. Auth failure spikes
-   Alert when `request.error` with `errorName: "UnauthorizedError"` rises sharply for the same `path` or principal family.
+   Alert when `request.error` with `errorName: "UnauthorizedError"` (`401`: missing or invalid credential) or `errorName: "ForbiddenError"` (`403 FORBIDDEN`: valid key without the required scope) rises sharply for the same `path` or principal family.
 
 5. Sync duration outliers
    Alert when `table.sync.complete.durationMs` or `table.sync.failed.durationMs` materially exceeds the recent baseline for the same table.
@@ -179,6 +219,9 @@ Alert on these conditions before broad production use:
 14. `cache.invalidation.failed`
     Alert on any occurrence for critical tables, or on a sustained rate overall. Edge-cached reads can serve pre-change data until their TTL expires.
 
+15. `table.create.rollback_failed`
+    Alert on any occurrence. A partial row can remain in the sheet until an operator removes it.
+
 ## Executable Health Check
 
 Set a list of critical tables:
@@ -202,7 +245,7 @@ Use these exact predicates in your chosen log platform:
   - `event == "request.complete" and status == 429`
 
 - auth spike:
-  - `event == "request.error" and errorName == "UnauthorizedError"`
+  - `event == "request.error" and errorName in ["UnauthorizedError", "ForbiddenError"]`
 
 - slow syncs:
   - `event in ["table.sync.complete", "table.sync.failed"] and durationMs > <your-threshold>`
@@ -227,6 +270,15 @@ Use these exact predicates in your chosen log platform:
 
 - cache invalidation failure:
   - `event == "cache.invalidation.failed"`
+
+- unconfirmed table write:
+  - `event == "table.write.unconfirmed"` grouped by `projectSlug, tableSlug`
+
+- failed create rollback:
+  - `event == "table.create.rollback_failed"`
+
+- Google request failure:
+  - `event == "google.request.failed"` grouped by `operation, status`
 
 ## Tested Failure Workflow
 
