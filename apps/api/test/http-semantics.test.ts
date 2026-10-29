@@ -52,8 +52,8 @@ describe('403 for insufficient scope, 401 only for missing or invalid credential
       call: request(rowsPath, apiKeys.writeOnly.authorization)
     },
     {
-      name: 'a key scoped to another project reading a table',
-      call: request(rowsPath, apiKeys.otherProject.authorization)
+      name: 'a key scoped to another project reading a private table',
+      call: request('/v1/projects/other/tables/users/rows', apiKeys.project.authorization)
     },
     {
       name: 'a key without admin:keys scope listing keys',
@@ -215,6 +215,46 @@ describe('scope is checked before the table is resolved', () => {
 
     expect(anonymous.status).toBe(200);
     expect(writeOnly.status).toBe(200);
+  });
+
+  it('treats a valid key scoped to another project as anonymous on a public-read project', async () => {
+    const env = createEnv({ defaultAuthMode: 'public-read' });
+
+    const response = await read(rowsPath, apiKeys.otherProject.authorization, env);
+
+    expect(response.status).toBe(200);
+    // The key is valid, so it keeps its own per-key budget instead of the anonymous client bucket.
+    expect(probesOf(env).rateLimitRequests.map((request) => request.name)).toEqual([
+      'rate-limit:data:client:anonymous',
+      `rate-limit:data:api-key:${apiKeys.otherProject.id}`
+    ]);
+  });
+
+  it('still forbids that key from writing to the public-read project', async () => {
+    const response = await createApp().request(
+      rowsPath,
+      {
+        method: 'POST',
+        headers: {
+          authorization: apiKeys.otherProject.authorization,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ values: { name: 'Ada' } })
+      },
+      createEnv({ defaultAuthMode: 'public-read' })
+    );
+
+    expect(response.status).toBe(403);
+    expect((await readError(response)).code).toBe('FORBIDDEN');
+  });
+
+  it('still forbids that key from reading a private project', async () => {
+    const env = createEnv();
+
+    const response = await read('/v1/projects/other/tables/users/rows', apiKeys.project.authorization, env);
+
+    expect(response.status).toBe(403);
+    expect(probesOf(env).projectRequests).toEqual(['project.table.resolve']);
   });
 });
 

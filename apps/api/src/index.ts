@@ -505,9 +505,36 @@ function getRateLimitConfiguration(env: Env) {
   };
 }
 
+// One IPv6 /64 is one network (typically one subscriber), so the whole prefix shares a bucket. The address is expanded
+// and lowercased first, which makes `2001:db8:abcd:12::1` and `2001:0DB8:ABCD:0012:ffff::` the same principal.
+// Anything that is not eight hextets is left unchanged, including IPv4.
+function bucketClientAddress(ipAddress: string) {
+  const normalized = ipAddress.trim().toLowerCase();
+  if (!normalized.includes(':') || normalized.includes('.')) {
+    return normalized;
+  }
+
+  const sides = normalized.split('::');
+  if (sides.length > 2) {
+    return normalized;
+  }
+  const head = sides[0] ? sides[0].split(':') : [];
+  const tail = sides.length === 2 && sides[1] ? sides[1].split(':') : [];
+  const missing = 8 - head.length - tail.length;
+  if (sides.length === 2 && missing < 0) {
+    return normalized;
+  }
+  const groups = sides.length === 2 ? [...head, ...Array<string>(missing).fill('0'), ...tail] : head;
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) {
+    return normalized;
+  }
+
+  return `${groups.slice(0, 4).map((group) => group.replace(/^0+/, '') || '0').join(':')}::`;
+}
+
 function getRateLimitPrincipal(c: { req: { header(name: string): string | undefined; method: string; path: string } ; env: Env }) {
   const ipAddress = c.req.header('cf-connecting-ip')?.trim();
-  return ipAddress ? `client:${ipAddress}` : 'client:anonymous';
+  return ipAddress ? `client:${bucketClientAddress(ipAddress)}` : 'client:anonymous';
 }
 
 function getRateLimitRouteFamily(path: string) {
@@ -1126,14 +1153,8 @@ function assertProjectScope(auth: AuthContext, scope: ApiScope, projectSlug: str
   }
 }
 
-function assertCredentialProjectBoundary(auth: AuthContext, projectSlug: string) {
-  if (auth.kind !== 'api-key') {
-    return;
-  }
-
-  if (auth.record.projectSlug && auth.record.projectSlug !== projectSlug) {
-    throw new ForbiddenError(wrongProjectMessage);
-  }
+function keyCrossesProjectBoundary(auth: AuthContext, projectSlug: string) {
+  return auth.kind === 'api-key' && Boolean(auth.record.projectSlug) && auth.record.projectSlug !== projectSlug;
 }
 
 function assertApiKeyCanDelegateScopes(auth: AuthContext, requestedScopes: readonly ApiScope[]) {
@@ -1223,6 +1244,15 @@ async function loadTableDataGeneration(
   return generation.data;
 }
 
+// A key minted for another project has no grant here. On a public-read project it may still read, the same way an
+// anonymous caller can, and it keeps its own per-key rate-limit budget rather than spending the anonymous one.
+function readAuthForProject(auth: AuthContext, projectSlug: string, defaultAuthMode: string): AuthContext {
+  if (keyCrossesProjectBoundary(auth, projectSlug) && defaultAuthMode === 'public-read') {
+    return { kind: 'anonymous' };
+  }
+  return auth;
+}
+
 // The table lookup and, only when this caller may read the table (a read grant, or a public-read project), the table's
 // data generation. A caller that may not read it never causes a table call.
 async function lookupTableForCaller(
@@ -1232,7 +1262,10 @@ async function lookupTableForCaller(
   tableSlug: string
 ): Promise<TableLookup> {
   const tableAccess = await loadProjectTable(c, projectSlug, tableSlug);
-  if (!grantsTableRead(auth) && tableAccess.project.defaultAuthMode !== 'public-read') {
+  const readAuth = readAuthForProject(auth, projectSlug, tableAccess.project.defaultAuthMode);
+  const crossesProject = keyCrossesProjectBoundary(auth, projectSlug);
+  const publicRead = tableAccess.project.defaultAuthMode === 'public-read';
+  if ((!grantsTableRead(readAuth) || crossesProject) && !publicRead) {
     return { readable: false };
   }
 
@@ -1241,12 +1274,12 @@ async function lookupTableForCaller(
 }
 
 // Table reads wait on the caller's rate limit and on the table lookup. Neither depends on the other, so once the
-// caller is known and its key is allowed near this project at all, both run together, and the generation lookup rides
-// along with the table lookup instead of queueing behind the rate limit. A key that may not touch the project never
-// causes a project lookup.
+// caller is known both run together, and the generation lookup rides along with the table lookup instead of queueing
+// behind the rate limit. Whether a key scoped to another project may read is decided from the project the lookup
+// returns: a public-read project allows it as an anonymous caller, and anything else is 403. Writes and admin routes
+// never come here, so they keep rejecting that key with 403.
 async function authorizeTableRead(c: AppContext, projectSlug: string, tableSlug: string): Promise<TableReadTarget> {
   const auth = await identifyCaller(c);
-  assertCredentialProjectBoundary(auth, projectSlug);
 
   const lookup = settle(lookupTableForCaller(c, auth, projectSlug, tableSlug));
   await completeAuthentication(c, auth);
@@ -1255,6 +1288,9 @@ async function authorizeTableRead(c: AppContext, projectSlug: string, tableSlug:
   if (looked.ok) {
     if (looked.value.readable) {
       return looked.value.target;
+    }
+    if (keyCrossesProjectBoundary(auth, projectSlug)) {
+      throw new ForbiddenError(wrongProjectMessage);
     }
   } else if (grantsTableRead(auth) || !isNotFound(looked.reason)) {
     throw looked.reason;
@@ -2540,6 +2576,14 @@ const immutableAdminAssetHeaders = buildAdminUiHeaders({ cache: 'immutable' });
 
 type AdminUiStatus = 'enabled' | 'disabled' | 'invalid' | 'assets-missing';
 
+const minimumSecretLength = 32;
+
+// Length only. The note names the binding, never the secret or how many characters short it is.
+function weakConfiguredSecret(value: string | undefined) {
+  const configured = value?.trim() ?? '';
+  return configured.length > 0 && configured.length < minimumSecretLength;
+}
+
 function getAdminUiStatus(env: Env): AdminUiStatus {
   const mode = env.ADMIN_UI?.trim() ?? '';
   if (mode === '' || mode === 'disabled') {
@@ -2740,10 +2784,14 @@ function createApp() {
 
     if (!hasBootstrapAdmin) {
       notes.push('Bootstrap admin bearer token is not configured. Admin access must use API keys.');
+    } else if (weakConfiguredSecret(c.env.ADMIN_BEARER_TOKEN)) {
+      notes.push('ADMIN_BEARER_TOKEN is shorter than 32 characters.');
     }
 
     if (!hasDriveWebhookSecret) {
       notes.push('GOOGLE_DRIVE_WEBHOOK_SECRET is not configured. Automatic Drive-watch reindexing is unavailable.');
+    } else if (weakConfiguredSecret(c.env.GOOGLE_DRIVE_WEBHOOK_SECRET)) {
+      notes.push('GOOGLE_DRIVE_WEBHOOK_SECRET is shorter than 32 characters.');
     }
 
     if (adminUi === 'invalid') {
