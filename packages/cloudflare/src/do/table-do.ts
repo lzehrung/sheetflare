@@ -443,7 +443,7 @@ export class TableDO {
       case 'table.row.delete':
         return {
           type: 'table.row.delete.result',
-          result: await this.runExclusiveWrite(() => this.deleteRow(body.projectSlug, body.tableSlug, body.rowId, requestContext))
+          result: await this.deleteRow(body.projectSlug, body.tableSlug, body.rowId, requestContext)
         };
       case 'table.schema.get':
         return {
@@ -773,6 +773,22 @@ export class TableDO {
       throw new ForbiddenError(`Deletes are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
+    const cacheNeedsRebuild = await this.runExclusiveWrite(() => this.removeRow(config, rowId, requestContext));
+    if (cacheNeedsRebuild) {
+      // Rebuilding reads the whole sheet, so it runs after the write lock is released: the next
+      // write does not wait for it, and a sync that overlaps a write is flagged stale anyway.
+      await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
+    }
+
+    return {
+      ok: true as const,
+      deletedId: rowId
+    };
+  }
+
+  // Deletes the row from Google and repairs the cache. Returns true when the cache could not be
+  // repaired in place (it was stale or the sheet layout changed) and has to be rebuilt from Google.
+  private async removeRow(config: ResolvedTableConfig, rowId: string, requestContext?: TableRequestContext | null): Promise<boolean> {
     const cacheState = await this.ensurePointOperationReady(config, requestContext);
     const cachedHeaders = this.getMeta('headers');
     const sheets = this.getSheetsClient(config);
@@ -804,15 +820,11 @@ export class TableDO {
       this.shiftCachedRowNumbersAfterDelete(existingRow.rowNumber);
       this.invalidateSchemaMeta();
       this.markCacheFreshAfterMutation(config, headers);
-    } else {
-      this.noteCacheContentChanged();
-      await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
+      return false;
     }
 
-    return {
-      ok: true as const,
-      deletedId: rowId
-    };
+    this.noteCacheContentChanged();
+    return true;
   }
 
   private async getSchema(

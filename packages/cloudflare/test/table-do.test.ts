@@ -6134,4 +6134,37 @@ describe('TableDO', () => {
 
     vi.useRealTimers();
   });
+
+  it('does not hold up the next write while a delete rebuilds the cache', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    const gate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:C");
+    vi.stubGlobal('fetch', gate.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // A column added by hand means the delete cannot repair the cache in place and rebuilds it.
+    sheet.rows = sheet.rows.map((row, index) => [...row, index === 0 ? 'status' : 'active']);
+    gate.arm();
+    const deletion = deleteUser(env, 'row-1');
+    await gate.reached;
+
+    // The rebuild is still reading Google, and a write must not queue behind it.
+    await updateUser(env, 'row-3', { name: 'Cora Lee' });
+
+    gate.release();
+    await deletion;
+    expect((await listUsers(env)).data.map((row) => [row.id, row.values.name])).toEqual([
+      ['row-2', 'Bea'],
+      ['row-3', 'Cora Lee']
+    ]);
+  });
 });
