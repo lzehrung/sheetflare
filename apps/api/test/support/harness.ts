@@ -160,6 +160,7 @@ export function createEnv(options?: {
   googlePrivateKey?: string;
   googleCredentialsJson?: string;
   adminBearerToken?: string;
+  googleDriveWebhookSecret?: string;
   allowedOrigins?: string;
   cachedReadPurgeShouldFail?: boolean;
   cachedReadResponseHeaders?: Record<string, string>;
@@ -518,7 +519,7 @@ export function createEnv(options?: {
     }
 
     if (body.type === 'project.table.resolve') {
-      if (body.projectSlug !== 'demo') {
+      if (body.projectSlug !== 'demo' && body.projectSlug !== 'other') {
         return notFoundResponse(`Project ${body.projectSlug} was not found.`);
       }
 
@@ -531,10 +532,10 @@ export function createEnv(options?: {
         result: {
           data: {
             project: {
-              slug: 'demo',
+              slug: body.projectSlug,
               spreadsheetId: 'sheet-1',
               googleCredentialRef: 'default',
-              defaultAuthMode: options?.defaultAuthMode ?? 'private'
+              defaultAuthMode: body.projectSlug === 'demo' ? options?.defaultAuthMode ?? 'private' : 'private'
             },
             table,
             resolvedConfig
@@ -957,7 +958,7 @@ export function createEnv(options?: {
     GOOGLE_CLIENT_EMAIL: options?.googleClientEmail ?? 'service@example.com',
     GOOGLE_PRIVATE_KEY: options?.googlePrivateKey ?? 'private-key',
     GOOGLE_CREDENTIALS_JSON: options?.googleCredentialsJson,
-    GOOGLE_DRIVE_WEBHOOK_SECRET: 'drive-secret',
+    GOOGLE_DRIVE_WEBHOOK_SECRET: options?.googleDriveWebhookSecret ?? 'drive-secret',
     ADMIN_BEARER_TOKEN: options?.adminBearerToken ?? 'secret',
     RATE_LIMIT_MAX_REQUESTS: '300',
     RATE_LIMIT_WINDOW_SECONDS: '60',
