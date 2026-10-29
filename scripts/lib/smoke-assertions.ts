@@ -14,10 +14,23 @@ function isPrimitive(value: unknown) {
   return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
 }
 
+const CURRENCY_SYMBOL = /^[$€£¥]|[$€£¥]$/;
+
+/**
+ * Sheets reads numbers back in display format (`1,234`, `$1,234.00`). Strips digit grouping and one
+ * leading or trailing currency symbol, then parses strictly. Empty text is NaN because `Number('')` is 0,
+ * which would let a blank cell match a configured 0.
+ */
+function parseFormattedNumber(text: string): number {
+  const stripped = text.replace(/[, \u00A0\u202F]/g, '').replace(CURRENCY_SYMBOL, '');
+  return stripped === '' ? Number.NaN : Number(stripped);
+}
+
 /**
  * Sheets are stringly typed, so a configured `7` may read back as `"7"`. Primitives therefore compare
  * by string form; arrays and objects must match structurally. A configured boolean is the one exception:
  * formatted Sheets reads return `TRUE`/`FALSE`, which the system's boolean coercion maps back.
+ * A configured number also matches its formatted read-back (see `parseFormattedNumber`).
  */
 function valuesMatch(expected: unknown, actual: unknown) {
   if (isDeepStrictEqual(expected, actual)) {
@@ -26,6 +39,10 @@ function valuesMatch(expected: unknown, actual: unknown) {
 
   if (typeof expected === 'boolean' && typeof actual === 'string') {
     return coerceFieldRuleValue(actual, { type: 'boolean' }) === expected;
+  }
+
+  if (typeof expected === 'number' && typeof actual === 'string') {
+    return String(expected) === actual || parseFormattedNumber(actual) === expected;
   }
 
   return isPrimitive(expected) && isPrimitive(actual) && String(expected) === String(actual);
@@ -77,7 +94,11 @@ export function assertUpdatedValuesPersisted(
   const details = unpersisted
     .map((entry) => `${entry.field} (expected ${JSON.stringify(entry.expected)}, read ${JSON.stringify(entry.actual) ?? 'nothing'})`)
     .join('; ');
-  throw new ScriptError(`Smoke row update did not persist ${stage}: ${details}.`);
+  const numeric = unpersisted.some((entry) => typeof entry.expected === 'number');
+  const hint = numeric
+    ? ' Smoke compares numbers after removing grouping and currency symbols and does not handle percentages or decimal commas; use plain number formatting for smoke columns.'
+    : '';
+  throw new ScriptError(`Smoke row update did not persist ${stage}: ${details}.${hint}`);
 }
 
 export type ReadinessChecks = {
