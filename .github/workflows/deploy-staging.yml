@@ -21,16 +21,21 @@ jobs:
       SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN: ${{ secrets.SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Check required secrets
+        env:
+          SHEETFLARE_STAGING_DOCS_URL: ${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/contributor-staging.md
+        run: npx tsx scripts/check-staging-secrets.ts
 
       - name: Validate repo
         if: ${{ inputs.run_checks }}
@@ -45,7 +50,7 @@ jobs:
 
       - name: Write staging secrets file
         run: |
-          node -e "const fs = require('fs'); const secrets = { GOOGLE_PRIVATE_KEY: process.env.SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY, ADMIN_BEARER_TOKEN: process.env.SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN }; if (!secrets.GOOGLE_PRIVATE_KEY || !secrets.ADMIN_BEARER_TOKEN) { throw new Error('Missing required staging deploy secrets.'); } fs.writeFileSync('.wrangler-staging-secrets.json', JSON.stringify(secrets));"
+          node -e "const fs = require('fs'); fs.writeFileSync('.wrangler-staging-secrets.json', JSON.stringify({ GOOGLE_PRIVATE_KEY: process.env.SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY, ADMIN_BEARER_TOKEN: process.env.SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN }));"
 
       - name: Deploy staging worker
         run: npx wrangler@4.107.0 deploy --config apps/api/wrangler.staging.jsonc --secrets-file .wrangler-staging-secrets.json
