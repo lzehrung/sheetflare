@@ -642,20 +642,34 @@ async function hashCredentialMaterial(value: string) {
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
 }
 
-async function touchApiKeyIfNeeded(env: Env, apiKeyId: string) {
+async function touchApiKeyIfNeeded(env: Env, apiKeyId: string, requestId?: string) {
   const nowMs = Date.now();
   const lastTouchedAtMs = recentApiKeyTouches.get(apiKeyId);
   if (lastTouchedAtMs !== undefined && nowMs - lastTouchedAtMs < apiKeyTouchIntervalMs) {
     return;
   }
 
+  // Last-used is audit telemetry, so a failed touch must not fail an otherwise valid request. The throttle starts only
+  // after the control plane accepted the update, so the next request retries a failed touch.
+  try {
+    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
+      type: 'control.api-key.touch',
+      apiKeyId,
+      usedAt: new Date(nowMs).toISOString()
+    });
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: 'api_key.touch.failed',
+      apiKeyId,
+      requestId: requestId ?? null,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message : String(error)
+    }));
+    return;
+  }
+
   pruneRecentApiKeyTouches(nowMs);
   recentApiKeyTouches.set(apiKeyId, nowMs);
-  await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
-    type: 'control.api-key.touch',
-    apiKeyId,
-    usedAt: new Date(nowMs).toISOString()
-  });
 }
 
 function getRequestPrincipal(c: AppContext) {
@@ -819,7 +833,7 @@ async function authenticateRequest(c: AppContext): Promise<AuthContext> {
 
   await enforceVerifiedApiKeyRateLimit(c, record.id);
   c.set('authPrincipal', `api-key:${record.id}`);
-  await touchApiKeyIfNeeded(c.env, record.id);
+  await touchApiKeyIfNeeded(c.env, record.id, c.get('requestId'));
 
   return {
     kind: 'api-key',
