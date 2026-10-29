@@ -5260,4 +5260,46 @@ describe('TableDO', () => {
       message: 'rowNumber filters require numeric values.'
     });
   });
+
+  it('compares unique and filtered values through the field normalization rules', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'email'],
+        ['row-1', 'Alice@Example.com ']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      indexedFields: ['email'],
+      fieldRules: {
+        email: {
+          unique: true,
+          normalize: ['trim', 'lowercase']
+        }
+      },
+      cacheTtlSeconds: 3600
+    });
+    await listUsers(env);
+
+    await expect(createUser(env, { email: ' alice@example.com ' })).rejects.toMatchObject({
+      name: 'ConflictError',
+      message: 'email must be unique.',
+      details: {
+        field: 'email',
+        value: 'alice@example.com',
+        conflictingRowIds: ['row-1']
+      }
+    });
+    expect(sheet.rows).toEqual([
+      ['_id', 'email'],
+      ['row-1', 'Alice@Example.com ']
+    ]);
+
+    const indexed = await listUsers(env, { filter: { email: { eq: 'ALICE@example.com' } } });
+    const scanned = await listUsers(env, { filter: { email: { eq: 'ALICE@example.com' }, _id: { contains: 'row' } } });
+    expect(indexed.data.map((row) => row.id)).toEqual(['row-1']);
+    expect(scanned.data.map((row) => row.id)).toEqual(['row-1']);
+  });
 });

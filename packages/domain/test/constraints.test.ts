@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyFieldRuleNormalization, coerceRowFilter, normalizeFieldRules, validateFieldRules } from '../src';
+import { applyFieldRuleNormalization, canonicalizeFieldValue, coerceRowFilter, normalizeFieldRules, validateFieldRules } from '../src';
 
 describe('normalizeFieldRules', () => {
   it('trims field names and removes duplicate enum and normalize entries', () => {
@@ -30,6 +30,15 @@ describe('applyFieldRuleNormalization', () => {
       email: 'alice@example.com',
       active: true
     });
+  });
+});
+
+describe('canonicalizeFieldValue', () => {
+  it('applies the write-time normalization before type coercion', () => {
+    expect(canonicalizeFieldValue('  Alice@Example.com ', { normalize: ['trim', 'lowercase'] })).toBe('alice@example.com');
+    expect(canonicalizeFieldValue(' 10 ', { type: 'number', normalize: ['trim'] })).toBe(10);
+    expect(canonicalizeFieldValue('Ada', undefined)).toBe('Ada');
+    expect(canonicalizeFieldValue(null, { normalize: ['trim'] })).toBeNull();
   });
 });
 
@@ -197,5 +206,21 @@ describe('coerceRowFilter', () => {
     for (const definition of [{ contains: '2' }, { startsWith: '1' }]) {
       expect(() => coerceRowFilter({ rowNumber: definition }, {})).toThrow('rowNumber filters do not support startsWith or contains.');
     }
+  });
+
+  it('normalizes operands for normalized fields, folding only case for pattern operators', () => {
+    expect(coerceRowFilter({
+      email: { eq: ' ALICE@example.com ' },
+      name: { startsWith: ' Al' },
+      tag: { in: [' X ', null] }
+    }, {
+      email: { normalize: ['trim', 'lowercase'] },
+      name: { normalize: ['trim', 'lowercase'] },
+      tag: { normalize: ['trim'] }
+    })).toEqual({
+      email: { eq: 'alice@example.com' },
+      name: { startsWith: ' al' },
+      tag: { in: ['X', null] }
+    });
   });
 });

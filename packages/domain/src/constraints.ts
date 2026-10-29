@@ -75,20 +75,18 @@ export function coerceFieldRuleValue(
   }
 }
 
+// Filter operands use the same normalization and coercion as stored values (see
+// canonicalizeFieldValue), so they compare equally against indexed cells and scanned rows.
 function coerceFieldRuleScalarValue(
   value: QueryScalarValue | undefined,
   rule: FieldRule | undefined
 ): QueryScalarValue | undefined {
-  const coerced = coerceFieldRuleValue(value, rule);
-  if (coerced === undefined || coerced === null) {
-    return coerced;
+  if (value === undefined) {
+    return undefined;
   }
 
-  if (Array.isArray(coerced)) {
-    return value;
-  }
-
-  return coerced;
+  const canonical = canonicalizeFieldValue(value, rule);
+  return Array.isArray(canonical) ? value : canonical;
 }
 
 function coerceComparableFieldRuleScalarValue(
@@ -97,6 +95,11 @@ function coerceComparableFieldRuleScalarValue(
 ): string | number | undefined {
   const coerced = coerceFieldRuleScalarValue(value, rule);
   return typeof coerced === 'string' || typeof coerced === 'number' ? coerced : value;
+}
+
+// Pattern operators match substrings, so only case folding applies; trimming would change the pattern.
+function normalizePatternOperand(value: string, rule: FieldRule | undefined) {
+  return rule?.normalize?.includes('lowercase') ? value.toLowerCase() : value;
 }
 
 export function coerceFieldFilterDefinition(definition: FieldFilter, rule: FieldRule | undefined): FieldFilter {
@@ -110,8 +113,8 @@ export function coerceFieldFilterDefinition(definition: FieldFilter, rule: Field
     ...(definition.in !== undefined
       ? { in: definition.in.map((value) => coerceFieldRuleScalarValue(value, rule) ?? null) }
       : {}),
-    ...(definition.contains !== undefined ? { contains: definition.contains } : {}),
-    ...(definition.startsWith !== undefined ? { startsWith: definition.startsWith } : {}),
+    ...(definition.contains !== undefined ? { contains: normalizePatternOperand(definition.contains, rule) } : {}),
+    ...(definition.startsWith !== undefined ? { startsWith: normalizePatternOperand(definition.startsWith, rule) } : {}),
     ...(definition.isNull !== undefined ? { isNull: definition.isNull } : {})
   };
 }
@@ -227,6 +230,15 @@ export function normalizeFieldValue(value: RowRecord[string], rule: FieldRule | 
   }
 
   return normalized;
+}
+
+/**
+ * The comparable form of a field value: the field's write-time normalization followed by its
+ * type coercion. Unique checks, indexed cache cells, scan filters, and sorting all compare this
+ * form, so `Alice@Example.com ` and `alice@example.com` collide on a trim+lowercase unique field.
+ */
+export function canonicalizeFieldValue(value: RowRecord[string], rule: FieldRule | undefined): RowRecord[string] {
+  return coerceFieldRuleValue(normalizeFieldValue(value, rule), rule) ?? null;
 }
 
 export function applyFieldRuleNormalization(values: RowRecord, fieldRules: FieldRules | undefined): RowRecord {

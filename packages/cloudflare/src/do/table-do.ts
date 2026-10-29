@@ -25,6 +25,7 @@ import {
   applyFieldRuleNormalization,
   assertQueryableField,
   buildFilterSql,
+  canonicalizeFieldValue,
   compareStableStrings,
   compareQueryValues,
   compareRangeQueryValues,
@@ -216,6 +217,9 @@ function buildCacheConfigSignature(config: {
   dataStartRow: number;
 }) {
   return JSON.stringify({
+    // Bump when the cached cell encoding changes so existing caches resync on next access.
+    // 2: indexed cells hold normalized (trim/lowercase) values.
+    cacheFormat: 2,
     spreadsheetId: config.spreadsheetId,
     googleCredentialRef: config.googleCredentialRef,
     sheetTabName: config.sheetTabName,
@@ -1426,7 +1430,7 @@ export class TableDO {
     this.ctx.storage.sql.exec(`DELETE FROM ${tables.cachedCells} WHERE row_id = ?`, row.id);
 
     for (const fieldName of config.indexedFields) {
-      const value = coerceFieldRuleValue(row.values[fieldName] ?? null, config.fieldRules[fieldName]) ?? null;
+      const value = canonicalizeFieldValue(row.values[fieldName] ?? null, config.fieldRules[fieldName]);
       const normalized = this.normalizeIndexedCellValue(value);
       this.ctx.storage.sql.exec(
         `
@@ -1809,8 +1813,8 @@ export class TableDO {
         continue;
       }
 
-      const value = coerceFieldRuleValue(values[fieldName], rule);
-      if (value === undefined || value === null || (typeof value === 'string' && value.length === 0)) {
+      const value = canonicalizeFieldValue(values[fieldName] ?? null, rule);
+      if (value === null || (typeof value === 'string' && value.length === 0)) {
         continue;
       }
 
@@ -1932,7 +1936,7 @@ export class TableDO {
       return row.id;
     }
 
-    return coerceFieldRuleValue(row.values[field] ?? null, config.fieldRules[field]) ?? null;
+    return canonicalizeFieldValue(row.values[field] ?? null, config.fieldRules[field]);
   }
 
   private getSortFieldValue(row: RowEnvelope, sortField: string, config: GoogleSheetTableConfig) {
@@ -1945,7 +1949,7 @@ export class TableDO {
     }
 
     return this.normalizeCursorSourceValue(
-      coerceFieldRuleValue(row.values[sortField], config.fieldRules[sortField])
+      canonicalizeFieldValue(row.values[sortField] ?? null, config.fieldRules[sortField])
     );
   }
 
