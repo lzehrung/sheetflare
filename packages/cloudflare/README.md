@@ -23,3 +23,5 @@ Durable Object implementations and Cloudflare-specific runtime glue.
 - `TableDO` should query SQLite for normal reads and use narrow upstream row-ID repairs for point operations when possible.
 - Full sync must fail loudly on duplicate managed IDs; silent cache collapse is a correctness bug.
 - Cache behavior should remain explicit: freshness, sync failure, and config-driven invalidation all need to stay observable.
+- Row creates, updates, and deletes on one table run one at a time (`runExclusiveWrite` in `src/do/table-do.ts`). Reads and syncs are not queued behind them.
+- Project and table creates and deletes run one at a time per project, in arrival order (`runLifecycleOperation` in `src/do/project-do.ts`). Reads are not queued.

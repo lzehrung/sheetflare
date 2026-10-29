@@ -203,7 +203,7 @@ Important fields:
 - `lastSyncError`
 - `validation`
 
-`lastSyncStartedAt`, `lastSyncCompletedAt`, and `validation` describe the last full cache rebuild from Google Sheets. Successful point mutations update the cache in place but do not rewrite those sync timestamps.
+`lastSyncStartedAt` and `validation` change only on a full rebuild from Google Sheets. A successful create or update refreshes the cache in place and sets `lastSyncCompletedAt` to the mutation time, which also restarts the TTL clock. A delete does the same only when the cache was fresh and the header layout is unchanged; otherwise it triggers a full rebuild, which sets all of these normally. Point mutations do not recompute `validation`.
 
 Interpretation:
 
@@ -211,7 +211,7 @@ Interpretation:
 - `never-synced`: table has not completed its first sync
 - `ttl-expired`: cache is old but point reads and mutations can still use narrow repair behavior
 - `config-changed`: table config changed in a way that requires resync
-- `external-change`: Google Drive reported a spreadsheet update and a debounced auto-reindex is pending
+- `external-change`: Google Drive reported a spreadsheet update and a debounced auto-reindex is pending, or a write overlapped a sync so the synced snapshot may lack it. An overlapping write has no debounce, so the next read resyncs.
 - `error`: last sync failed and needs investigation
 
 Validation interpretation:
@@ -220,7 +220,7 @@ Validation interpretation:
 - `validation.status: "warning"`: the last full sync found rows that violate configured `fieldRules`, for example duplicates after normalization or invalid enum/type values
 - `validation.validatedAt`: when that validation snapshot was last recomputed during a full sync
 - `validation.issues`: a capped sample for operator triage, not an exhaustive dump
-- `externalChange.pending`: Drive notification arrived and the debounce window has not completed yet
+- `externalChange.pending`: a Drive notification arrived and the debounce window has not completed yet, or a write overlapped a sync (`debounceUntil` is `null`, so the next read resyncs)
 - `externalChange.debounceUntil`: when the queued automatic reindex is due
 - `externalChange.lastAutoReindexAt`: when the last Drive-triggered automatic reindex completed
 
@@ -407,6 +407,22 @@ Fix:
 1. Prefer indexed equality/range queries.
 2. Add an index if the query pattern is legitimate and frequent.
 3. If the query is inherently scan-heavy, narrow it or accept that the API will reject it.
+
+### Delete returns 409 (row moved)
+
+Symptoms:
+
+- `DELETE` returns `409` with `Row <rowId> moved while it was being deleted, so a different row may have been deleted. Verify the sheet.`
+- a `table.write.unconfirmed` event with `operation: "delete"` for the table
+
+Cause:
+
+- the row shifted in the sheet between Sheetflare finding it and deleting it, for example when rows were inserted or removed above it during the request. Sheetflare checks the rows next to the deleted row after the delete and fails closed, so the delete was already applied when the `409` is returned.
+
+Fix:
+
+1. Open the sheet and verify the row with managed ID `rowId`. Check that the rows next to where it was are the ones you expect, since a different row may have been deleted.
+2. Retry the delete.
 
 ## Rotating Credentials
 

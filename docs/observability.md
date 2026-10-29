@@ -49,10 +49,13 @@ Emitted by `TableDO`:
 - `rowCount`
 - `validationStatus`
 - `validationIssueCount`
+- `supersededByWrite`
 - `durationMs`
 - `requestId`
 - `route`
 - `principal`
+
+`supersededByWrite` is `true` when a write was applied to the cache while the sync was reading its snapshot. The sync still promotes that snapshot, but the snapshot may lack the write, so the cache is marked stale with `staleReason: "external-change"`, and the next read resyncs.
 
 ### Failed table sync
 
