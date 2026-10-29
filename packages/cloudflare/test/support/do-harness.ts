@@ -38,6 +38,13 @@ class SqlStorageHarness {
   }
 }
 
+function listTableNames(database: Database.Database) {
+  const rows = database
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+    .all() as Array<{ name: string }>;
+  return rows.map((row) => row.name);
+}
+
 function createDurableObjectState() {
   const database = new Database(':memory:');
   let alarmTimestamp: number | null = null;
@@ -58,10 +65,21 @@ function createDurableObjectState() {
       deleteAlarm() {
         alarmTimestamp = null;
         return Promise.resolve();
+      },
+      // Matches workerd for compatibility dates from 2026-02-24: the whole database and any alarm are removed.
+      deleteAll() {
+        for (const name of listTableNames(database)) {
+          database.exec(`DROP TABLE "${name}"`);
+        }
+        alarmTimestamp = null;
+        return Promise.resolve();
       }
     },
     getAlarmTimestamp() {
       return alarmTimestamp;
+    },
+    getTableNames() {
+      return listTableNames(database);
     }
   };
 }
@@ -121,6 +139,11 @@ class LocalDurableObjectNamespace<TEnv> {
 
   getAlarm(name: string) {
     return this.instances.get(name)?.__state.getAlarmTimestamp() ?? null;
+  }
+
+  /** Tables persisted by the named instance; an instance that was never addressed has none. */
+  getStoredTableNames(name: string) {
+    return this.instances.get(name)?.__state.getTableNames() ?? [];
   }
 }
 

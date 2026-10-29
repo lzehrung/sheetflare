@@ -81,12 +81,27 @@ function normalizeFieldNames(values: readonly string[]) {
 
 export class ProjectDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
+  // Anonymous reads address a ProjectDO for any valid slug. Tables are created by the first project write, so a
+  // Durable Object for an unknown slug answers NOT_FOUND without persisting storage.
+  private hasSchema: boolean;
 
   constructor(
     private readonly ctx: DurableObjectState,
     private readonly env: CloudflareEnv
   ) {
-    this.initialize();
+    this.hasSchema = this.ctx.storage.sql
+      .exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'project'`)
+      .toArray().length > 0;
+    if (this.hasSchema) {
+      this.initialize();
+    }
+  }
+
+  private ensureSchema() {
+    if (!this.hasSchema) {
+      this.initialize();
+      this.hasSchema = true;
+    }
   }
 
   private initialize() {
@@ -242,6 +257,7 @@ export class ProjectDO {
       }
     }
 
+    this.ensureSchema();
     this.ctx.storage.sql.exec(
       `
       INSERT INTO project (
@@ -537,6 +553,10 @@ export class ProjectDO {
   }
 
   private selectOptionalRow<Row>(query: string, ...params: unknown[]): Row | null {
+    if (!this.hasSchema) {
+      return null;
+    }
+
     const rows = this.ctx.storage.sql.exec(query, ...params).toArray() as Row[];
     return rows[0] ?? null;
   }

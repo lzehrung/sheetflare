@@ -1,7 +1,8 @@
 import Database from 'better-sqlite3';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type RateLimitDoResponse } from '@sheetflare/contracts';
 import { RateLimitDO, doRpc } from '../src';
+import { expectRpcResult } from './support/rpc-result';
 import { createDurableObjectNamespace } from './support/do-harness';
 
 type SqlRow = Record<string, unknown>;
@@ -32,6 +33,7 @@ class SqlStorageHarness {
 
 function createStateWithDatabase() {
   const database = new Database(':memory:');
+  let alarmTimestamp: number | null = null;
   return {
     database,
     state: {
@@ -40,6 +42,13 @@ function createStateWithDatabase() {
         transactionSync<T>(callback: () => T) {
           const transaction = database.transaction(callback);
           return transaction();
+        },
+        getAlarm() {
+          return Promise.resolve(alarmTimestamp);
+        },
+        setAlarm(scheduledTime: number) {
+          alarmTimestamp = scheduledTime;
+          return Promise.resolve();
         }
       }
     } as DurableObjectState
@@ -63,6 +72,10 @@ async function callCheck(instance: RateLimitDO, input: {
 }
 
 describe('RateLimitDO', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('tracks independent windows per bucket key', async () => {
     const env = {} as Record<string, never>;
     const namespace = createDurableObjectNamespace(env, RateLimitDO);
@@ -144,5 +157,67 @@ describe('RateLimitDO', () => {
     ).toEqual([
       'late:GET:bootstrap-admin:120000'
     ]);
+  });
+
+  it('frees an idle limiter from its cleanup alarm once every window has expired', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const name = 'data:client:203.0.113.7';
+    const namespace = createDurableObjectNamespace({}, RateLimitDO);
+    const stub = namespace.get(namespace.idFromName(name));
+    const check = {
+      type: 'rate-limit.check',
+      key: 'data:GET:client',
+      limit: 2,
+      windowSeconds: 60
+    } as const;
+
+    await doRpc<RateLimitDoResponse>(stub, { ...check, nowMs: 1_000 });
+
+    expect(namespace.getAlarm(name)).toBe(60_000);
+
+    vi.setSystemTime(60_000);
+    await namespace.triggerAlarm(name);
+
+    expect(namespace.getStoredTableNames(name)).toEqual([]);
+    expect(namespace.getAlarm(name)).toBeNull();
+
+    const afterCleanup = expectRpcResult(
+      await doRpc<RateLimitDoResponse>(stub, { ...check, nowMs: 61_000 }),
+      'rate-limit.check.result'
+    );
+    expect(afterCleanup).toEqual({ allowed: true, remaining: 1, resetAtMs: 120_000 });
+    expect(namespace.getAlarm(name)).toBe(120_000);
+  });
+
+  it('re-arms the cleanup alarm for windows that are still open', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const name = 'admin:client:203.0.113.7';
+    const namespace = createDurableObjectNamespace({}, RateLimitDO);
+    const stub = namespace.get(namespace.idFromName(name));
+
+    await doRpc<RateLimitDoResponse>(stub, {
+      type: 'rate-limit.check',
+      key: 'admin:GET:short',
+      limit: 2,
+      windowSeconds: 60,
+      nowMs: 1_000
+    });
+    await doRpc<RateLimitDoResponse>(stub, {
+      type: 'rate-limit.check',
+      key: 'admin:GET:long',
+      limit: 2,
+      windowSeconds: 300,
+      nowMs: 1_000
+    });
+
+    expect(namespace.getAlarm(name)).toBe(60_000);
+
+    vi.setSystemTime(60_000);
+    await namespace.triggerAlarm(name);
+
+    expect(namespace.getStoredTableNames(name)).toEqual(['rate_limit_windows']);
+    expect(namespace.getAlarm(name)).toBe(300_000);
   });
 });
