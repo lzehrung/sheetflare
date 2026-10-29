@@ -28,8 +28,10 @@ export type DriveWatchRegistrationPlan =
  * Decides whether a setup run must (re)register Drive watches.
  *
  * Deploy and bootstrap register watches. Applying secrets without them is also a trigger because
- * it can replace GOOGLE_DRIVE_WEBHOOK_SECRET, and existing Drive channels keep the old token, so
- * the Worker rejects their notifications until watches are registered again.
+ * `wrangler secret put` deploys GOOGLE_DRIVE_WEBHOOK_SECRET immediately. Existing Drive channels
+ * keep the old token, so the Worker rejects their notifications until watches are registered again.
+ * A missing API URL or admin credential warns even when this run also deploys or bootstraps.
+ * Deploy or bootstrap alone stays quiet until those values are known.
  */
 export function planDriveWatchRegistration(options: {
   actions: { applySecretsNow: boolean; deployNow: boolean; bootstrapNow: boolean };
@@ -37,16 +39,18 @@ export function planDriveWatchRegistration(options: {
   adminCredential: string | null;
 }): DriveWatchRegistrationPlan {
   const { actions, apiUrl, adminCredential } = options;
-  if (actions.deployNow || actions.bootstrapNow) {
-    return apiUrl && adminCredential ? { kind: 'register' } : { kind: 'skip' };
-  }
-
-  if (!actions.applySecretsNow) {
+  const rotatingWebhookSecret = actions.applySecretsNow;
+  const registeringForDeployOrBootstrap = actions.deployNow || actions.bootstrapNow;
+  if (!rotatingWebhookSecret && !registeringForDeployOrBootstrap) {
     return { kind: 'skip' };
   }
 
   if (apiUrl && adminCredential) {
     return { kind: 'register' };
+  }
+
+  if (!rotatingWebhookSecret) {
+    return { kind: 'skip' };
   }
 
   const missing = [
