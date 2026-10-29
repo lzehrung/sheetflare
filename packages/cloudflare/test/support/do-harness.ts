@@ -27,10 +27,10 @@ class SqlStorageHarness {
 
   exec(sql: string, ...parameters: Array<string | number | boolean | null>) {
     const trimmed = sql.trimStart();
-    const statement = this.database.prepare(sql);
+    const statement = this.database.prepare<Array<string | number | boolean | null>, SqlRow>(sql);
 
     if (/^(SELECT|WITH)\b/i.test(trimmed)) {
-      return new SqlResult(statement.all(...parameters) as SqlRow[]);
+      return new SqlResult(statement.all(...parameters));
     }
 
     statement.run(...parameters);
@@ -40,8 +40,8 @@ class SqlStorageHarness {
 
 function listTableNames(database: Database.Database) {
   const rows = database
-    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
-    .all() as Array<{ name: string }>;
+    .prepare<[], { name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+    .all();
   return rows.map((row) => row.name);
 }
 

@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { rowRecordSchema, type FieldRules } from '@sheetflare/contracts';
-import { applyFieldRuleNormalization } from '@sheetflare/domain';
+import { applyFieldRuleNormalization, coerceFieldRuleValue } from '@sheetflare/domain';
 import { parseSheetCellValue, serializeSheetCell } from '@sheetflare/google-sheets';
 import { ScriptError } from './runtime';
 
@@ -15,12 +15,17 @@ function isPrimitive(value: unknown) {
 }
 
 /**
- * Sheets are stringly typed, so a configured `7` or `true` may read back as `"7"` or `"true"`.
- * Primitives therefore compare by string form; arrays and objects must match structurally.
+ * Sheets are stringly typed, so a configured `7` may read back as `"7"`. Primitives therefore compare
+ * by string form; arrays and objects must match structurally. A configured boolean is the one exception:
+ * formatted Sheets reads return `TRUE`/`FALSE`, which the system's boolean coercion maps back.
  */
 function valuesMatch(expected: unknown, actual: unknown) {
   if (isDeepStrictEqual(expected, actual)) {
     return true;
+  }
+
+  if (typeof expected === 'boolean' && typeof actual === 'string') {
+    return coerceFieldRuleValue(actual, { type: 'boolean' }) === expected;
   }
 
   return isPrimitive(expected) && isPrimitive(actual) && String(expected) === String(actual);
