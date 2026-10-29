@@ -147,10 +147,6 @@ export const projectDoRequestSchema = z.discriminatedUnion('type', [
     projectSlug: projectSlugSchema
   }),
   z.object({
-    type: z.literal('project.access.get'),
-    projectSlug: projectSlugSchema
-  }),
-  z.object({
     type: z.literal('project.create'),
     input: createProjectInputSchema,
     allowExisting: z.boolean().optional()
@@ -332,7 +328,6 @@ export type ProjectDoRequest = z.infer<typeof projectDoRequestSchema>;
 
 export type ProjectDoResponse =
   | { type: 'project.get.result'; result: AdminGetProjectResult }
-  | { type: 'project.access.get.result'; result: { data: ProjectAccessResult } }
   | { type: 'project.create.result'; result: { data: AdminGetProjectResult; created: boolean } }
   | { type: 'project.table.create.result'; result: { data: UpsertTableResult['data']; created: boolean } }
   | { type: 'project.table.delete.result'; result: DeleteTableResult }
@@ -350,8 +345,6 @@ export type ResolvedProjectTableResult = {
   table: TableConfig;
   resolvedConfig: ResolvedTableConfigSnapshot;
 };
-
-export type ProjectAccessResult = Pick<ProjectConfig, 'slug' | 'defaultAuthMode'>;
 
 export type TableDoRequest = z.infer<typeof tableDoRequestSchema>;
 

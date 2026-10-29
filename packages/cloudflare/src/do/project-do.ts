@@ -9,9 +9,9 @@ import {
   type CreateTableInput,
   type DeleteProjectResult,
   type DeleteTableResult,
+  maxCacheTtlSeconds,
   maxIndexedFieldCount,
   NotFoundError,
-  type ProjectAccessResult,
   type ProjectConfig,
   projectDoRequestSchema,
   type ProjectDoRequest,
@@ -55,10 +55,6 @@ type TableRow = {
   created_at: string;
   updated_at: string;
 };
-
-// Upper bound of TableConfig.cacheTtlSeconds. Tables stored before the bound existed are served at the bound so their
-// configuration still satisfies the TableDO RPC schema.
-const maxCacheTtlSeconds = 3600;
 
 function getControlPlaneStub(env: CloudflareEnv) {
   return env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
@@ -187,13 +183,6 @@ export class ProjectDO {
           type: 'project.get.result',
           result: await this.getProject(body.projectSlug)
         };
-      case 'project.access.get':
-        return {
-          type: 'project.access.get.result',
-          result: {
-            data: this.getProjectAccess(body.projectSlug)
-          }
-        };
       case 'project.table.create':
         return {
           type: 'project.table.create.result',
@@ -317,14 +306,6 @@ export class ProjectDO {
     return {
       project: this.mapProject(project),
       tables: await this.listTables(projectSlug)
-    };
-  }
-
-  private getProjectAccess(projectSlug: string): ProjectAccessResult {
-    const project = this.requireProjectRow(projectSlug);
-    return {
-      slug: project.slug,
-      defaultAuthMode: project.default_auth_mode
     };
   }
 
@@ -649,6 +630,7 @@ export class ProjectDO {
       createEnabled: Boolean(row.create_enabled),
       updateEnabled: Boolean(row.update_enabled),
       deleteEnabled: Boolean(row.delete_enabled),
+      // Tables stored before the contract bound existed are served at the bound so the snapshot still satisfies the TableDO RPC schema.
       cacheTtlSeconds: Math.min(row.cache_ttl_seconds, maxCacheTtlSeconds),
       createdAt: row.created_at,
       updatedAt: row.updated_at

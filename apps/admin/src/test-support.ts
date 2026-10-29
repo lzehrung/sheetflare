@@ -149,8 +149,8 @@ type FakeWorkerPrincipal =
 
 /**
  * An HTTP-level stand-in for the Worker's admin routes that reproduces the real authorization rules from
- * apps/api/src/index.ts (authenticateRequest, assertAdminScope, assertGlobalAdminScope, assertProjectScope)
- * and its exact 401 messages, so UI tests exercise real scope behavior instead of canned responses.
+ * apps/api/src/index.ts (authenticateRequest, assertAdminScope, assertGlobalAdminScope, assertProjectScope):
+ * missing or invalid credentials are 401, and a valid key that lacks access is 403 FORBIDDEN.
  */
 export function createFakeWorker(options: FakeWorkerOptions) {
   const requests: string[] = [];
@@ -174,9 +174,17 @@ export function createFakeWorker(options: FakeWorkerOptions) {
     return createWorkerError(401, 'UNAUTHORIZED', message);
   }
 
+  function forbidden(message: string) {
+    return createWorkerError(403, 'FORBIDDEN', message);
+  }
+
   function assertScope(principal: FakeWorkerPrincipal, scope: ApiScope): Response | null {
-    if (principal.kind !== 'api-key' || !principal.key.scopes.includes(scope)) {
+    if (principal.kind !== 'api-key') {
       return unauthorized();
+    }
+
+    if (!principal.key.scopes.includes(scope)) {
+      return forbidden(`This API key does not have the "${scope}" scope.`);
     }
 
     return null;
@@ -189,7 +197,7 @@ export function createFakeWorker(options: FakeWorkerOptions) {
     }
 
     if (principal.kind === 'api-key' && principal.key.projectSlug) {
-      return unauthorized('This operation requires a global admin key.');
+      return forbidden('This operation requires a global admin key.');
     }
 
     return null;
@@ -202,7 +210,7 @@ export function createFakeWorker(options: FakeWorkerOptions) {
     }
 
     if (principal.kind === 'api-key' && principal.key.projectSlug && principal.key.projectSlug !== projectSlug) {
-      return unauthorized();
+      return forbidden('This API key is scoped to a different project.');
     }
 
     return null;

@@ -209,7 +209,6 @@ describe('ProjectDO storage for unknown projects', () => {
     const project = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:ghost'));
     const reads: ProjectDoRequest[] = [
       { type: 'project.get', projectSlug: 'ghost' },
-      { type: 'project.access.get', projectSlug: 'ghost' },
       { type: 'project.table.list', projectSlug: 'ghost' },
       { type: 'project.table.get', projectSlug: 'ghost', tableSlug: 'users' },
       { type: 'project.table.resolve', projectSlug: 'ghost', tableSlug: 'users' },

@@ -341,16 +341,11 @@ describe('admin api helpers', () => {
       expect(error).toMatchObject({ status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
     });
 
-    it('classifies an invalid or missing credential as rejected', async () => {
-      for (const message of ['Unauthorized', 'Invalid API key.', 'Unsupported authorization scheme.']) {
-        vi.stubGlobal('fetch', workerError(401, 'UNAUTHORIZED', message));
-        const error = await listProjects(browserAccess).catch((caught: unknown) => caught);
-        expect(classifyAuthFailure(error)).toBe('invalid-credential');
-      }
-    });
-
-    it('classifies a valid key without the needed scope or project as insufficient scope', async () => {
+    it('classifies a 401 as a rejected credential even when the body uses an old scope-denial message', async () => {
       for (const message of [
+        'Unauthorized',
+        'Invalid API key.',
+        'Unsupported authorization scheme.',
         'This operation requires a global admin key.',
         'This key cannot list API keys for another project.',
         'This key can only create API keys for its own project.',
@@ -358,21 +353,34 @@ describe('admin api helpers', () => {
       ]) {
         vi.stubGlobal('fetch', workerError(401, 'UNAUTHORIZED', message));
         const error = await listProjects(browserAccess).catch((caught: unknown) => caught);
+        expect(classifyAuthFailure(error)).toBe('invalid-credential');
+      }
+    });
+
+    it('classifies 403 FORBIDDEN as insufficient scope without reading the message', async () => {
+      for (const message of [
+        'Forbidden',
+        'This operation requires a global admin key.',
+        'This key cannot list API keys for another project.',
+        'This API key does not have the "admin:projects" scope.'
+      ]) {
+        vi.stubGlobal('fetch', workerError(403, 'FORBIDDEN', message));
+        const error = await listProjects(browserAccess).catch((caught: unknown) => caught);
         expect(classifyAuthFailure(error)).toBe('insufficient-scope');
       }
-
-      vi.stubGlobal('fetch', workerError(403, 'FORBIDDEN', 'Forbidden'));
-      const forbidden = await listProjects(browserAccess).catch((caught: unknown) => caught);
-      expect(classifyAuthFailure(forbidden)).toBe('insufficient-scope');
     });
 
     it('does not classify non-auth failures or foreign errors', async () => {
       vi.stubGlobal('fetch', workerError(503, 'SERVICE_UNAVAILABLE', 'Unavailable'));
-      const error = await listProjects(browserAccess).catch((caught: unknown) => caught);
+      const unavailable = await listProjects(browserAccess).catch((caught: unknown) => caught);
 
-      expect(error).toBeInstanceOf(AdminApiError);
-      expect(classifyAuthFailure(error)).toBeNull();
+      expect(unavailable).toBeInstanceOf(AdminApiError);
+      expect(classifyAuthFailure(unavailable)).toBeNull();
       expect(classifyAuthFailure(new Error('rejected'))).toBeNull();
+
+      vi.stubGlobal('fetch', workerError(403, 'BAD_GATEWAY', 'Google Sheets authentication or permission check failed.'));
+      const otherForbidden = await listProjects(browserAccess).catch((caught: unknown) => caught);
+      expect(classifyAuthFailure(otherForbidden)).toBeNull();
     });
 
     it('treats a bodyless 401 as a rejected credential', async () => {

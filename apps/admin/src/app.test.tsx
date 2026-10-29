@@ -823,11 +823,11 @@ describe('App', () => {
       if (url === '/v1/admin/system/google/drive/watches') {
         return createJsonResponse({
           error: {
-            code: 'UNAUTHORIZED',
+            code: 'FORBIDDEN',
             message: 'This operation requires a global admin key.',
             details: null
           }
-        }, 401);
+        }, 403);
       }
 
       if (url === '/v1/admin/projects' && method === 'GET') {
