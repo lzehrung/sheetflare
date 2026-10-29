@@ -7,10 +7,15 @@ export type AdminSessionResponse = {
 
 export type AdminUiHeaderOptions = {
   hotReloadOrigin?: string;
+  cache?: 'no-store' | 'immutable';
 };
 
 export function buildAdminUiHeaders(options: AdminUiHeaderOptions = {}): Readonly<Record<string, string>> {
   const connectSources = options.hotReloadOrigin ? `'self' ${options.hotReloadOrigin}` : "'self'";
+  let cacheControl = 'no-store';
+  if (options.cache === 'immutable') {
+    cacheControl = 'public, max-age=31536000, immutable';
+  }
   const contentSecurityPolicy = [
     "default-src 'self'",
     "script-src 'self'",
@@ -25,7 +30,7 @@ export function buildAdminUiHeaders(options: AdminUiHeaderOptions = {}): Readonl
 
   return Object.freeze({
     'Content-Security-Policy': contentSecurityPolicy,
-    'Cache-Control': 'no-store',
+    'Cache-Control': cacheControl,
     'X-Frame-Options': 'DENY',
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',

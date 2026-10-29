@@ -40,6 +40,7 @@ import {
   rowParamsSchema,
   tableConfigSchema,
   BadRequestError,
+  ForbiddenError,
   NotFoundError,
   ServiceUnavailableError,
   toErrorResponse,
@@ -67,7 +68,6 @@ import {
   type DeleteTableResult,
   type GetTableCacheStatusResult,
   type ListRowsQuery,
-  type ProjectAccessResult,
   type ProjectDoResponse,
   type ResolvedProjectTableResult,
   type ResolvedTableConfigSnapshot,
@@ -83,10 +83,6 @@ import type { Env } from './env';
 type AppVariables = {
   requestId: string;
   authPrincipal?: string;
-  verifiedApiKeyCredential?: {
-    credential: string;
-    record: ApiKeyPrincipal | null;
-  };
   verifiedApiKeyRateLimitApplied?: boolean;
   rateLimit?: {
     limit: number;
@@ -98,6 +94,8 @@ type AppVariables = {
     routeFamily: string;
     operationKey: string;
   };
+  retryAfterSeconds?: number;
+  preserveAdminAssetCache?: boolean;
 };
 
 type AppContext = Context<{ Bindings: Env; Variables: AppVariables }>;
@@ -112,9 +110,12 @@ const healthResponseSchema = z.object({
   service: z.string()
 });
 
-const readyResponseSchema = z.object({
+const readySummarySchema = z.object({
   ok: z.boolean(),
-  service: z.string(),
+  service: z.string()
+});
+
+const readyResponseSchema = readySummarySchema.extend({
   checks: z.object({
     controlPlane: z.literal('ok'),
     rateLimit: z.literal('ok'),
@@ -232,6 +233,15 @@ function jsonContent(schema: z.ZodTypeAny) {
   };
 }
 
+// A string-typed media type makes zod-openapi accept a raw Response, so a cache hit can pass its body through.
+function cachedReadJsonContent(schema: z.ZodTypeAny): { [mediaType: string]: { schema: z.ZodTypeAny } } {
+  return {
+    'application/json': {
+      schema
+    }
+  };
+}
+
 function parseDurableRpcErrorResponse(error: DurableRpcError) {
   try {
     const parsed = JSON.parse(error.responseText) as {
@@ -266,7 +276,7 @@ function parseDurableRpcErrorResponse(error: DurableRpcError) {
 }
 
 const unauthorizedResponse = {
-  description: 'Unauthorized',
+  description: 'Unauthorized. The credential is missing, malformed, unknown, or revoked.',
   content: jsonContent(errorResponseSchema)
 } as const;
 
@@ -276,8 +286,22 @@ const badRequestResponse = {
 } as const;
 
 const forbiddenResponse = {
-  description: 'Forbidden',
+  description: 'Forbidden. The credential is valid but lacks the required scope or project access.',
   content: jsonContent(errorResponseSchema)
+} as const;
+
+const rateLimitedResponse = {
+  description: 'Too many requests. Wait the number of seconds in the Retry-After header before retrying.',
+  headers: z.object({
+    'Retry-After': z.string().openapi({ description: 'Seconds until the rate limit window resets.', example: '30' })
+  }),
+  content: jsonContent(errorResponseSchema)
+} as const;
+
+const protectedRouteErrorResponses = {
+  401: unauthorizedResponse,
+  403: forbiddenResponse,
+  429: rateLimitedResponse
 } as const;
 
 const notFoundResponse = {
@@ -290,6 +314,29 @@ const optionalBearerSecurity = [{ bearerAuth: [] }, {}];
 const apiKeyTouchIntervalMs = 5 * 60 * 1000;
 const maxRecentApiKeyTouches = 10_000;
 const recentApiKeyTouches = new Map<string, number>();
+// Each Worker isolate remembers what the control plane said about a credential for this long, so a revoked key can
+// keep working for up to this long on isolates that verified it earlier. The isolate that handles the revoke request
+// forgets the key immediately.
+const principalCacheTtlMs = 10_000;
+const maxPrincipalCacheEntries = 10_000;
+type CachedPrincipal = { record: ApiKeyPrincipal | null; expiresAtMs: number };
+const principalCache = new Map<string, CachedPrincipal>();
+// /ready would otherwise cost a control plane call per request, so each isolate probes it once per window and reports
+// the same outcome, failure included, until the window ends.
+const readinessProbeTtlMs = 10_000;
+type ReadinessProbe = { outcome: { ok: true } | { ok: false; error: unknown }; expiresAtMs: number };
+let readinessProbe: ReadinessProbe | null = null;
+const webhookFailureOperationKey = 'webhook-failure';
+const maxWebhookFailureBlocks = 10_000;
+type WebhookFailureBlock = {
+  principal: string;
+  routeFamily: string;
+  operationKey: string;
+  maxRequests: number;
+  windowSeconds: number;
+  resetAtMs: number;
+};
+const webhookFailureBlocks = new Map<string, WebhookFailureBlock>();
 const corsAllowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
 const corsAllowedHeaders = 'Authorization, Content-Type';
 const cacheStatusHeaderName = 'x-sheetflare-cache-status';
@@ -299,29 +346,30 @@ const corsExposedHeaders = [
   'X-RateLimit-Limit',
   'X-RateLimit-Remaining',
   'X-RateLimit-Reset',
+  'Retry-After',
   cacheStatusHeaderName,
   cacheInvalidationHeaderName
 ].join(', ');
 
-function pruneRecentApiKeyTouches(nowMs: number) {
-  if (recentApiKeyTouches.size < maxRecentApiKeyTouches) {
+// Makes room for one more entry: drops expired entries first, then the oldest ones.
+function evictForInsert<T>(entries: Map<string, T>, maxEntries: number, isExpired: (entry: T) => boolean) {
+  if (entries.size < maxEntries) {
     return;
   }
 
-  const cutoffMs = nowMs - apiKeyTouchIntervalMs;
-  for (const [cachedApiKeyId, cachedTouchedAtMs] of recentApiKeyTouches) {
-    if (cachedTouchedAtMs < cutoffMs) {
-      recentApiKeyTouches.delete(cachedApiKeyId);
+  for (const [key, entry] of entries) {
+    if (isExpired(entry)) {
+      entries.delete(key);
     }
   }
 
-  while (recentApiKeyTouches.size >= maxRecentApiKeyTouches) {
-    const oldestEntry = recentApiKeyTouches.entries().next().value;
-    if (!oldestEntry) {
+  while (entries.size >= maxEntries) {
+    const oldest = entries.keys().next();
+    if (oldest.done) {
       break;
     }
 
-    recentApiKeyTouches.delete(oldestEntry[0]);
+    entries.delete(oldest.value);
   }
 }
 
@@ -398,58 +446,53 @@ function createCorsPreflightResponse(request: Request, env: Env) {
   });
 }
 
+// Keys are minted as `sfk_<uuid>.<64 hex characters>` by ControlPlaneDO.createApiKey. Any other shape cannot be a real
+// key, so it is rejected here instead of reaching the control plane and its RPC validation errors.
+const apiKeyPattern = /^sfk_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([0-9a-f]{64})$/;
+
 function parseApiKey(value: string) {
-  if (!value.startsWith('sfk_')) {
-    throw new UnauthorizedError('Invalid API key.');
-  }
-
-  const separatorIndex = value.indexOf('.');
-  if (separatorIndex === -1) {
-    throw new UnauthorizedError('Invalid API key.');
-  }
-
-  return {
-    apiKeyId: value.slice(4, separatorIndex),
-    secret: value.slice(separatorIndex + 1)
-  };
+  const match = apiKeyPattern.exec(value);
+  const apiKeyId = match?.[1];
+  const secret = match?.[2];
+  return apiKeyId !== undefined && secret !== undefined ? { apiKeyId, secret } : null;
 }
 
 async function verifyApiKeyCredential(env: Env, credential: string): Promise<ApiKeyPrincipal | null> {
-  if (!credential.startsWith('sfk_')) {
+  const apiKey = parseApiKey(credential);
+  if (!apiKey) {
     return null;
   }
 
-  let parsed: ReturnType<typeof parseApiKey>;
-  try {
-    parsed = parseApiKey(credential);
-  } catch {
-    return null;
+  const hash = await hashCredentialMaterial(apiKey.secret);
+  const cacheKey = `${apiKey.apiKeyId}.${hash}`;
+  const nowMs = Date.now();
+  const cached = principalCache.get(cacheKey);
+  if (cached && cached.expiresAtMs > nowMs) {
+    return cached.record;
   }
 
   const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
     type: 'control.api-key.verify',
-    apiKeyId: parsed.apiKeyId,
-    hash: await hashCredentialMaterial(parsed.secret)
+    apiKeyId: apiKey.apiKeyId,
+    hash
   });
-
-  return (response as {
-    type: 'control.api-key.verify.result';
-    result: { record: ApiKeyPrincipal | null };
-  }).result.record;
-}
-
-async function verifyApiKeyCredentialCached(c: AppContext, credential: string): Promise<ApiKeyPrincipal | null> {
-  const cached = c.get('verifiedApiKeyCredential');
-  if (cached?.credential === credential) {
-    return cached.record;
+  if (response.type !== 'control.api-key.verify.result') {
+    throw new ServiceUnavailableError('Unexpected control plane api key verify response.');
   }
 
-  const record = await verifyApiKeyCredential(c.env, credential);
-  c.set('verifiedApiKeyCredential', {
-    credential,
-    record
-  });
-  return record;
+  // Only answers from the control plane are remembered. A failed lookup is retried, never cached as a rejection.
+  principalCache.delete(cacheKey);
+  evictForInsert(principalCache, maxPrincipalCacheEntries, (entry) => entry.expiresAtMs <= nowMs);
+  principalCache.set(cacheKey, { record: response.result.record, expiresAtMs: nowMs + principalCacheTtlMs });
+  return response.result.record;
+}
+
+function forgetCachedPrincipals(apiKeyId: string) {
+  for (const cacheKey of principalCache.keys()) {
+    if (cacheKey.startsWith(`${apiKeyId}.`)) {
+      principalCache.delete(cacheKey);
+    }
+  }
 }
 
 function getRateLimitConfiguration(env: Env) {
@@ -468,7 +511,7 @@ function getRateLimitPrincipal(c: { req: { header(name: string): string | undefi
 }
 
 function getRateLimitRouteFamily(path: string) {
-  if (path.startsWith('/v1/system/')) {
+  if (path.startsWith('/v1/system/') || path === '/ready') {
     return 'system';
   }
 
@@ -549,6 +592,10 @@ function getRateLimitOperationKey(
     return 'system.google.drive.notifications';
   }
 
+  if (path === '/ready' && normalizedMethod === 'GET') {
+    return 'system.ready';
+  }
+
   if (path.startsWith('/v1/admin/keys/') && normalizedMethod === 'DELETE') {
     return 'admin.keys.revoke';
   }
@@ -580,17 +627,58 @@ function getRateLimitOperationKey(
   return `${getRateLimitRouteFamily(path)}.${normalizedMethod.toLowerCase()}`;
 }
 
+type PresentedAuthorization =
+  | { kind: 'none' }
+  | { kind: 'bearer'; credential: string }
+  | { kind: 'unusable'; message: string };
+
+// RFC 9110: the authentication scheme is case-insensitive and separated from the credential by whitespace.
+function readAuthorization(header: string | undefined): PresentedAuthorization {
+  if (!header) {
+    return { kind: 'none' };
+  }
+
+  const match = /^(\S+)\s*([\s\S]*)$/.exec(header.trim());
+  const scheme = match?.[1] ?? '';
+  const credential = match?.[2]?.trim() ?? '';
+  if (scheme.toLowerCase() !== 'bearer') {
+    return { kind: 'unusable', message: 'Unsupported authorization scheme.' };
+  }
+
+  return credential ? { kind: 'bearer', credential } : { kind: 'unusable', message: 'Unauthorized' };
+}
+
 async function resolveRateLimitPrincipal(c: AppContext) {
-  const authorization = c.req.header('authorization');
-  if (authorization?.startsWith('Bearer ')) {
-    const credential = authorization.slice('Bearer '.length).trim();
-    const bootstrapAdminCredential = getBootstrapAdminCredential(c.env);
-    if (bootstrapAdminCredential && credential === bootstrapAdminCredential) {
-      return 'bootstrap-admin';
-    }
+  const presented = readAuthorization(c.req.header('authorization'));
+  const bootstrapAdminCredential = getBootstrapAdminCredential(c.env);
+  if (
+    presented.kind === 'bearer'
+    && bootstrapAdminCredential
+    && await timingSafeEqualSecret(presented.credential, bootstrapAdminCredential)
+  ) {
+    return 'bootstrap-admin';
   }
 
   return getRateLimitPrincipal(c);
+}
+
+function createRateLimitError(
+  c: AppContext,
+  details: {
+    principal: string;
+    routeFamily: string;
+    operationKey: string;
+    maxRequests: number;
+    windowSeconds: number;
+    resetAtMs: number;
+  }
+) {
+  const { resetAtMs, ...publicDetails } = details;
+  c.set('retryAfterSeconds', Math.max(1, Math.ceil((resetAtMs - Date.now()) / 1000)));
+  return new TooManyRequestsError('Rate limit exceeded.', {
+    ...publicDetails,
+    resetAt: new Date(resetAtMs).toISOString()
+  });
 }
 
 async function enforceRateLimit(c: AppContext) {
@@ -609,10 +697,7 @@ async function enforceRateLimit(c: AppContext) {
     windowSeconds: config.windowSeconds
   });
 
-  const result = (response as {
-    type: 'rate-limit.check.result';
-    result: { allowed: boolean; remaining: number; resetAtMs: number };
-  }).result;
+  const { result } = response;
 
   c.set('rateLimit', {
     limit: config.maxRequests,
@@ -626,13 +711,13 @@ async function enforceRateLimit(c: AppContext) {
   });
 
   if (!result.allowed) {
-    throw new TooManyRequestsError('Rate limit exceeded.', {
+    throw createRateLimitError(c, {
       principal,
       routeFamily,
       operationKey,
       maxRequests: config.maxRequests,
       windowSeconds: config.windowSeconds,
-      resetAt: new Date(result.resetAtMs).toISOString()
+      resetAtMs: result.resetAtMs
     });
   }
 }
@@ -642,20 +727,148 @@ async function hashCredentialMaterial(value: string) {
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
 }
 
-async function touchApiKeyIfNeeded(env: Env, apiKeyId: string) {
+// Compare SHA-256 digests so the loop runs for a fixed length even when the secrets differ in length.
+function timingSafeEqualBytes(left: Uint8Array, right: Uint8Array) {
+  const length = Math.max(left.length, right.length);
+  let mismatch = left.length ^ right.length;
+  for (let index = 0; index < length; index += 1) {
+    const leftByte = index < left.length ? left[index] ?? 0 : 0;
+    const rightByte = index < right.length ? right[index] ?? 0 : 0;
+    mismatch |= leftByte ^ rightByte;
+  }
+  return mismatch === 0;
+}
+
+async function timingSafeEqualSecret(left: string, right: string) {
+  const encoder = new TextEncoder();
+  const [leftDigest, rightDigest] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(left)),
+    crypto.subtle.digest('SHA-256', encoder.encode(right))
+  ]);
+  return timingSafeEqualBytes(new Uint8Array(leftDigest), new Uint8Array(rightDigest));
+}
+
+function readWebhookFailureBlock(clientKey: string, nowMs: number) {
+  const block = webhookFailureBlocks.get(clientKey);
+  if (block === undefined) {
+    return null;
+  }
+  if (block.resetAtMs <= nowMs) {
+    webhookFailureBlocks.delete(clientKey);
+    return null;
+  }
+  return block;
+}
+
+function rememberWebhookFailureBlock(clientKey: string, block: WebhookFailureBlock) {
+  evictForInsert(webhookFailureBlocks, maxWebhookFailureBlocks, (entry) => entry.resetAtMs <= Date.now());
+  webhookFailureBlocks.set(clientKey, block);
+}
+
+function throwWebhookFailureLimit(c: AppContext, block: WebhookFailureBlock): never {
+  c.set('rateLimit', {
+    limit: block.maxRequests,
+    remaining: 0,
+    resetAtMs: block.resetAtMs
+  });
+  c.set('rateLimitContext', {
+    principal: block.principal,
+    routeFamily: block.routeFamily,
+    operationKey: block.operationKey
+  });
+  throw createRateLimitError(c, {
+    principal: block.principal,
+    routeFamily: block.routeFamily,
+    operationKey: block.operationKey,
+    maxRequests: block.maxRequests,
+    windowSeconds: block.windowSeconds,
+    resetAtMs: block.resetAtMs
+  });
+}
+
+async function assertWebhookToken(c: AppContext, webhookToken: string, providedToken: string | undefined) {
+  const clientKey = getRateLimitPrincipal(c);
+  const blocked = readWebhookFailureBlock(clientKey, Date.now());
+  if (blocked) {
+    throwWebhookFailureLimit(c, blocked);
+  }
+
+  const matches = await timingSafeEqualSecret(providedToken ?? '', webhookToken);
+  if (matches) {
+    return;
+  }
+
+  const config = getRateLimitConfiguration(c.env);
+  const principal = `system:${clientKey}`;
+  const routeFamily = 'system';
+  const response = await doRpc<RateLimitDoResponse>(getRateLimitStub(c.env, `${routeFamily}:${clientKey}`), {
+    type: 'rate-limit.check',
+    key: webhookFailureOperationKey,
+    limit: config.maxRequests,
+    windowSeconds: config.windowSeconds
+  });
+  const { result } = response;
+  c.set('rateLimit', {
+    limit: config.maxRequests,
+    remaining: result.remaining,
+    resetAtMs: result.resetAtMs
+  });
+  c.set('rateLimitContext', {
+    principal,
+    routeFamily,
+    operationKey: webhookFailureOperationKey
+  });
+
+  if (!result.allowed) {
+    rememberWebhookFailureBlock(clientKey, {
+      principal,
+      routeFamily,
+      operationKey: webhookFailureOperationKey,
+      maxRequests: config.maxRequests,
+      windowSeconds: config.windowSeconds,
+      resetAtMs: result.resetAtMs
+    });
+    throw createRateLimitError(c, {
+      principal,
+      routeFamily,
+      operationKey: webhookFailureOperationKey,
+      maxRequests: config.maxRequests,
+      windowSeconds: config.windowSeconds,
+      resetAtMs: result.resetAtMs
+    });
+  }
+
+  throw new UnauthorizedError('Invalid Google Drive webhook token.');
+}
+
+async function touchApiKeyIfNeeded(env: Env, apiKeyId: string, requestId?: string) {
   const nowMs = Date.now();
   const lastTouchedAtMs = recentApiKeyTouches.get(apiKeyId);
   if (lastTouchedAtMs !== undefined && nowMs - lastTouchedAtMs < apiKeyTouchIntervalMs) {
     return;
   }
 
-  pruneRecentApiKeyTouches(nowMs);
+  // Last-used is audit telemetry, so a failed touch must not fail an otherwise valid request. The throttle starts only
+  // after the control plane accepted the update, so the next request retries a failed touch.
+  try {
+    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
+      type: 'control.api-key.touch',
+      apiKeyId,
+      usedAt: new Date(nowMs).toISOString()
+    });
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: 'api_key.touch.failed',
+      apiKeyId,
+      requestId: requestId ?? null,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message : String(error)
+    }));
+    return;
+  }
+
+  evictForInsert(recentApiKeyTouches, maxRecentApiKeyTouches, (touchedAtMs) => touchedAtMs < nowMs - apiKeyTouchIntervalMs);
   recentApiKeyTouches.set(apiKeyId, nowMs);
-  await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
-    type: 'control.api-key.touch',
-    apiKeyId,
-    usedAt: new Date(nowMs).toISOString()
-  });
 }
 
 function getRequestPrincipal(c: AppContext) {
@@ -684,10 +897,7 @@ async function enforceVerifiedApiKeyRateLimit(c: AppContext, apiKeyId: string) {
     windowSeconds: config.windowSeconds
   });
 
-  const result = (response as {
-    type: 'rate-limit.check.result';
-    result: { allowed: boolean; remaining: number; resetAtMs: number };
-  }).result;
+  const { result } = response;
 
   c.set('rateLimit', {
     limit: config.maxRequests,
@@ -702,14 +912,41 @@ async function enforceVerifiedApiKeyRateLimit(c: AppContext, apiKeyId: string) {
   c.set('verifiedApiKeyRateLimitApplied', true);
 
   if (!result.allowed) {
-    throw new TooManyRequestsError('Rate limit exceeded.', {
+    throw createRateLimitError(c, {
       principal,
       routeFamily,
       operationKey,
       maxRequests: config.maxRequests,
       windowSeconds: config.windowSeconds,
-      resetAt: new Date(result.resetAtMs).toISOString()
+      resetAtMs: result.resetAtMs
     });
+  }
+}
+
+// A primary-key lookup of an id that never exists: it proves the control plane answers without scanning the registry
+// or writing anything.
+async function probeControlPlane(env: Env): Promise<ReadinessProbe['outcome']> {
+  try {
+    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
+      type: 'control.api-key.get',
+      apiKeyId: 'readiness-probe'
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+async function assertControlPlaneReachable(env: Env) {
+  const nowMs = Date.now();
+  let probe = readinessProbe;
+  if (probe === null || probe.expiresAtMs <= nowMs) {
+    probe = { outcome: await probeControlPlane(env), expiresAtMs: nowMs + readinessProbeTtlMs };
+    readinessProbe = probe;
+  }
+
+  if (!probe.outcome.ok) {
+    throw probe.outcome.error;
   }
 }
 
@@ -790,45 +1027,63 @@ function buildTableRequestContext(c: AppContext, route: string) {
   };
 }
 
-async function authenticateRequest(c: AppContext): Promise<AuthContext> {
-  const authorization = c.req.header('authorization');
-  if (!authorization) {
+// Who is calling? Verifies the credential but does not yet charge the key's rate limit or record its use.
+async function identifyCaller(c: AppContext): Promise<AuthContext> {
+  const presented = readAuthorization(c.req.header('authorization'));
+  if (presented.kind === 'none') {
     c.set('authPrincipal', 'anonymous');
     return { kind: 'anonymous' };
   }
 
-  if (!authorization.startsWith('Bearer ')) {
-    throw new UnauthorizedError('Unsupported authorization scheme.');
-  }
-
-  const credential = authorization.slice('Bearer '.length).trim();
-  if (!credential) {
-    throw new UnauthorizedError();
+  if (presented.kind === 'unusable') {
+    throw new UnauthorizedError(presented.message);
   }
 
   const bootstrapAdminCredential = getBootstrapAdminCredential(c.env);
-  if (bootstrapAdminCredential && credential === bootstrapAdminCredential) {
+  if (bootstrapAdminCredential && await timingSafeEqualSecret(presented.credential, bootstrapAdminCredential)) {
     c.set('authPrincipal', 'bootstrap-admin');
     return { kind: 'bootstrap-admin' };
   }
 
-  const record = await verifyApiKeyCredentialCached(c, credential);
+  const record = await verifyApiKeyCredential(c.env, presented.credential);
   if (!record) {
     throw new UnauthorizedError('Invalid API key.');
   }
 
-  await enforceVerifiedApiKeyRateLimit(c, record.id);
   c.set('authPrincipal', `api-key:${record.id}`);
-  await touchApiKeyIfNeeded(c.env, record.id);
-
   return {
     kind: 'api-key',
     record
   };
 }
 
+// The per-key rate limit and the last-used touch only need the key id, so they do not wait for each other.
+async function completeAuthentication(c: AppContext, auth: AuthContext) {
+  if (auth.kind !== 'api-key') {
+    return;
+  }
+
+  await Promise.all([
+    enforceVerifiedApiKeyRateLimit(c, auth.record.id),
+    touchApiKeyIfNeeded(c.env, auth.record.id, c.get('requestId'))
+  ]);
+}
+
+async function authenticateRequest(c: AppContext): Promise<AuthContext> {
+  const auth = await identifyCaller(c);
+  await completeAuthentication(c, auth);
+  return auth;
+}
+
 function hasScope(record: ApiKeyPrincipal, scope: ApiScope) {
   return record.scopes.includes(scope);
+}
+
+const wrongProjectMessage = 'This API key is scoped to a different project.';
+
+// Missing or invalid credentials are 401; a valid credential that lacks access is 403.
+function missingScopeError(scope: ApiScope) {
+  return new ForbiddenError(`This API key does not have the "${scope}" scope.`);
 }
 
 function assertAdminScope(auth: AuthContext, scope: ApiScope) {
@@ -836,8 +1091,12 @@ function assertAdminScope(auth: AuthContext, scope: ApiScope) {
     return;
   }
 
-  if (auth.kind !== 'api-key' || !hasScope(auth.record, scope)) {
+  if (auth.kind !== 'api-key') {
     throw new UnauthorizedError();
+  }
+
+  if (!hasScope(auth.record, scope)) {
+    throw missingScopeError(scope);
   }
 }
 
@@ -845,7 +1104,7 @@ function assertGlobalAdminScope(auth: AuthContext, scope: ApiScope) {
   assertAdminScope(auth, scope);
 
   if (auth.kind === 'api-key' && auth.record.projectSlug) {
-    throw new UnauthorizedError('This operation requires a global admin key.');
+    throw new ForbiddenError('This operation requires a global admin key.');
   }
 }
 
@@ -859,11 +1118,11 @@ function assertProjectScope(auth: AuthContext, scope: ApiScope, projectSlug: str
   }
 
   if (!hasScope(auth.record, scope)) {
-    throw new UnauthorizedError();
+    throw missingScopeError(scope);
   }
 
   if (auth.record.projectSlug && auth.record.projectSlug !== projectSlug) {
-    throw new UnauthorizedError();
+    throw new ForbiddenError(wrongProjectMessage);
   }
 }
 
@@ -873,7 +1132,7 @@ function assertCredentialProjectBoundary(auth: AuthContext, projectSlug: string)
   }
 
   if (auth.record.projectSlug && auth.record.projectSlug !== projectSlug) {
-    throw new UnauthorizedError();
+    throw new ForbiddenError(wrongProjectMessage);
   }
 }
 
@@ -885,7 +1144,7 @@ function assertApiKeyCanDelegateScopes(auth: AuthContext, requestedScopes: reado
   const callerScopes = new Set(auth.record.scopes);
   const unauthorizedScopes = requestedScopes.filter((scope) => !callerScopes.has(scope));
   if (unauthorizedScopes.length > 0) {
-    throw new UnauthorizedError('API keys can only delegate scopes they already have.');
+    throw new ForbiddenError('API keys can only delegate scopes they already have.');
   }
 }
 
@@ -898,35 +1157,55 @@ async function loadProject(c: { env: Env }, projectSlug: string) {
   return (response as { type: 'project.get.result'; result: AdminGetProjectResult }).result;
 }
 
-async function loadProjectAccess(c: { env: Env }, projectSlug: string) {
-  const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, projectSlug), {
-    type: 'project.access.get',
-    projectSlug
-  });
+type Settled<T> = { ok: true; value: T } | { ok: false; reason: unknown };
 
-  return (response as {
-    type: 'project.access.get.result';
-    result: { data: ProjectAccessResult };
-  }).result.data;
+// Starting work early and then abandoning it (for a rejected credential, say) must not leave an unhandled rejection
+// behind, so such work is awaited through a copy that never rejects.
+function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
+  return promise.then(
+    (value): Settled<T> => ({ ok: true, value }),
+    (reason: unknown): Settled<T> => ({ ok: false, reason })
+  );
 }
 
-async function requirePublicReadProject(c: { env: Env }, projectSlug: string) {
-  try {
-    const projectAccess = await loadProjectAccess(c, projectSlug);
-    if (projectAccess.defaultAuthMode !== 'public-read') {
-      throw new UnauthorizedError();
-    }
-  } catch (error) {
-    if (error instanceof NotFoundError) {
-      throw new UnauthorizedError();
+function isNotFound(error: unknown) {
+  return error instanceof NotFoundError || (error instanceof DurableRpcError && error.status === 404);
+}
+
+function grantsTableRead(auth: AuthContext) {
+  return auth.kind === 'bootstrap-admin' || (auth.kind === 'api-key' && hasScope(auth.record, 'table:read'));
+}
+
+// Table reads wait on the caller's rate limit and on the table lookup. Neither depends on the other, so once the
+// caller is known and its key is allowed near this project at all, both run together. A key that may not touch the
+// project never causes a project lookup.
+async function authorizeTableRead(c: AppContext, projectSlug: string, tableSlug: string) {
+  const auth = await identifyCaller(c);
+  assertCredentialProjectBoundary(auth, projectSlug);
+
+  const resolution = settle(loadProjectTable(c, projectSlug, tableSlug));
+  await completeAuthentication(c, auth);
+  const resolved = await resolution;
+
+  if (grantsTableRead(auth)) {
+    if (!resolved.ok) {
+      throw resolved.reason;
     }
 
-    if (error instanceof DurableRpcError && error.status === 404) {
-      throw new UnauthorizedError();
-    }
-
-    throw error;
+    return resolved.value;
   }
+
+  // Callers without a read grant may only read public-read projects. Private projects, missing projects, and missing
+  // tables all get the same denial, so the response never reveals which of them exist.
+  if (resolved.ok && resolved.value.project.defaultAuthMode === 'public-read') {
+    return resolved.value;
+  }
+
+  if (!resolved.ok && !isNotFound(resolved.reason)) {
+    throw resolved.reason;
+  }
+
+  throw auth.kind === 'api-key' ? missingScopeError('table:read') : new UnauthorizedError();
 }
 
 async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug: string) {
@@ -1073,6 +1352,36 @@ function normalizeRequestError(error: unknown) {
   return error;
 }
 
+// A Durable Object answers a payload its shared RPC schema rejects with one of these 400s
+// (parseDurableObjectRpcRequest). The gateway built that payload, so the failure is a server bug, not a client mistake.
+function isDurableObjectBoundaryRejection(error: unknown) {
+  return error instanceof BadRequestError && (
+    error.message === 'Request validation failed.'
+    || error.message === 'Malformed JSON in Durable Object RPC request.'
+  );
+}
+
+const durableObjectOverloadRetryAfterSeconds = 2;
+
+// Durable Object stubs reject with `overloaded: true` while an object is shedding load.
+function isDurableObjectOverloaded(error: unknown) {
+  return error instanceof Error && 'overloaded' in error && error.overloaded === true;
+}
+
+// Only intentional contract errors reach clients; everything else becomes the generic INTERNAL_ERROR body.
+function toPublicErrorResponse(error: unknown) {
+  if (isDurableObjectBoundaryRejection(error)) {
+    return toErrorResponse(new Error('A Durable Object rejected a gateway-built RPC payload.'));
+  }
+
+  if (isDurableObjectOverloaded(error)) {
+    return toErrorResponse(new ServiceUnavailableError('The service is temporarily overloaded. Retry shortly.'));
+  }
+
+  const rpcErrorResponse = error instanceof DurableRpcError ? parseDurableRpcErrorResponse(error) : null;
+  return rpcErrorResponse ?? toErrorResponse(error);
+}
+
 function parseListRowsQuery(c: { req: { query(name: string): string | undefined } }): ListRowsQuery {
   const rawFilter = c.req.query('filter');
   let filter: unknown = undefined;
@@ -1112,15 +1421,17 @@ const readyRoute = createRoute({
   method: 'get',
   path: '/ready',
   tags: ['System'],
+  security: optionalBearerSecurity,
   responses: {
     200: {
-      description: 'Readiness check',
-      content: jsonContent(readyResponseSchema)
+      description: 'Ready. Anonymous callers receive only `ok` and `service`; a global admin credential also receives the checks and notes.',
+      content: jsonContent(z.union([readyResponseSchema, readySummarySchema]))
     },
     503: {
-      description: 'Readiness check failed',
-      content: jsonContent(readyResponseSchema)
-    }
+      description: 'Not ready. Same shape as the 200 response.',
+      content: jsonContent(z.union([readyResponseSchema, readySummarySchema]))
+    },
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1137,7 +1448,7 @@ const adminListProjectsRoute = createRoute({
       description: 'List all projects or get one project by slug',
       content: jsonContent(z.union([adminListProjectsResultSchema, adminGetProjectResultSchema]))
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1167,7 +1478,7 @@ const adminCreateProjectRoute = createRoute({
       content: jsonContent(errorResponseSchema)
     },
     400: badRequestResponse,
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1184,7 +1495,7 @@ const adminDeleteProjectRoute = createRoute({
       description: 'Delete a configured project, or confirm it is already absent, and clear caches for its tables',
       content: jsonContent(deleteProjectResultSchema)
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1201,7 +1512,7 @@ const adminListSpreadsheetTabsRoute = createRoute({
       description: 'List spreadsheet tabs for a project',
       content: jsonContent(adminListSpreadsheetTabsResultSchema)
     },
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1221,7 +1532,7 @@ const adminInspectSpreadsheetTabRoute = createRoute({
       content: jsonContent(adminInspectSpreadsheetTabResultSchema)
     },
     400: badRequestResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1239,7 +1550,7 @@ const adminListTablesRoute = createRoute({
       description: 'List configured tables for a project',
       content: jsonContent(listTablesResultSchema)
     },
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1271,7 +1582,7 @@ const adminCreateTableRoute = createRoute({
       content: jsonContent(errorResponseSchema)
     },
     400: badRequestResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1289,7 +1600,7 @@ const adminDeleteTableRoute = createRoute({
       description: 'Delete a configured table, or confirm it is already absent, and clear its local cache',
       content: jsonContent(deleteTableResultSchema)
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1305,11 +1616,10 @@ const listRowsRoute = createRoute({
   responses: {
     200: {
       description: 'List cached rows',
-      content: jsonContent(listRowsResultSchema)
+      content: cachedReadJsonContent(listRowsResultSchema)
     },
     400: badRequestResponse,
-    403: forbiddenResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1325,10 +1635,9 @@ const getSchemaRoute = createRoute({
   responses: {
     200: {
       description: 'Get inferred table schema',
-      content: jsonContent(getSchemaResultSchema)
+      content: cachedReadJsonContent(getSchemaResultSchema)
     },
-    403: forbiddenResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1346,7 +1655,7 @@ const getCacheStatusRoute = createRoute({
       description: 'Get table cache status',
       content: jsonContent(getTableCacheStatusResultSchema)
     },
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1364,7 +1673,7 @@ const reindexTableRoute = createRoute({
       description: 'Force a full cache sync from Google Sheets',
       content: jsonContent(reindexTableResultSchema)
     },
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1382,7 +1691,7 @@ const refreshTableCacheRoute = createRoute({
       description: 'Refresh the table cache if it is stale',
       content: jsonContent(refreshTableCacheResultSchema)
     },
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1404,7 +1713,7 @@ const registerSpreadsheetWatchesRoute = createRoute({
       content: jsonContent(adminRegisterSpreadsheetWatchesResultSchema)
     },
     400: badRequestResponse,
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1418,7 +1727,7 @@ const listSpreadsheetWatchesRoute = createRoute({
       description: 'List Google Drive spreadsheet watches',
       content: jsonContent(adminListSpreadsheetWatchesResultSchema)
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1432,7 +1741,7 @@ const listSpreadsheetWatchRetryAdviceRoute = createRoute({
       description: 'List Drive watch retry guidance derived from active watches and recently stopped watches',
       content: jsonContent(adminListSpreadsheetWatchRetryAdviceResultSchema)
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1453,7 +1762,7 @@ const stopSpreadsheetWatchesRoute = createRoute({
       content: jsonContent(adminRegisterSpreadsheetWatchesResultSchema)
     },
     400: badRequestResponse,
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1481,10 +1790,9 @@ const getRowRoute = createRoute({
   responses: {
     200: {
       description: 'Get one row by managed ID',
-      content: jsonContent(getRowResultSchema)
+      content: cachedReadJsonContent(getRowResultSchema)
     },
-    403: forbiddenResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1507,8 +1815,7 @@ const createRowRoute = createRoute({
       content: jsonContent(createRowResultSchema)
     },
     400: badRequestResponse,
-    403: forbiddenResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1531,8 +1838,7 @@ const updateRowRoute = createRoute({
       content: jsonContent(updateRowResultSchema)
     },
     400: badRequestResponse,
-    403: forbiddenResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1550,8 +1856,7 @@ const deleteRowRoute = createRoute({
       description: 'Delete a row',
       content: jsonContent(deleteRowResultSchema)
     },
-    403: forbiddenResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1569,7 +1874,7 @@ const listApiKeysRoute = createRoute({
       description: 'List API keys',
       content: jsonContent(adminListApiKeysResultSchema)
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1590,7 +1895,7 @@ const createApiKeyRoute = createRoute({
       content: jsonContent(adminCreateApiKeyResultSchema)
     },
     400: badRequestResponse,
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1607,7 +1912,7 @@ const revokeApiKeyRoute = createRoute({
       description: 'Revoke an API key',
       content: jsonContent(okResultSchema)
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1622,20 +1927,23 @@ export type CachedTableReadProps = Readonly<{
   resolvedConfig: ResolvedTableConfigSnapshot;
 }>;
 
-function noStoreJsonResponse(body: unknown, status = 200) {
+function noStoreJsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
   return Response.json(body, {
     status,
     headers: {
+      ...headers,
       'cache-control': 'no-store'
     }
   });
 }
 
-function applyDefaultGatewayCacheSafetyHeaders(response: Response) {
-  const cacheControl = response.headers.get('cache-control');
-  const hasNoStore = cacheControl?.split(',').some((directive) => directive.trim().toLowerCase() === 'no-store');
-  if (!hasNoStore) {
-    response.headers.set('cache-control', 'no-store');
+function applyDefaultGatewayCacheSafetyHeaders(response: Response, preserveCacheControl = false) {
+  if (!preserveCacheControl) {
+    const cacheControl = response.headers.get('cache-control');
+    const hasNoStore = cacheControl?.split(',').some((directive) => directive.trim().toLowerCase() === 'no-store');
+    if (!hasNoStore) {
+      response.headers.set('cache-control', 'no-store');
+    }
   }
   response.headers.delete('cloudflare-cdn-cache-control');
   response.headers.delete('cache-tag');
@@ -1643,9 +1951,21 @@ function applyDefaultGatewayCacheSafetyHeaders(response: Response) {
 
 function noStoreErrorResponse(error: unknown) {
   const normalizedError = normalizeRequestError(error);
-  const rpcErrorResponse = normalizedError instanceof DurableRpcError ? parseDurableRpcErrorResponse(normalizedError) : null;
-  const { status, body } = rpcErrorResponse ?? toErrorResponse(normalizedError);
-  return noStoreJsonResponse(body, status);
+  const { status, body } = toPublicErrorResponse(normalizedError);
+  if (body.error.code === 'INTERNAL_ERROR') {
+    // The gateway only sees the generic body, so the cause is logged here.
+    console.error(JSON.stringify({
+      event: 'cached_table_read.error',
+      errorName: normalizedError instanceof Error ? normalizedError.name : 'UnknownError',
+      errorMessage: normalizedError instanceof Error ? normalizedError.message : String(normalizedError),
+      errorDetails: normalizedError instanceof AppError ? normalizedError.details ?? null : null,
+      errorStack: normalizedError instanceof Error ? normalizedError.stack ?? null : null
+    }));
+  }
+  const retryAfter = isDurableObjectOverloaded(normalizedError)
+    ? { 'retry-after': String(durableObjectOverloadRetryAfterSeconds) }
+    : {};
+  return noStoreJsonResponse(body, status, retryAfter);
 }
 
 function decodeCachedPathSegment(value: string) {
@@ -1765,30 +2085,14 @@ async function getCachedTableReadCacheStatus(
   return response.result.data;
 }
 
-function getExternalChangeDebounceSeconds(cacheStatus: GetTableCacheStatusResult['data']) {
-  if (!cacheStatus.externalChange.pending || !cacheStatus.externalChange.debounceUntil) {
-    return null;
-  }
-
-  const debounceUntilMs = Date.parse(cacheStatus.externalChange.debounceUntil);
-  if (!Number.isFinite(debounceUntilMs)) {
-    return null;
-  }
-
-  return Math.max(0, Math.floor((debounceUntilMs - Date.now()) / 1000));
-}
-
 function getCachedTableReadEdgeTtlSeconds(cacheStatus: GetTableCacheStatusResult['data']) {
+  // TableDO reports a pending external change as stale (`external-change`), so this also keeps entries out of the
+  // edge cache from the Drive notification until the change has been reindexed.
   if (cacheStatus.cacheTtlSeconds <= 0 || cacheStatus.status !== 'ready' || cacheStatus.stale) {
     return 0;
   }
 
-  const debounceSeconds = getExternalChangeDebounceSeconds(cacheStatus);
-  if (debounceSeconds === null) {
-    return cacheStatus.cacheTtlSeconds;
-  }
-
-  return Math.min(cacheStatus.cacheTtlSeconds, debounceSeconds);
+  return cacheStatus.cacheTtlSeconds;
 }
 
 function getCachedTableReadTags(operation: CachedTableReadOperation) {
@@ -1832,10 +2136,21 @@ async function cachedTableReadSuccessResponse(
   resolvedConfig: ResolvedTableConfigSnapshot
 ) {
   const result = await runCachedTableRead(env, operation, resolvedConfig);
+  const parsed = parseCachedTableReadResult(operation, result);
   const cacheStatus = await getCachedTableReadCacheStatus(env, operation, resolvedConfig);
-  return Response.json(result, {
+  return Response.json(parsed, {
     headers: cachedTableReadSuccessHeaders(operation, cacheStatus)
   });
+}
+
+function parseCachedTableReadResult(operation: CachedTableReadOperation, result: unknown) {
+  if (operation.kind === 'listRows') {
+    return listRowsResultSchema.parse(result);
+  }
+  if (operation.kind === 'getRow') {
+    return getRowResultSchema.parse(result);
+  }
+  return getSchemaResultSchema.parse(result);
 }
 
 function compareStableJsonKeys(left: string, right: string) {
@@ -1952,37 +2267,30 @@ async function fetchCachedTableRead(c: AppContext, pathname: string, options: Ca
   });
 }
 
-async function parseCachedTableReadResponse<TSchema extends z.ZodType>(
-  c: AppContext,
-  response: Response,
-  schema: TSchema
-): Promise<z.infer<TSchema>> {
+function passThroughCachedReadResponse(response: Response) {
+  const headers = new Headers();
+  const contentType = response.headers.get('content-type');
+  if (contentType) {
+    headers.set('content-type', contentType);
+  }
   const cacheControl = response.headers.get('cache-control');
   if (cacheControl) {
-    c.header('cache-control', cacheControl);
+    headers.set('cache-control', cacheControl);
   }
-
   const cacheStatus = response.headers.get('cf-cache-status')?.trim();
   if (cacheStatus) {
-    c.header(cacheStatusHeaderName, cacheStatus);
+    headers.set(cacheStatusHeaderName, cacheStatus);
+  }
+  const retryAfter = response.headers.get('retry-after');
+  if (retryAfter) {
+    headers.set('retry-after', retryAfter);
   }
 
-  const body: unknown = await response.json();
-  if (response.ok) {
-    return schema.parse(body);
-  }
-
-  const errorBody = errorResponseSchema.parse(body);
-  throw new AppError(errorBody.error.message, errorBody.error.code, response.status, errorBody.error.details);
-}
-
-async function fetchCachedTableReadJson<TSchema extends z.ZodType>(
-  c: AppContext,
-  schema: TSchema,
-  pathname: string,
-  options: CachedTableReadFetchOptions
-): Promise<z.infer<TSchema>> {
-  return parseCachedTableReadResponse(c, await fetchCachedTableRead(c, pathname, options), schema);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
 }
 
 const maxPurgeCacheTagLength = 1024;
@@ -2110,6 +2418,7 @@ export class CachedTableReads extends WorkerEntrypoint<Env, CachedTableReadProps
 }
 
 const adminUiHeaders = buildAdminUiHeaders();
+const immutableAdminAssetHeaders = buildAdminUiHeaders({ cache: 'immutable' });
 
 type AdminUiStatus = 'enabled' | 'disabled' | 'invalid' | 'assets-missing';
 
@@ -2142,10 +2451,33 @@ async function serveAdminUi(c: AppContext): Promise<Response> {
 
   const assetResponse = await c.env.ASSETS.fetch(c.req.raw);
   const response = new Response(assetResponse.body, assetResponse);
-  for (const [name, value] of Object.entries(adminUiHeaders)) {
+  const immutableAsset = shouldCacheAdminAssetImmutably(c.req.path, assetResponse);
+  const headers = immutableAsset ? immutableAdminAssetHeaders : adminUiHeaders;
+  for (const [name, value] of Object.entries(headers)) {
     response.headers.set(name, value);
   }
+  if (immutableAsset) {
+    c.set('preserveAdminAssetCache', true);
+  }
   return response;
+}
+
+function isHtmlContentType(contentType: string | null) {
+  if (contentType === null) {
+    return false;
+  }
+  const mediaType = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+  return mediaType === 'text/html';
+}
+
+function shouldCacheAdminAssetImmutably(path: string, assetResponse: Response) {
+  if (assetResponse.status !== 200 && assetResponse.status !== 304) {
+    return false;
+  }
+  if (!path.startsWith('/admin/assets/')) {
+    return false;
+  }
+  return !isHtmlContentType(assetResponse.headers.get('content-type'));
 }
 
 function createApp() {
@@ -2162,7 +2494,7 @@ function createApp() {
       applyCorsHeaders(c.res, c.req.raw, c.env);
     }
 
-    applyDefaultGatewayCacheSafetyHeaders(c.res);
+    applyDefaultGatewayCacheSafetyHeaders(c.res, c.get('preserveAdminAssetCache') === true);
     c.res.headers.set('x-request-id', c.get('requestId'));
     const rateLimit = c.get('rateLimit');
     const rateLimitContext = c.get('rateLimitContext');
@@ -2201,6 +2533,12 @@ function createApp() {
     await next();
   });
 
+  // Readiness is public, so it sits behind the same per-client limiter as the API.
+  app.use('/ready', async (c, next) => {
+    await enforceRateLimit(c);
+    await next();
+  });
+
   app.onError((error, c) => {
     const normalizedError = normalizeRequestError(error);
     const rateLimitContext = c.get('rateLimitContext');
@@ -2224,8 +2562,7 @@ function createApp() {
         errorStack: normalizedError instanceof Error ? normalizedError.stack ?? null : null
       })
     );
-    const rpcErrorResponse = normalizedError instanceof DurableRpcError ? parseDurableRpcErrorResponse(normalizedError) : null;
-    const { status, body } = rpcErrorResponse ?? toErrorResponse(normalizedError);
+    const { status, body } = toPublicErrorResponse(normalizedError);
     const response = new Response(JSON.stringify(body), {
       status,
       headers: {
@@ -2239,6 +2576,11 @@ function createApp() {
       response.headers.set('x-ratelimit-remaining', String(rateLimit.remaining));
       response.headers.set('x-ratelimit-reset', new Date(rateLimit.resetAtMs).toISOString());
     }
+    const retryAfterSeconds = c.get('retryAfterSeconds')
+      ?? (isDurableObjectOverloaded(normalizedError) ? durableObjectOverloadRetryAfterSeconds : undefined);
+    if (retryAfterSeconds !== undefined) {
+      response.headers.set('retry-after', String(retryAfterSeconds));
+    }
     return response;
   });
 
@@ -2250,19 +2592,21 @@ function createApp() {
   );
 
   app.openapi(readyRoute, async (c) => {
-    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
-      type: 'control.projects.list'
-    });
-    await doRpc<RateLimitDoResponse>(getRateLimitStub(c.env, 'ready:system'), {
-      type: 'rate-limit.check',
-      key: c.get('requestId'),
-      limit: 1,
-      windowSeconds: 1
-    });
+    // Anonymous callers learn only whether the service is ready. Configuration state needs a global admin credential.
+    const auth = await authenticateRequest(c);
+    if (auth.kind !== 'anonymous') {
+      assertGlobalAdminScope(auth, 'admin:projects');
+    }
+    await assertControlPlaneReachable(c.env);
 
     const hasDefaultGoogleCredential = hasConfiguredDefaultGoogleCredential(c.env);
     const namedGoogleCredentials = getNamedGoogleCredentialsStatus(c.env);
     const hasAnyGoogleCredential = hasDefaultGoogleCredential || namedGoogleCredentials === 'configured';
+    const status = hasAnyGoogleCredential ? 200 : 503;
+    if (auth.kind === 'anonymous') {
+      return c.json({ ok: hasAnyGoogleCredential, service: 'sheetflare-api' }, status);
+    }
+
     const hasDriveWebhookSecret = Boolean(c.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim());
     const hasBootstrapAdmin = Boolean(c.env.ADMIN_BEARER_TOKEN?.trim());
     const adminUi = getAdminUiStatus(c.env);
@@ -2305,13 +2649,19 @@ function createApp() {
         adminUi
       },
       notes
-    }, hasAnyGoogleCredential ? 200 : 503);
+    }, status);
   });
 
   app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', {
     type: 'http',
     scheme: 'bearer',
-    bearerFormat: 'API key or bootstrap admin token'
+    bearerFormat: 'API key or bootstrap admin token',
+    description: [
+      'Send `Authorization: Bearer <credential>`; the scheme name is case-insensitive.',
+      'Each Worker isolate caches API key verification results for up to 10 seconds, so a revoked key can keep working',
+      'for up to 10 seconds on isolates that verified it earlier. The isolate that handles the revoke request stops',
+      'accepting the key immediately.'
+    ].join(' ')
   });
 
   app.doc('/doc', {
@@ -2502,19 +2852,10 @@ function createApp() {
 
   app.openapi(listRowsRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
-    const auth = await authenticateRequest(c);
-    assertCredentialProjectBoundary(auth, params.project);
-    if (auth.kind === 'anonymous') {
-      await requirePublicReadProject(c, params.project);
-    }
-    const tableAccess = await loadProjectTable(c, params.project, params.table);
-    if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
-      assertProjectScope(auth, 'table:read', params.project);
-    }
+    const tableAccess = await authorizeTableRead(c, params.project, params.table);
     const query = parseListRowsQuery(c);
-    return c.json(await fetchCachedTableReadJson(
+    return passThroughCachedReadResponse(await fetchCachedTableRead(
       c,
-      listRowsResultSchema,
       `${cachedTableReadBasePath(params.project, params.table)}/rows`,
       { tableAccess, query }
     ));
@@ -2522,18 +2863,9 @@ function createApp() {
 
   app.openapi(getSchemaRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
-    const auth = await authenticateRequest(c);
-    assertCredentialProjectBoundary(auth, params.project);
-    if (auth.kind === 'anonymous') {
-      await requirePublicReadProject(c, params.project);
-    }
-    const tableAccess = await loadProjectTable(c, params.project, params.table);
-    if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
-      assertProjectScope(auth, 'table:read', params.project);
-    }
-    return c.json(await fetchCachedTableReadJson(
+    const tableAccess = await authorizeTableRead(c, params.project, params.table);
+    return passThroughCachedReadResponse(await fetchCachedTableRead(
       c,
-      getSchemaResultSchema,
       `${cachedTableReadBasePath(params.project, params.table)}/schema`,
       { tableAccess }
     ));
@@ -2677,9 +3009,7 @@ function createApp() {
       throw new BadRequestError('Missing required Google Drive notification headers.');
     }
 
-    if (providedToken !== webhookToken) {
-      throw new UnauthorizedError('Invalid Google Drive webhook token.');
-    }
+    await assertWebhookToken(c, webhookToken, providedToken);
 
     c.set('authPrincipal', 'system:google-drive');
     const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
@@ -2704,18 +3034,9 @@ function createApp() {
 
   app.openapi(getRowRoute, async (c) => {
     const params = parsePathParams(c, rowParamsSchema);
-    const auth = await authenticateRequest(c);
-    assertCredentialProjectBoundary(auth, params.project);
-    if (auth.kind === 'anonymous') {
-      await requirePublicReadProject(c, params.project);
-    }
-    const tableAccess = await loadProjectTable(c, params.project, params.table);
-    if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
-      assertProjectScope(auth, 'table:read', params.project);
-    }
-    return c.json(await fetchCachedTableReadJson(
+    const tableAccess = await authorizeTableRead(c, params.project, params.table);
+    return passThroughCachedReadResponse(await fetchCachedTableRead(
       c,
-      getRowResultSchema,
       `${cachedTableReadBasePath(params.project, params.table)}/rows/${encodeURIComponent(params.id)}`,
       { tableAccess }
     ));
@@ -2793,7 +3114,7 @@ function createApp() {
         : requestedProjectSlug;
 
     if (auth.kind === 'api-key' && auth.record.projectSlug && requestedProjectSlug && requestedProjectSlug !== auth.record.projectSlug) {
-      throw new UnauthorizedError('This key cannot list API keys for another project.');
+      throw new ForbiddenError('This key cannot list API keys for another project.');
     }
 
     const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
@@ -2812,7 +3133,7 @@ function createApp() {
     const input = await parseJsonBody(c, adminCreateApiKeyInputSchema);
     if (auth.kind === 'api-key' && auth.record.projectSlug) {
       if (!input.projectSlug || input.projectSlug !== auth.record.projectSlug) {
-        throw new UnauthorizedError('This key can only create API keys for its own project.');
+        throw new ForbiddenError('This key can only create API keys for its own project.');
       }
     }
     assertApiKeyCanDelegateScopes(auth, input.scopes);
@@ -2839,7 +3160,7 @@ function createApp() {
 
     if (auth.kind === 'api-key' && auth.record.projectSlug) {
       if (!record || record.projectSlug !== auth.record.projectSlug) {
-        throw new UnauthorizedError('This key cannot revoke API keys for another project.');
+        throw new ForbiddenError('This key cannot revoke API keys for another project.');
       }
     }
 
@@ -2848,6 +3169,7 @@ function createApp() {
       apiKeyId: id,
       revokedAt: new Date().toISOString()
     });
+    forgetCachedPrincipals(id);
 
     return c.json({ ok: true });
   });
@@ -2857,12 +3179,20 @@ function createApp() {
 
 const app = createApp();
 
-function resetRecentApiKeyTouchesForTests() {
+// Isolate-level caches survive between requests, which is the point in production but leaks state between tests.
+function resetGatewayStateForTests() {
   recentApiKeyTouches.clear();
+  principalCache.clear();
+  webhookFailureBlocks.clear();
+  readinessProbe = null;
 }
 
 function getRecentApiKeyTouchCacheSizeForTests() {
   return recentApiKeyTouches.size;
+}
+
+function getPrincipalCacheSizeForTests() {
+  return principalCache.size;
 }
 
 export {
@@ -2872,7 +3202,10 @@ export {
   RateLimitDO,
   createApp,
   touchApiKeyIfNeeded as __touchApiKeyIfNeededForTests,
-  resetRecentApiKeyTouchesForTests as __resetRecentApiKeyTouchesForTests,
-  getRecentApiKeyTouchCacheSizeForTests as __getRecentApiKeyTouchCacheSizeForTests
+  verifyApiKeyCredential as __verifyApiKeyCredentialForTests,
+  resetGatewayStateForTests as __resetGatewayStateForTests,
+  getRecentApiKeyTouchCacheSizeForTests as __getRecentApiKeyTouchCacheSizeForTests,
+  getPrincipalCacheSizeForTests as __getPrincipalCacheSizeForTests,
+  timingSafeEqualSecret as __timingSafeEqualSecretForTests
 };
 export default app;
