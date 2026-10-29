@@ -5611,7 +5611,7 @@ describe('TableDO', () => {
     expect(snapshotReads).toBe(2);
   });
 
-  it('keeps writes committed during a sync from being lost when that sync promotes its older snapshot', async () => {
+  it('keeps the rows that writes produced during a sync instead of promoting the older snapshot it read', async () => {
     const sheet: SheetState = {
       rows: [
         ['_id', 'name'],
@@ -5619,6 +5619,7 @@ describe('TableDO', () => {
       ],
       requestedRanges: []
     };
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     const gate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:B");
     vi.stubGlobal('fetch', gate.fetch);
     const env = createTestEnv();
@@ -5633,10 +5634,13 @@ describe('TableDO', () => {
     expect((await listUsers(env)).data.map((row) => row.values.name)).toEqual(['Ada Lovelace', 'Grace']);
 
     gate.release();
-    await reindex;
+    const reindexed = await reindex;
 
-    // The promoted snapshot predates both writes, so the cache must not claim to be fresh.
-    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: true, staleReason: 'external-change' });
+    // The snapshot predates both writes, so the sync drops it and the cache keeps both rows. The
+    // cache must not claim to be fresh: the next read resyncs.
+    expect(reindexed.rowCount).toBe(2);
+    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"event":"table.sync.superseded"'));
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: true, staleReason: 'external-change', rowCount: 2 });
     expect((await listUsers(env)).data.map((row) => [row.id, row.values.name])).toEqual([
       ['row-1', 'Ada Lovelace'],
       [created.data.id, 'Grace']
@@ -5679,6 +5683,115 @@ describe('TableDO', () => {
     await reindex;
 
     expect((await lateRead).data.map((row) => row.values.name)).toEqual(['Ada Lovelace']);
+  });
+
+  it('does not let a sync that finishes mid-create drop an earlier create from the unique check', async () => {
+    const sheet: SheetState = {
+      rows: [['_id', 'email']],
+      requestedRanges: []
+    };
+    const snapshotGate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:B");
+    const headerGate = createSnapshotGate(snapshotGate.fetch, "'Users'!1:1");
+    vi.stubGlobal('fetch', headerGate.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      indexedFields: ['email'],
+      cacheTtlSeconds: 3600,
+      fieldRules: { email: { unique: true } }
+    });
+    await listUsers(env);
+
+    // A reindex reads its snapshot, then a create commits before that sync can promote it.
+    snapshotGate.arm();
+    const reindex = callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result');
+    await snapshotGate.reached;
+    await createUser(env, { email: 'ada@example.com' });
+
+    // The next create has passed its cache readiness check and waits on the sheet header read
+    // that precedes its unique check.
+    headerGate.arm();
+    const duplicate = createUser(env, { email: 'ada@example.com' });
+    await headerGate.reached;
+
+    // The sync finishes now, with a snapshot read before the first create.
+    snapshotGate.release();
+    await reindex;
+    headerGate.release();
+
+    await expect(duplicate).rejects.toMatchObject({ name: 'ConflictError', message: 'email must be unique.' });
+    expect(sheet.rows.filter((row) => row[1] === 'ada@example.com')).toHaveLength(1);
+  });
+
+  it('does not let a sync that finishes mid-update drop an earlier create from the unique check', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'email'],
+        ['row-1', 'bea@example.com']
+      ],
+      requestedRanges: []
+    };
+    const snapshotGate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:B");
+    const headerGate = createSnapshotGate(snapshotGate.fetch, "'Users'!1:1");
+    vi.stubGlobal('fetch', headerGate.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      indexedFields: ['email'],
+      cacheTtlSeconds: 3600,
+      fieldRules: { email: { unique: true } }
+    });
+    await listUsers(env);
+
+    snapshotGate.arm();
+    const reindex = callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result');
+    await snapshotGate.reached;
+    await createUser(env, { email: 'ada@example.com' });
+
+    headerGate.arm();
+    const conflicting = updateUser(env, 'row-1', { email: 'ada@example.com' });
+    await headerGate.reached;
+
+    snapshotGate.release();
+    await reindex;
+    headerGate.release();
+
+    await expect(conflicting).rejects.toMatchObject({ name: 'ConflictError', message: 'email must be unique.' });
+    expect(sheet.rows[1]).toEqual(['row-1', 'bea@example.com']);
+  });
+
+  it('still rebuilds the cache for a changed config when a write made under the old config lands during that sync', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name', 'status'],
+        ['row-1', 'Ada', 'active'],
+        ['row-2', 'Bea', 'draft']
+      ],
+      requestedRanges: []
+    };
+    const snapshotGate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:C");
+    const headerGate = createSnapshotGate(snapshotGate.fetch, "'Users'!1:1");
+    vi.stubGlobal('fetch', headerGate.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // An update passes its readiness check under the old config and waits on the header read.
+    headerGate.arm();
+    const update = updateUser(env, 'row-2', { name: 'Bea Smith' });
+    await headerGate.reached;
+
+    // The config now indexes status, so a read rebuilds the cache and its snapshot read is in flight.
+    await createUsersTable(env, { indexedFields: ['name', 'status'], cacheTtlSeconds: 3600 });
+    snapshotGate.arm();
+    const filtered = listUsers(env, { filter: { status: { eq: 'active' } } });
+    await snapshotGate.reached;
+
+    // The update lands in the cache before the rebuild finishes. The cached rows were built for the
+    // old config, so they cannot answer the read: the rebuild's snapshot has to replace them.
+    headerGate.release();
+    await update;
+    snapshotGate.release();
+
+    expect((await filtered).data.map((row) => row.id)).toEqual(['row-1']);
   });
 
   it('rejects a sync whose data read returns a different header row than the layout read', async () => {
