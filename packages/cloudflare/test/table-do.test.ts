@@ -5956,5 +5956,182 @@ describe('TableDO', () => {
     expect(outcomes.map((outcome) => outcome.status)).toEqual(['fulfilled', 'rejected']);
     expect(outcomes[1]).toMatchObject({ reason: { name: 'ConflictError', message: 'email must be unique.' } });
     expect(sheet.rows.filter((row) => row[1] === 'ada@example.com')).toHaveLength(1);
+
+    // A rejected write must not stall the queue behind it.
+    await expect(createUser(env, { email: 'bea@example.com' })).resolves.toMatchObject({ data: { values: { email: 'bea@example.com' } } });
+  });
+
+  it('fails closed and marks the cache stale when rows shift by more than one position while a delete is in flight', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'a'],
+        ['row-2', 'b'],
+        ['row-3', 'c'],
+        ['row-4', 'd'],
+        ['row-5', 'e'],
+        ['row-6', 'f']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let shiftBeforeDelete = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (shiftBeforeDelete && String(input).includes(':batchUpdate') && !String(input).includes('/values:batchUpdate')) {
+        shiftBeforeDelete = false;
+        // Three rows land above the target after its row was resolved, so the delete removes a different row.
+        sheet.rows.splice(1, 0, ['manual-1', 'x'], ['manual-2', 'x'], ['manual-3', 'x']);
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    shiftBeforeDelete = true;
+    await expect(deleteUser(env, 'row-5')).rejects.toMatchObject({
+      name: 'ConflictError',
+      details: { rowId: 'row-5' }
+    });
+
+    // The cache must not claim row-5 is gone: the next read resyncs and shows what the sheet holds.
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: true, staleReason: 'external-change' });
+    expect((await listUsers(env)).data.map((row) => row.id)).toEqual([
+      'manual-1',
+      'manual-2',
+      'manual-3',
+      'row-1',
+      'row-3',
+      'row-4',
+      'row-5',
+      'row-6'
+    ]);
+  });
+
+  it('deletes the first and the last data rows, which have no neighbour on one side', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'a'],
+        ['row-2', 'b'],
+        ['row-3', 'c']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    await deleteUser(env, 'row-3');
+    await deleteUser(env, 'row-1');
+
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-2', 'b']
+    ]);
+    expect((await listUsers(env)).data.map((row) => [row.id, row.rowNumber])).toEqual([['row-2', 2]]);
+  });
+
+  it('rejects a fresh-cache update or delete when the target id is repeated in the row beside it', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // Someone copies row-1 into the next row. No change signal has arrived, so the cache looks fresh.
+    sheet.rows.splice(2, 0, ['row-1', 'Copy']);
+
+    await expect(updateUser(env, 'row-1', { name: 'Ada Lovelace' })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Duplicate managed row id detected for row-1.'
+    });
+    await expect(deleteUser(env, 'row-1')).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Duplicate managed row id detected for row-1.'
+    });
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-1', 'Ada'],
+      ['row-1', 'Copy'],
+      ['row-2', 'Bea']
+    ]);
+  });
+
+  it('lets a fresh-cache update through when the duplicate id is not adjacent, and rejects it at the next sync', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // The copy is outside the rows a point write reads, so only a sync can see it.
+    sheet.rows.push(['row-1', 'Copy']);
+
+    const updated = await updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+    expect(updated.data.rowNumber).toBe(2);
+    expect(sheet.rows[1]).toEqual(['row-1', 'Ada Lovelace']);
+    await expect(callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result')).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Duplicate managed row id detected for row-1.'
+    });
+  });
+
+  it('checks the neighbours after a delete on an expired cache, where the target is found by an id-column scan', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-28T12:00:00.000Z'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'a'],
+        ['row-2', 'b'],
+        ['row-3', 'c'],
+        ['row-4', 'd']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let shiftBeforeDelete = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (shiftBeforeDelete && String(input).includes(':batchUpdate') && !String(input).includes('/values:batchUpdate')) {
+        shiftBeforeDelete = false;
+        sheet.rows.splice(1, 0, ['manual-1', 'x'], ['manual-2', 'x'], ['manual-3', 'x']);
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 1 });
+    await listUsers(env);
+    vi.setSystemTime(new Date('2026-10-28T12:00:05.000Z'));
+
+    shiftBeforeDelete = true;
+    await expect(deleteUser(env, 'row-3')).rejects.toMatchObject({
+      name: 'ConflictError',
+      details: { rowId: 'row-3' }
+    });
+    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+
+    vi.useRealTimers();
   });
 });

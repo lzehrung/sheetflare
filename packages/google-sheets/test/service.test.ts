@@ -572,9 +572,9 @@ describe('GoogleSheetsService.readAllRows', () => {
           });
         }
 
-        if (range === "'Users'!A2:B2") {
+        if (range === "'Users'!A2:B3") {
           return Response.json({
-            values: [['Ada', 'row-2']]
+            values: [['Ada', 'row-2'], ['Grace', 'row-1']]
           });
         }
 
@@ -621,11 +621,15 @@ describe('GoogleSheetsService.readAllRows', () => {
           _id: 'row-1'
         }
       },
-      duplicateCount: 1
+      duplicateCount: 1,
+      neighbours: {
+        previous: { rowId: 'row-2', rowNumber: 2 },
+        next: null
+      }
     });
     expect(requestedRanges).toEqual([
       "'Users'!1:1",
-      "'Users'!A2:B2",
+      "'Users'!A2:B3",
       "'Users'!B2:B",
       "'Users'!A3:B3"
     ]);
@@ -685,6 +689,101 @@ describe('GoogleSheetsService.readAllRows', () => {
         rowNumber: 2
       }
     ]);
+  });
+});
+
+describe('GoogleSheetsService.findRowById neighbours', () => {
+  const usersConfig: GoogleSheetTableConfig = {
+    projectSlug: 'demo',
+    tableSlug: 'users',
+    spreadsheetId: 'sheet-1',
+    sheetTabName: 'Users',
+    idColumn: '_id',
+    indexedFields: ['_id'],
+    headerRow: 1,
+    dataStartRow: 2,
+    readEnabled: true,
+    createEnabled: true,
+    updateEnabled: true,
+    deleteEnabled: true,
+    cacheTtlSeconds: 15,
+    createdAt: '2026-04-26T00:00:00.000Z',
+    updatedAt: '2026-04-26T00:00:00.000Z'
+  };
+
+  // Serves exact ranges from a fixed table and records every range requested, so each test can also
+  // assert that a hinted lookup stays a single bounded read.
+  function createRangeService(valuesByRange: Record<string, string[][]>) {
+    const requestedRanges: string[] = [];
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = decodeURIComponent(String(input));
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({ access_token: 'token', expires_in: 3600 });
+        }
+
+        const range = url.match(/\/values\/([^?]+)/)?.[1] ?? null;
+        const values = range === null ? undefined : valuesByRange[range];
+        if (range === null || values === undefined) {
+          throw new Error(`Unexpected request: ${url}`);
+        }
+
+        requestedRanges.push(range);
+        return Response.json({ values });
+      }
+    });
+
+    return { service, requestedRanges };
+  }
+
+  it('reads a hinted row together with the managed ids above and below it in one request', async () => {
+    const { service, requestedRanges } = createRangeService({
+      "'Users'!1:1": [['_id', 'name']],
+      "'Users'!A2:B4": [['row-0', 'Ada'], ['row-1', 'Bea'], ['row-2', 'Cora']]
+    });
+
+    const result = await service.findRowById(usersConfig, 'row-1', 3, { verifyUnique: false });
+
+    expect(result).toEqual({
+      row: { id: 'row-1', rowNumber: 3, values: { _id: 'row-1', name: 'Bea' } },
+      duplicateCount: 1,
+      neighbours: {
+        previous: { rowId: 'row-0', rowNumber: 2 },
+        next: { rowId: 'row-2', rowNumber: 4 }
+      }
+    });
+    expect(requestedRanges).toEqual(["'Users'!1:1", "'Users'!A2:B4"]);
+  });
+
+  it('counts an id repeated in a neighbouring row as a duplicate without scanning the id column', async () => {
+    const { service, requestedRanges } = createRangeService({
+      "'Users'!1:1": [['_id', 'name']],
+      "'Users'!A2:B3": [['row-1', 'Ada'], ['row-1', 'Copy']],
+      "'Users'!A2:B4": [['row-1', 'Ada'], ['row-1', 'Copy'], ['row-2', 'Cora']]
+    });
+
+    const above = await service.findRowById(usersConfig, 'row-1', 3, { verifyUnique: false });
+    const below = await service.findRowById(usersConfig, 'row-1', 2, { verifyUnique: false });
+
+    expect(above?.duplicateCount).toBe(2);
+    expect(below?.duplicateCount).toBe(2);
+    expect(requestedRanges).not.toContain("'Users'!A2:A");
+  });
+
+  it('treats rows above the data, past the last row, and with blank ids as absent neighbours', async () => {
+    const { service } = createRangeService({
+      "'Users'!1:1": [['_id', 'name']],
+      "'Users'!A2:B3": [['row-1', 'Ada'], []],
+      "'Users'!A3:B5": [[], ['row-3', 'Cora']]
+    });
+
+    const first = await service.findRowById(usersConfig, 'row-1', 2, { verifyUnique: false });
+    const last = await service.findRowById(usersConfig, 'row-3', 4, { verifyUnique: false });
+
+    expect(first?.neighbours).toEqual({ previous: null, next: null });
+    expect(last?.neighbours).toEqual({ previous: null, next: null });
   });
 });
 

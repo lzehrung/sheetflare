@@ -49,7 +49,9 @@ import {
   GoogleSheetsService,
   isUnconfirmedWriteFailure,
   type GoogleSheetHeaderLayout,
-  type GoogleSheetTableConfig
+  type GoogleSheetTableConfig,
+  type RowLookupResult,
+  type RowNeighbours
 } from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from '../types';
 import { getMaxFullScanRows } from '../config';
@@ -775,16 +777,18 @@ export class TableDO {
     const sheets = this.getSheetsClient(config);
     const layout = await sheets.getHeaderLayout(config);
     const headers = layout.headers;
-    const existingRow = await this.resolveRowById(config, rowId, { layout, verifyUnique: cacheState.staleReason !== 'fresh' });
-    if (!existingRow) {
+    const lookup = await this.lookupRowById(config, rowId, { layout, verifyUnique: cacheState.staleReason !== 'fresh' });
+    if (!lookup) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
+
+    const existingRow = lookup.row;
 
     let deleteCommitted = false;
     try {
       await sheets.deleteRow(config, existingRow.rowNumber);
       deleteCommitted = true;
-      await this.assertRowDeleted(config, rowId, existingRow.rowNumber, layout);
+      await this.assertRowDeleted(config, rowId, existingRow.rowNumber, layout, lookup.neighbours);
     } catch (error) {
       if (deleteCommitted || isUnconfirmedWriteFailure(error)) {
         this.markCacheStaleAfterUnconfirmedWrite(config, 'delete', rowId, error);
@@ -1108,6 +1112,16 @@ export class TableDO {
     rowId: string,
     options?: { verifyUnique?: boolean; layout?: GoogleSheetHeaderLayout }
   ): Promise<RowEnvelope | null> {
+    return (await this.lookupRowById(config, rowId, options))?.row ?? null;
+  }
+
+  // Finds a row by managed ID and repairs its cached copy. The result also carries the managed IDs
+  // beside the row, which a delete uses to confirm afterwards that it removed this row.
+  private async lookupRowById(
+    config: ResolvedTableConfig,
+    rowId: string,
+    options?: { verifyUnique?: boolean; layout?: GoogleSheetHeaderLayout }
+  ): Promise<RowLookupResult | null> {
     const cached = this.getCachedRow(rowId);
     const rowNumberHint = cached?.rowNumber ?? this.lookupRowNumber(rowId);
     const result = await this.getSheetsClient(config).findRowById(config, rowId, rowNumberHint, options);
@@ -1138,7 +1152,7 @@ export class TableDO {
       this.noteCacheContentChanged();
     }
 
-    return result.row;
+    return result;
   }
 
   // Removes a created row after a failed create. appendedRowNumber is null when the append
@@ -1167,7 +1181,7 @@ export class TableDO {
       }
 
       await this.getSheetsClient(config).deleteRow(config, rollbackTarget.row.rowNumber);
-      await this.assertRowDeleted(config, rowId, rollbackTarget.row.rowNumber, layout);
+      await this.assertRowDeleted(config, rowId, rollbackTarget.row.rowNumber, layout, rollbackTarget.neighbours);
     } catch (rollbackError) {
       console.error(JSON.stringify({
         event: 'table.create.rollback_failed',
@@ -1199,16 +1213,29 @@ export class TableDO {
     return row;
   }
 
-  // Deletes are by row index, so check the neighbouring managed IDs: if the target ID is still
-  // there, rows shifted during the delete and a different row was removed.
-  private async assertRowDeleted(config: ResolvedTableConfig, rowId: string, deletedRowNumber: number, layout: GoogleSheetHeaderLayout) {
-    const neighbours = await this.getSheetsClient(config).readRowReferencesInRange(
+  // Google cannot make a delete conditional on the row's ID, so a delete that races with rows being
+  // inserted or removed above it removes a different row. Check afterwards that the target is gone and
+  // that the rows that sat directly above and below it when it was found now meet at its old
+  // position. A shift of any size breaks that, because those IDs move with their rows. A write
+  // cannot be undone, so a mismatch fails closed and the caller marks the cache stale.
+  private async assertRowDeleted(
+    config: ResolvedTableConfig,
+    rowId: string,
+    deletedRowNumber: number,
+    layout: GoogleSheetHeaderLayout,
+    before: RowNeighbours
+  ) {
+    const window = await this.getSheetsClient(config).readRowReferencesInRange(
       config,
       Math.max(config.dataStartRow, deletedRowNumber - 1),
       deletedRowNumber + 1,
       layout
     );
-    if (neighbours.some((entry) => entry.rowId === rowId)) {
+    const idAt = (rowNumber: number) => window.find((entry) => entry.rowNumber === rowNumber)?.rowId ?? null;
+    const targetRemains = window.some((entry) => entry.rowId === rowId);
+    const previousMoved = before.previous !== null && idAt(deletedRowNumber - 1) !== before.previous.rowId;
+    const nextMoved = before.next !== null && idAt(deletedRowNumber) !== before.next.rowId;
+    if (targetRemains || previousMoved || nextMoved) {
       throw new ConflictError(
         `Row ${rowId} moved while it was being deleted, so a different row may have been deleted. Verify the sheet.`,
         { rowId, rowNumber: deletedRowNumber }
