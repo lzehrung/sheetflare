@@ -63,7 +63,7 @@ Use these as a conservative first pass, not as a proven public limit:
 - `cacheTtlSeconds` between `15` and `60`
 - one hot table per meaningful workload, because each table is one `TableDO`
 - no more than `32` indexed fields including the managed ID column
-- treat `contains` as a bounded operator, not as a default public query primitive
+- treat `contains` and `startsWith` as bounded operators, not as a default public query primitive
 
 ## What To Publish After A Real Run
 
