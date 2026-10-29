@@ -110,6 +110,9 @@ Severity: **P1** likely wrong behavior or significant risk; **P2** real but boun
 - [x] **P2 · logic** `--apply-secrets` and webhook rotation: Drive watches are re-registered even when a later step fails, and an operator-selected `sfk_` API key is never replaced by the bootstrap token. *(Copilot review on #19)*
 - [ ] **P2 · tests** `packages/cloudflare/test` is not type-checked (its `tsconfig.json` includes only `src`), and existing test files already carry type errors.
 - [x] **P2 · logic** A delete whose rebuild path ran (revision moved, expired cache, or layout change) left lowered row numbers inconsistent while the cache reported fresh; it now marks an undebounced external change before releasing the write queue, so reads and the next write join one rebuild. *(Copilot review on #20; proven: gated real-DO tests)*
+- [x] **P2 · logic** Lists, point reads and unique-field writes that waited on a sync a write superseded were answered from the unverified cache; they now sync again until a sync is promoted, and a failed rebuild fails every waiter. *(Copilot review on #20; proven: gated real-DO tests)*
+- [x] **P2 · logic** A row lookup in flight across a delete could write its pre-delete row number back into the rebuilt cache; `lookupRowById` now skips the repair when the content revision moved or a resync is pending. *(Copilot review on #20; proven: gated real-DO tests)*
+- [x] **P3 · usability** Setup counted credential-conflict watch placeholders as registered watches; it now counts only watches without `lastWatchError` and warns per skipped spreadsheet. *(Copilot review on #20)*
 - [x] **P3 · security** Add Dependabot or Renovate to keep SHA-pinned GitHub Actions current. *(fixed: `.github/dependabot.yml`)*
 - [ ] **Validation** Verify generation-keyed caching, `cf.cacheKey` format, and purge behavior against real Workers Cache in staging (blocked: GitHub staging secrets unset, Wrangler login expired).
 
