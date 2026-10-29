@@ -1,4 +1,32 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
 type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+
+const envStore = new AsyncLocalStorage<NodeJS.ProcessEnv>();
+const fetchStore = new AsyncLocalStorage<typeof fetch>();
+
+export function getProcessEnv() {
+  return envStore.getStore() ?? process.env;
+}
+
+export function withProcessEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
+  return envStore.run(env, fn);
+}
+
+export function withSetupFetch<T>(fetchImpl: typeof fetch, fn: () => T): T {
+  return fetchStore.run(fetchImpl, fn);
+}
+
+export function isDirectScriptExecution(moduleUrl: string) {
+  const entry = process.argv[1];
+  if (!entry) {
+    return false;
+  }
+
+  return moduleUrl.toLowerCase() === pathToFileURL(resolve(entry)).href.toLowerCase();
+}
 
 export class ScriptError extends Error {
   constructor(message: string) {
@@ -8,7 +36,7 @@ export class ScriptError extends Error {
 }
 
 export function getEnv(name: string) {
-  return process.env[name]?.trim() || null;
+  return getProcessEnv()[name]?.trim() || null;
 }
 
 export function requireEnv(name: string, guidance?: string) {
@@ -32,7 +60,7 @@ export function getFirstEnv(...names: string[]) {
 }
 
 export function isEnvFlagEnabled(name: string) {
-  const raw = process.env[name]?.trim().toLowerCase();
+  const raw = getProcessEnv()[name]?.trim().toLowerCase();
   return raw === '1' || raw === 'true' || raw === 'yes';
 }
 
@@ -110,7 +138,8 @@ export async function requestJson<T>(options: {
     init.body = JSON.stringify(options.body);
   }
 
-  const response = await fetch(joinUrl(options.baseUrl, options.path), init);
+  const activeFetch = fetchStore.getStore() ?? globalThis.fetch;
+  const response = await activeFetch(joinUrl(options.baseUrl, options.path), init);
 
   const text = await response.text();
 

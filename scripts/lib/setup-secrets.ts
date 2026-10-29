@@ -13,7 +13,7 @@ import {
 } from './setup-google';
 import { getCommandName, runCommand } from './process';
 import type { SetupPrompter } from './setup-prompts';
-import { ScriptError } from './runtime';
+import { getProcessEnv, ScriptError } from './runtime';
 
 type ServiceAccountCredentials = {
   client_email: string;
@@ -45,13 +45,13 @@ function generateSecretToken(byteLength = 32) {
 }
 
 function readEnvValue(name: string) {
-  const value = process.env[name]?.trim();
+  const value = getProcessEnv()[name]?.trim();
   return value && value.length > 0 ? value : null;
 }
 
 export async function hasDefaultGoogleCredentialEnvironment() {
   const googleClientEmail = readEnvValue('GOOGLE_CLIENT_EMAIL');
-  const googlePrivateKey = process.env.GOOGLE_PRIVATE_KEY;
+  const googlePrivateKey = getProcessEnv().GOOGLE_PRIVATE_KEY;
   const hasEmailAndKey = Boolean(
     googleClientEmail
       && !isPlaceholderGoogleClientEmail(googleClientEmail)
@@ -116,7 +116,7 @@ export async function collectSetupSecrets(options: {
   googleProjectIdResolver?: typeof getActiveGcloudProjectId;
 }) : Promise<SetupSecrets> {
   const envGoogleClientEmail = readEnvValue('GOOGLE_CLIENT_EMAIL');
-  const envGooglePrivateKey = process.env.GOOGLE_PRIVATE_KEY;
+  const envGooglePrivateKey = getProcessEnv().GOOGLE_PRIVATE_KEY;
 
   let googleClientEmail: string;
   let googlePrivateKey: string;
@@ -142,7 +142,7 @@ export async function collectSetupSecrets(options: {
 
       let credentials: ServiceAccountCredentials | null = null;
       while (!credentials) {
-        const defaultPath = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
+        const defaultPath = getProcessEnv().GOOGLE_APPLICATION_CREDENTIALS?.trim();
         const serviceAccountPath = await options.prompter.text({
           message: 'Path to Google service-account JSON',
           ...(defaultPath ? { defaultValue: defaultPath } : {}),

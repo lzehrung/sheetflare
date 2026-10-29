@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { EventEmitter } from 'node:events';
 
@@ -15,6 +16,33 @@ export function shouldUseWindowsShell(command: string, platform = process.platfo
 
 export function getCommandName(base: string) {
   return process.platform === 'win32' ? `${base}.cmd` : base;
+}
+
+export type CommandRunOptions = {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  input?: string;
+  echoStdout?: boolean;
+  echoStderr?: boolean;
+};
+
+export type CommandResult = {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+};
+
+export type CommandRunner = (
+  command: string,
+  args: string[],
+  options?: CommandRunOptions
+) => Promise<CommandResult>;
+
+const commandRunnerStore = new AsyncLocalStorage<CommandRunner>();
+
+export function withCommandRunner<T>(runner: CommandRunner, fn: () => T): T {
+  return commandRunnerStore.run(runner, fn);
 }
 
 export function spawnCommand(
@@ -39,14 +67,21 @@ export function spawnCommand(
 export async function runCommand(
   command: string,
   args: string[],
-  options?: {
-    cwd?: string;
-    env?: NodeJS.ProcessEnv;
-    input?: string;
-    echoStdout?: boolean;
-    echoStderr?: boolean;
+  options?: CommandRunOptions
+): Promise<CommandResult> {
+  const override = commandRunnerStore.getStore();
+  if (override) {
+    return override(command, args, options);
   }
-) {
+
+  return runSpawnedCommand(command, args, options);
+}
+
+async function runSpawnedCommand(
+  command: string,
+  args: string[],
+  options?: CommandRunOptions
+): Promise<CommandResult> {
   const child = spawn(command, args, {
     cwd: options?.cwd,
     env: {
