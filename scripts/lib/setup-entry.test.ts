@@ -145,10 +145,10 @@ function jsonResponse(status: number, body: unknown) {
   });
 }
 
-function createWorker() {
+function createWorker(options: { failAfterKeyCreates?: number } = {}) {
   const keys: AdminCreateApiKeyResult[] = [];
   const requests: Array<{ method: string; path: string; authorization: string | null }> = [];
-  const watches: Array<{ spreadsheetId: string; channelId: string }> = [];
+  const watches: Array<{ spreadsheetId: string; channelId: string; expirationAt: string | null; lastWatchError: string | null }> = [];
 
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = requestUrl(input);
@@ -189,6 +189,9 @@ function createWorker() {
     }
 
     if (path === '/v1/admin/keys' && method === 'POST') {
+      if (options.failAfterKeyCreates !== undefined && keys.length >= options.failAfterKeyCreates) {
+        return jsonResponse(500, { error: 'key create failed' });
+      }
       const body: unknown = typeof init?.body === 'string' ? JSON.parse(init.body) : null;
       const parsed = adminCreateApiKeyInputSchema.parse(body);
       const created = adminCreateApiKeyResultSchema.parse({
@@ -223,7 +226,12 @@ function createWorker() {
     }
 
     if (method === 'POST' && path === '/v1/admin/system/google/drive/watches/register') {
-      watches.splice(0, watches.length, { spreadsheetId, channelId: 'channel-1' });
+      watches.splice(0, watches.length, {
+        spreadsheetId,
+        channelId: 'channel-1',
+        expirationAt: null,
+        lastWatchError: null
+      });
       return jsonResponse(200, { data: watches });
     }
 
@@ -255,15 +263,18 @@ function createWorker() {
   return { fetchImpl, keys, requests, watches };
 }
 
-function createHarness(options: { failSmoke?: boolean; deployUrl?: string } = {}) {
-  const commands: Array<{ command: string; args: string[] }> = [];
+function createHarness(options: { failSmoke?: boolean; deployUrl?: string; failAfterKeyCreates?: number } = {}) {
+  const commands: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
   const secrets = new Map<string, string>();
   const deployConfigs: unknown[] = [];
-  const worker = createWorker();
+  const worker = options.failAfterKeyCreates === undefined
+    ? createWorker()
+    : createWorker({ failAfterKeyCreates: options.failAfterKeyCreates });
   const deployUrl = options.deployUrl ?? 'https://sheetflare-test.workers.dev';
 
   const runCommand: CommandRunner = async (command, args, commandOptions) => {
-    commands.push({ command, args: [...args] });
+    const env = commandOptions?.env;
+    commands.push(env ? { command, args: [...args], env } : { command, args: [...args] });
     const base = commandBase(command);
 
     if (base === 'npx' && args[0] === 'wrangler' && args[1] === 'whoami') {
@@ -340,10 +351,12 @@ function parseJson(text: string): unknown {
   return JSON.parse(text);
 }
 
-async function writeConfig(dir: string, adminUi: SetupConfig['adminUi']) {
+async function writeConfig(dir: string, adminUi: SetupConfig['adminUi'], spreadsheetId?: string) {
+  const parsed = parseSetupConfig(parseJson(createDefaultSetupConfig()));
   const config: SetupConfig = {
-    ...parseSetupConfig(parseJson(createDefaultSetupConfig())),
-    adminUi
+    ...parsed,
+    adminUi,
+    ...(spreadsheetId ? { privateProject: { ...parsed.privateProject, spreadsheetId } } : {})
   };
   const configPath = join(dir, 'sheetflare.setup.json');
   await writeFile(configPath, serializeSetupConfig(config), 'utf8');
@@ -478,8 +491,11 @@ describe('setup entry point', () => {
     }));
 
     const registrations = registerRequests(harness.worker);
+    const appliedToken = harness.secrets.get('ADMIN_BEARER_TOKEN') ?? '';
     expect(registrations).toHaveLength(1);
-    expect(registrations[0]?.authorization).toBe(`Bearer ${adminCredential}`);
+    expect(appliedToken.length).toBeGreaterThan(0);
+    expect(appliedToken).not.toBe(adminCredential);
+    expect(registrations[0]?.authorization).toBe(`Bearer ${appliedToken}`);
     await expectLocalStateOmitsSecrets(configPath, mintedSecrets(harness.secrets, harness.worker.keys));
   });
 
@@ -534,6 +550,74 @@ describe('setup entry point', () => {
       expect(second.logs.join('\n')).not.toContain(key.apiKey);
     }
     await expectLocalStateOmitsSecrets(configPath, harness.worker.keys.map((key) => key.apiKey));
+  });
+
+  it('hands off API keys minted before a failed bootstrap and still fails the run', async () => {
+    const dir = await createTempDir();
+    const configPath = await writeConfig(dir, 'enabled');
+    const harness = createHarness({ failAfterKeyCreates: 1 });
+    const env = isolatedEnv({
+      SHEETFLARE_BASE_URL: 'https://bootstrap-api.workers.dev',
+      SHEETFLARE_ADMIN_CREDENTIAL: 'bootstrap-admin-token',
+      SHEETFLARE_BOOTSTRAP_ROTATE_KEYS: 'true'
+    });
+
+    let failure: unknown;
+    const captured = await withCapturedConsole(async () => {
+      try {
+        await runSetup(parseSetupArgs(['--config', configPath, '--bootstrap']), {
+          runCommand: harness.runCommand,
+          fetch: harness.worker.fetchImpl,
+          prompter: null,
+          env
+        });
+      } catch (error) {
+        failure = error;
+      }
+    });
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure instanceof Error ? failure.message : '').toContain('Bootstrap failed');
+    expect(harness.worker.keys).toHaveLength(1);
+    const minted = harness.worker.keys[0]?.apiKey ?? '';
+    expect(minted.length).toBeGreaterThan(0);
+    const output = captured.logs.join('\n');
+    expect(output).toContain(handoffHeading);
+    expect(countOccurrences(output, minted)).toBe(1);
+    const bootstrap = harness.commands.find((entry) => entry.args.includes('ops:bootstrap'));
+    expect(bootstrap?.env?.SHEETFLARE_BOOTSTRAP_ROTATE_KEYS).toBe('false');
+    const configText = await readFile(configPath, 'utf8');
+    expect(configText).not.toContain(minted);
+  });
+
+  it('follows a rotated bootstrap token for watch registration, smoke, and verify after apply-secrets', async () => {
+    const dir = await createTempDir();
+    const configPath = await writeConfig(dir, 'enabled', spreadsheetId);
+    const harness = createHarness();
+    const oldToken = 'old-bootstrap-token';
+
+    await withCapturedConsole(() => runSetup(parseSetupArgs(['--config', configPath, '--apply-secrets', '--smoke', '--verify']), {
+      runCommand: harness.runCommand,
+      fetch: harness.worker.fetchImpl,
+      prompter: null,
+      env: isolatedEnv({
+        GOOGLE_CLIENT_EMAIL: googleEmail,
+        GOOGLE_PRIVATE_KEY: privateKey,
+        SHEETFLARE_BASE_URL: 'https://known-api.workers.dev',
+        SHEETFLARE_ADMIN_CREDENTIAL: oldToken,
+        SHEETFLARE_PRIVATE_READ_KEY: 'sfk_read.secret',
+        SHEETFLARE_MUTATION_KEY: 'sfk_mutation.secret'
+      })
+    }));
+
+    const appliedToken = harness.secrets.get('ADMIN_BEARER_TOKEN') ?? '';
+    expect(appliedToken.length).toBeGreaterThan(0);
+    expect(appliedToken).not.toBe(oldToken);
+    const authorized = harness.worker.requests.filter((request) => request.authorization !== null);
+    expect(authorized.length).toBeGreaterThan(0);
+    expect(authorized.every((request) => request.authorization === `Bearer ${appliedToken}`)).toBe(true);
+    const smoke = harness.commands.find((entry) => entry.args.includes('smoke'));
+    expect(smoke?.env?.SHEETFLARE_ADMIN_CREDENTIAL).toBe(appliedToken);
   });
 
   it('deploys with the admin build and assets omitted when adminUi is disabled', async () => {

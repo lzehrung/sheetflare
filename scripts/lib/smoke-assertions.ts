@@ -1,4 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
+import { rowRecordSchema, type FieldRules } from '@sheetflare/contracts';
+import { applyFieldRuleNormalization } from '@sheetflare/domain';
+import { parseSheetCellValue, serializeSheetCell } from '@sheetflare/google-sheets';
 import { ScriptError } from './runtime';
 
 export type UnpersistedValue = {
@@ -23,11 +26,34 @@ function valuesMatch(expected: unknown, actual: unknown) {
   return isPrimitive(expected) && isPrimitive(actual) && String(expected) === String(actual);
 }
 
+/**
+ * The value a successful write leaves in the sheet: field-rule normalization, then the same
+ * cell serialization the Sheets adapter uses. Arrays come back as JSON text.
+ */
+function persistedExpectations(
+  expectedValues: Record<string, unknown>,
+  fieldRules: FieldRules | undefined
+): Record<string, unknown> {
+  const parsed = rowRecordSchema.safeParse(expectedValues);
+  if (!parsed.success) {
+    return expectedValues;
+  }
+
+  const normalized = applyFieldRuleNormalization(parsed.data, fieldRules);
+  const persisted: Record<string, unknown> = {};
+  for (const [field, value] of Object.entries(normalized)) {
+    persisted[field] = parseSheetCellValue(serializeSheetCell(value));
+  }
+  return persisted;
+}
+
 export function findUnpersistedValues(
   rowValues: Record<string, unknown>,
-  expectedValues: Record<string, unknown>
+  expectedValues: Record<string, unknown>,
+  fieldRules?: FieldRules
 ): UnpersistedValue[] {
-  return Object.entries(expectedValues)
+  const persisted = persistedExpectations(expectedValues, fieldRules);
+  return Object.entries(persisted)
     .filter(([field, expected]) => !valuesMatch(expected, rowValues[field]))
     .map(([field, expected]) => ({ field, expected, actual: rowValues[field] }));
 }
@@ -35,9 +61,10 @@ export function findUnpersistedValues(
 export function assertUpdatedValuesPersisted(
   rowValues: Record<string, unknown>,
   expectedValues: Record<string, unknown>,
-  stage: string
+  stage: string,
+  fieldRules?: FieldRules
 ) {
-  const unpersisted = findUnpersistedValues(rowValues, expectedValues);
+  const unpersisted = findUnpersistedValues(rowValues, expectedValues, fieldRules);
   if (unpersisted.length === 0) {
     return;
   }

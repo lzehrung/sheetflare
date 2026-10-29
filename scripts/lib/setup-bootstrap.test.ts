@@ -6,6 +6,7 @@ import {
   findCreatedKey,
   findCreatedKeyIfPresent,
   parseBootstrapOutput,
+  readBootstrapCommandResult,
   redactBootstrapResultMarker
 } from './setup-bootstrap';
 import type { SetupConfig } from './setup-config';
@@ -153,10 +154,23 @@ describe('bootstrap output parsing', () => {
   });
 
   it('does not request key rotation unless asked', () => {
-    expect(createBootstrapEnv(baseConfig, 'https://example.com', 'sfk_admin.secret')).not.toHaveProperty('SHEETFLARE_BOOTSTRAP_ROTATE_KEYS');
-    expect(createBootstrapEnv(baseConfig, 'https://example.com', 'sfk_admin.secret', { rotateKeys: true })).toMatchObject({
-      SHEETFLARE_BOOTSTRAP_ROTATE_KEYS: 'true'
-    });
+    expect(createBootstrapEnv(baseConfig, 'https://example.com', 'sfk_admin.secret').SHEETFLARE_BOOTSTRAP_ROTATE_KEYS).toBe('false');
+    expect(createBootstrapEnv(baseConfig, 'https://example.com', 'sfk_admin.secret', { rotateKeys: true }).SHEETFLARE_BOOTSTRAP_ROTATE_KEYS).toBe('true');
+  });
+
+  it('forces the child rotate flag off when the parent process inherited true', () => {
+    const previous = process.env.SHEETFLARE_BOOTSTRAP_ROTATE_KEYS;
+    process.env.SHEETFLARE_BOOTSTRAP_ROTATE_KEYS = 'true';
+    try {
+      const env = createBootstrapEnv(baseConfig, 'https://example.com', 'sfk_admin.secret');
+      expect({ ...process.env, ...env }.SHEETFLARE_BOOTSTRAP_ROTATE_KEYS).toBe('false');
+    } finally {
+      if (previous === undefined) {
+        delete process.env.SHEETFLARE_BOOTSTRAP_ROTATE_KEYS;
+      } else {
+        process.env.SHEETFLARE_BOOTSTRAP_ROTATE_KEYS = previous;
+      }
+    }
   });
 
   it('parses keys the bootstrap skipped or revoked, and treats missing ones as absent rather than created', () => {
@@ -166,6 +180,21 @@ describe('bootstrap output parsing', () => {
     expect(output.revokedKeys).toEqual([{ name: 'demo-write', id: 'key-2' }]);
     expect(findCreatedKeyIfPresent(output, 'demo-read')).toBeNull();
     expect(() => findCreatedKey(output, 'demo-read')).toThrow('expected API key demo-read');
+  });
+
+  it('collects minted keys from a failed bootstrap subprocess and still reports failure', () => {
+    const outcome = readBootstrapCommandResult({
+      code: 1,
+      stdout: [
+        'noise',
+        '__SHEETFLARE_BOOTSTRAP_RESULT__={"projects":[],"apiKeys":[{"apiKey":"sfk_partial.secret","record":{"id":"key-1","name":"demo-read","projectSlug":"demo","scopes":["table:read"]}}],"skippedKeys":[],"revokedKeys":[]}',
+        ''
+      ].join('\n')
+    });
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.failureMessage).toContain('Bootstrap failed');
+    expect(outcome.output?.apiKeys.map((entry) => entry.apiKey)).toEqual(['sfk_partial.secret']);
   });
 
   it('defaults skipped and revoked keys to empty for older bootstrap output', () => {

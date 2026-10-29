@@ -108,6 +108,10 @@ const watchStopRetryMaxMs = 60 * 60 * 1000;
 const reindexRetryMinBaseMs = 30 * 1000;
 const reindexRetryMaxMs = 60 * 60 * 1000;
 
+// A reservation only has to outlive the create request that made it. One its ProjectDO never released, because the
+// request or the Durable Object died first, stops holding the spreadsheet after this long.
+const projectReservationTtlMs = 5 * 60 * 1000;
+
 // Stored watch and reindex errors are shown through the admin API, so they hold contract messages only. Upstream text
 // and unexpected exception messages are kept in the matching log event.
 const unexpectedReindexErrorMessage = 'Reindex failed unexpectedly. See the drive.reindex.failed log event for details.';
@@ -149,6 +153,17 @@ export class ControlPlaneDO {
         throw error;
       }
     }
+
+    // A project being created holds its spreadsheet and credential ref here, from the control.project.reserve that
+    // precedes its first write until the control.project.upsert that registers it.
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS project_reservations (
+        slug TEXT PRIMARY KEY,
+        spreadsheet_id TEXT NOT NULL,
+        google_credential_ref TEXT NOT NULL,
+        reserved_at TEXT NOT NULL
+      )
+    `);
 
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS api_keys (
@@ -269,10 +284,16 @@ export class ControlPlaneDO {
           type: 'control.project.upsert.result',
           result: { ok: true }
         };
-      case 'control.project.prepare':
-        this.prepareProjectRegistration(body);
+      case 'control.project.reserve':
+        this.reserveProject(body);
         return {
-          type: 'control.project.prepare.result',
+          type: 'control.project.reserve.result',
+          result: { ok: true }
+        };
+      case 'control.project.release':
+        this.releaseProjectReservation(body.projectSlug);
+        return {
+          type: 'control.project.release.result',
           result: { ok: true }
         };
       case 'control.project.delete':
@@ -360,55 +381,114 @@ export class ControlPlaneDO {
   }
 
   private upsertProjectSummary(summary: ProjectSummary) {
-    this.ctx.storage.sql.exec(
-      `
-      INSERT INTO project_registry (slug, name, spreadsheet_id, google_credential_ref, table_count, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(slug) DO UPDATE SET
-        name = excluded.name,
-        spreadsheet_id = excluded.spreadsheet_id,
-        google_credential_ref = excluded.google_credential_ref,
-        table_count = excluded.table_count,
-        updated_at = excluded.updated_at
-      `,
-      summary.slug,
-      summary.name,
-      summary.spreadsheetId,
-      summary.googleCredentialRef,
-      summary.tableCount,
-      summary.updatedAt
-    );
+    this.ctx.storage.transactionSync(() => {
+      this.pruneExpiredProjectReservations();
+      const registered = this.selectOptionalRow<Pick<RegistryRow, 'spreadsheet_id' | 'google_credential_ref'>>(
+        `SELECT spreadsheet_id, google_credential_ref FROM project_registry WHERE slug = ?`,
+        summary.slug
+      );
+
+      // The reservation that precedes a registration has already checked its pairing, so this check backs up a
+      // registration whose reservation expired or was never made. A project keeps updating under the pairing it is
+      // registered with, which keeps a registry written before the credential ref rule updatable until an operator
+      // aligns its refs.
+      if (
+        !registered
+        || registered.spreadsheet_id !== summary.spreadsheetId
+        || registered.google_credential_ref !== summary.googleCredentialRef
+      ) {
+        this.assertSpreadsheetCredentialRefCompatible(summary.slug, summary.spreadsheetId, summary.googleCredentialRef);
+      }
+
+      this.ctx.storage.sql.exec(
+        `
+        INSERT INTO project_registry (slug, name, spreadsheet_id, google_credential_ref, table_count, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(slug) DO UPDATE SET
+          name = excluded.name,
+          spreadsheet_id = excluded.spreadsheet_id,
+          google_credential_ref = excluded.google_credential_ref,
+          table_count = excluded.table_count,
+          updated_at = excluded.updated_at
+        `,
+        summary.slug,
+        summary.name,
+        summary.spreadsheetId,
+        summary.googleCredentialRef,
+        summary.tableCount,
+        summary.updatedAt
+      );
+
+      // The registry entry holds the claim from here on.
+      this.releaseProjectReservation(summary.slug);
+    });
   }
 
-  private prepareProjectRegistration(input: Extract<ControlPlaneDoRequest, { type: 'control.project.prepare' }>) {
-    // A spreadsheet has one Drive watch, created with one credential, so projects that share a spreadsheet must share
-    // its credential ref. Any ref already on the spreadsheet is accepted, which lets operators converge registries
-    // written before this rule existed.
-    const registeredGoogleCredentialRefs = this.selectRows<{ google_credential_ref: string }>(
+  private reserveProject(input: Extract<ControlPlaneDoRequest, { type: 'control.project.reserve' }>) {
+    // The check and the reservation run in one synchronous transaction, so no other request can reserve or register
+    // the spreadsheet between them.
+    this.ctx.storage.transactionSync(() => {
+      this.pruneExpiredProjectReservations();
+      this.assertSpreadsheetCredentialRefCompatible(input.projectSlug, input.spreadsheetId, input.googleCredentialRef);
+      this.ctx.storage.sql.exec(
+        `
+        INSERT INTO project_reservations (slug, spreadsheet_id, google_credential_ref, reserved_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(slug) DO UPDATE SET
+          spreadsheet_id = excluded.spreadsheet_id,
+          google_credential_ref = excluded.google_credential_ref,
+          reserved_at = excluded.reserved_at
+        `,
+        input.projectSlug,
+        input.spreadsheetId,
+        input.googleCredentialRef,
+        new Date().toISOString()
+      );
+
+      if (input.revokeApiKeys) {
+        this.revokeProjectApiKeys(input.projectSlug);
+      }
+    });
+  }
+
+  // A spreadsheet has one Drive watch, created with one credential, so projects that share a spreadsheet must share its
+  // credential ref. A project that is still being created counts like a registered one. Any ref already on the
+  // spreadsheet is accepted, which lets operators converge registries written before this rule existed.
+  private assertSpreadsheetCredentialRefCompatible(projectSlug: string, spreadsheetId: string, googleCredentialRef: string) {
+    const claimedGoogleCredentialRefs = this.selectRows<{ google_credential_ref: string }>(
       `
-      SELECT DISTINCT google_credential_ref
-      FROM project_registry
-      WHERE spreadsheet_id = ? AND slug <> ?
+      SELECT google_credential_ref FROM project_registry WHERE spreadsheet_id = ? AND slug <> ?
+      UNION
+      SELECT google_credential_ref FROM project_reservations WHERE spreadsheet_id = ? AND slug <> ?
       ORDER BY google_credential_ref ASC
       `,
-      input.spreadsheetId,
-      input.projectSlug
+      spreadsheetId,
+      projectSlug,
+      spreadsheetId,
+      projectSlug
     ).map((row) => row.google_credential_ref);
 
-    if (registeredGoogleCredentialRefs.length > 0 && !registeredGoogleCredentialRefs.includes(input.googleCredentialRef)) {
+    if (claimedGoogleCredentialRefs.length > 0 && !claimedGoogleCredentialRefs.includes(googleCredentialRef)) {
       throw new ConflictError(
-        `Spreadsheet ${input.spreadsheetId} is already registered with Google credential ref "${registeredGoogleCredentialRefs[0]}". Projects that share a spreadsheet must use the same credential ref.`,
+        `Spreadsheet ${spreadsheetId} is already registered with Google credential ref "${claimedGoogleCredentialRefs[0]}". Projects that share a spreadsheet must use the same credential ref.`,
         {
-          spreadsheetId: input.spreadsheetId,
-          googleCredentialRef: input.googleCredentialRef,
-          registeredGoogleCredentialRefs
+          spreadsheetId,
+          googleCredentialRef,
+          registeredGoogleCredentialRefs: claimedGoogleCredentialRefs
         }
       );
     }
+  }
 
-    if (input.revokeApiKeys) {
-      this.revokeProjectApiKeys(input.projectSlug);
-    }
+  private pruneExpiredProjectReservations() {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM project_reservations WHERE reserved_at <= ?`,
+      new Date(Date.now() - projectReservationTtlMs).toISOString()
+    );
+  }
+
+  private releaseProjectReservation(projectSlug: string) {
+    this.ctx.storage.sql.exec(`DELETE FROM project_reservations WHERE slug = ?`, projectSlug);
   }
 
   private revokeProjectApiKeys(projectSlug: string) {
@@ -433,6 +513,7 @@ export class ControlPlaneDO {
       `,
       projectSlug
     );
+    this.releaseProjectReservation(projectSlug);
 
     await this.removeObsoleteSpreadsheetWatches();
     await this.scheduleNextAlarm();

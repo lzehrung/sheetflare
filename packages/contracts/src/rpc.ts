@@ -65,6 +65,12 @@ const createTableRpcInputSchema = z.object({
 
 export const controlPlaneDoRequestSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('control.projects.list') }),
+  // Registers a project or updates its registration, which also ends its reservation. A pairing of spreadsheet and
+  // credential ref that the project is not registered with yet is checked like a reservation and rejected with CONFLICT
+  // when other projects, registered or being created, use the spreadsheet under a different ref. That backs up a
+  // reservation that expired or was never made. Updating the pairing a project is registered with always succeeds.
+  // ProjectDO also sends it to restore the registration of a project whose update did not complete, when the answer to
+  // the update was lost and the control plane may have applied it.
   z.object({
     type: z.literal('control.project.upsert'),
     summary: z.object({
@@ -76,16 +82,29 @@ export const controlPlaneDoRequestSchema = z.discriminatedUnion('type', [
       updatedAt: z.string().datetime()
     })
   }),
-  // Sent by ProjectDO before it writes a new project or moves one to another spreadsheet or credential ref. The control
-  // plane rejects a spreadsheet that other projects use under a different credential ref and, when `revokeApiKeys` is
-  // set because the slug has no project yet, revokes API keys left bound to the slug by an earlier project.
+  // Sent by ProjectDO before it writes a new project or moves one to another spreadsheet or credential ref. In one step
+  // the control plane rejects a spreadsheet that other projects, registered or being created, use under a different
+  // credential ref, and otherwise records the project's claim to the spreadsheet so that a concurrent create sees it.
+  // Reserving again for the same slug replaces its claim. The claim ends with the project's upsert or delete, with a
+  // release, or after a few minutes, so a ProjectDO that dies before its write cannot hold the spreadsheet for good.
+  // When `revokeApiKeys` is set because the slug has no project yet, API keys left bound to the slug by an earlier
+  // project are revoked.
   z.object({
-    type: z.literal('control.project.prepare'),
+    type: z.literal('control.project.reserve'),
     projectSlug: projectSlugSchema,
     spreadsheetId: z.string().min(1),
     googleCredentialRef: z.string().min(1),
     revokeApiKeys: z.boolean()
   }),
+  // Sent by ProjectDO when the write that follows a reservation fails, so the reservation stops holding the spreadsheet.
+  z.object({
+    type: z.literal('control.project.release'),
+    projectSlug: projectSlugSchema
+  }),
+  // Removes a project from the registry, ends its reservation, revokes the API keys bound to its slug and stops Drive
+  // watches that no remaining project uses. It is idempotent. ProjectDO sends it to delete a project, and to unregister
+  // a project whose create did not complete when the answer to its registration was lost and the control plane may
+  // have applied it.
   z.object({
     type: z.literal('control.project.delete'),
     projectSlug: projectSlugSchema
@@ -310,7 +329,8 @@ export type SpreadsheetWatchNotifyResult = z.infer<typeof spreadsheetWatchNotify
 export type ControlPlaneDoResponse =
   | { type: 'control.projects.list.result'; result: AdminListProjectsResult }
   | { type: 'control.project.upsert.result'; result: { ok: true } }
-  | { type: 'control.project.prepare.result'; result: { ok: true } }
+  | { type: 'control.project.reserve.result'; result: { ok: true } }
+  | { type: 'control.project.release.result'; result: { ok: true } }
   | { type: 'control.project.delete.result'; result: { ok: true } }
   | { type: 'control.spreadsheet-watches.list.result'; result: AdminListSpreadsheetWatchesResult }
   | { type: 'control.spreadsheet-watches.retry-advice.list.result'; result: AdminListSpreadsheetWatchRetryAdviceResult }
