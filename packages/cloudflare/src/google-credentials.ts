@@ -1,4 +1,4 @@
-import { BadRequestError, NotFoundError } from '@sheetflare/contracts';
+import { BadRequestError, NotFoundError, ServiceUnavailableError } from '@sheetflare/contracts';
 import type { GoogleServiceAccountConfig } from '@sheetflare/google-sheets';
 import type { CloudflareEnv } from './types';
 
@@ -32,23 +32,23 @@ function parseGoogleCredentialMap(env: CloudflareEnv): GoogleCredentialMap {
     return {};
   }
 
+  // A malformed GOOGLE_CREDENTIALS_JSON is a deployment problem, not a client error. The parser's message quotes the
+  // input around the failure, which can include private-key material, so it is never relayed.
   let parsed: unknown;
   try {
     parsed = JSON.parse(env.GOOGLE_CREDENTIALS_JSON);
-  } catch (error) {
-    throw new BadRequestError('GOOGLE_CREDENTIALS_JSON must be valid JSON.', {
-      message: error instanceof Error ? error.message : 'Unknown JSON parse error'
-    });
+  } catch {
+    throw new ServiceUnavailableError('GOOGLE_CREDENTIALS_JSON is not valid JSON.');
   }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new BadRequestError('GOOGLE_CREDENTIALS_JSON must be an object keyed by credential ref.');
+    throw new ServiceUnavailableError('GOOGLE_CREDENTIALS_JSON must be an object keyed by credential ref.');
   }
 
   const result: GoogleCredentialMap = {};
   for (const [ref, value] of Object.entries(parsed)) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      throw new BadRequestError(`Google credential "${ref}" must be an object with clientEmail and privateKey.`);
+      throw new ServiceUnavailableError(`Google credential "${ref}" must be an object with clientEmail and privateKey.`);
     }
 
     let clientEmail: string | null = null;
@@ -66,7 +66,7 @@ function parseGoogleCredentialMap(env: CloudflareEnv): GoogleCredentialMap {
     }
 
     if (!clientEmail || !privateKey) {
-      throw new BadRequestError(`Google credential "${ref}" must include string clientEmail/privateKey or client_email/private_key fields.`);
+      throw new ServiceUnavailableError(`Google credential "${ref}" must include string clientEmail/privateKey or client_email/private_key fields.`);
     }
 
     result[ref] = {

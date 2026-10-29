@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { doRpc, durableObjectErrorResponse, ProjectDO, TableDO, type CloudflareEnv } from '../src';
+import { toErrorResponse } from '@sheetflare/contracts';
+import {
+  doRpc,
+  durableObjectErrorResponse,
+  ProjectDO,
+  TableDO,
+  type CloudflareEnv,
+  type DurableRpcStubLike
+} from '../src';
 import { createDurableObjectNamespace } from './support/do-harness';
 
 function createEnv(): CloudflareEnv {
@@ -14,28 +22,97 @@ function createEnv(): CloudflareEnv {
   return env;
 }
 
-describe('Durable Object RPC boundaries', () => {
-  it('preserves the original status for unknown structured RPC error codes', async () => {
-    const stub = {
-      async fetch() {
-        return Response.json({
-          error: {
-            code: 'LOCKED',
-            message: 'Resource is locked.',
-            details: {
-              retryAfterSeconds: 30
-            }
-          }
-        }, { status: 423 });
-      }
-    };
+function stubRpcError(code: string, status: number, details: unknown): DurableRpcStubLike {
+  return {
+    async fetch() {
+      return Response.json({ error: { code, message: `${code} message.`, details } }, { status });
+    }
+  };
+}
 
-    await expect(doRpc(stub, { type: 'test' })).rejects.toMatchObject({
+async function captureRpcError(stub: DurableRpcStubLike) {
+  return doRpc(stub, { type: 'test' }).then(
+    () => {
+      throw new Error('Expected the RPC to fail.');
+    },
+    (error: unknown) => error
+  );
+}
+
+describe('Durable Object RPC boundaries', () => {
+  it('preserves the original status for unknown structured RPC error codes without relaying their details', async () => {
+    const error = await captureRpcError(stubRpcError('LOCKED', 423, { retryAfterSeconds: 30 }));
+
+    expect(error).toMatchObject({
       name: 'AppError',
       code: 'LOCKED',
       status: 423,
-      details: {
-        retryAfterSeconds: 30
+      message: 'LOCKED message.'
+    });
+    expect(toErrorResponse(error).body.error.details).toBeNull();
+  });
+
+  it.each([
+    ['BAD_REQUEST', 400],
+    ['CONFLICT', 409],
+    ['FORBIDDEN', 403],
+    ['NOT_FOUND', 404],
+    ['TOO_MANY_REQUESTS', 429],
+    ['UNAUTHORIZED', 401]
+  ])('relays details of the documented %s contract error', async (code, status) => {
+    const error = await captureRpcError(stubRpcError(code, status, { field: 'name' }));
+
+    expect(toErrorResponse(error)).toEqual({
+      status,
+      body: { error: { code, message: `${code} message.`, details: { field: 'name' } } }
+    });
+  });
+
+  it.each([
+    ['BAD_GATEWAY', 502],
+    ['SERVICE_UNAVAILABLE', 503]
+  ])('relays only the contract message of %s upstream failures', async (code, status) => {
+    const error = await captureRpcError(stubRpcError(code, status, {
+      status: 403,
+      message: 'Google Sheets API has not been used in project 123456789012 before.'
+    }));
+
+    expect(toErrorResponse(error)).toEqual({
+      status,
+      body: { error: { code, message: `${code} message.`, details: null } }
+    });
+  });
+
+  it('reports malformed GOOGLE_CREDENTIALS_JSON as a configuration error without parser text', async () => {
+    const env = createEnv();
+    env.GOOGLE_CREDENTIALS_JSON = '{"analytics":{"client_email":"analytics@example.com","private_key":MIIEvQIBADANBgkqhkiG9w0B}}';
+
+    const response = await env.PROJECT_DO
+      .get(env.PROJECT_DO.idFromName('project:demo'))
+      .fetch('https://do.internal/rpc', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          type: 'project.create',
+          input: {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1',
+            googleCredentialRef: 'analytics'
+          }
+        })
+      });
+    const body = await response.text();
+
+    expect(response.status).toBe(503);
+    expect(body).not.toContain('MIIEvQ');
+    expect(JSON.parse(body)).toEqual({
+      error: {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'GOOGLE_CREDENTIALS_JSON is not valid JSON.',
+        details: null
       }
     });
   });

@@ -35,10 +35,12 @@ export class DurableRpcError extends Error {
   }
 }
 
+// Only documented contract errors relay their details. Upstream failures (BAD_GATEWAY, SERVICE_UNAVAILABLE) and codes
+// outside the contract keep their message and status, but their details describe internals and are not passed on.
 function createAppErrorFromBody(error: { code: string; message: string; details?: unknown }, status: number) {
   switch (error.code) {
     case 'BAD_GATEWAY':
-      return new BadGatewayError(error.message, error.details);
+      return new BadGatewayError(error.message);
     case 'BAD_REQUEST':
       return new BadRequestError(error.message, error.details);
     case 'CONFLICT':
@@ -48,13 +50,13 @@ function createAppErrorFromBody(error: { code: string; message: string; details?
     case 'NOT_FOUND':
       return new NotFoundError(error.message, error.details);
     case 'SERVICE_UNAVAILABLE':
-      return new ServiceUnavailableError(error.message, error.details);
+      return new ServiceUnavailableError(error.message);
     case 'TOO_MANY_REQUESTS':
       return new TooManyRequestsError(error.message, error.details);
     case 'UNAUTHORIZED':
       return new UnauthorizedError(error.message, error.details);
     default:
-      return new AppError(error.message, error.code, status, error.details);
+      return new AppError(error.message, error.code, status);
   }
 }
 

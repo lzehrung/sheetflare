@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ControlPlaneDoResponse, ProjectDoResponse, TableDoResponse } from '@sheetflare/contracts';
+import { toErrorResponse, type ControlPlaneDoResponse, type ProjectDoResponse, type TableDoResponse } from '@sheetflare/contracts';
 import { ControlPlaneDO, ProjectDO, TableDO, doRpc, type CloudflareEnv } from '../src';
 import { createDurableObjectNamespace } from './support/do-harness';
 import { expectRpcResult } from './support/rpc-result';
@@ -1651,7 +1651,7 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     vi.useRealTimers();
   });
 
-  it('returns structured Google watch registration errors with upstream details', async () => {
+  it('returns structured Google watch registration errors with the upstream status', async () => {
     const sheet: SheetState = {
       rows: [
         ['_id', 'status'],
@@ -1730,9 +1730,55 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       error: {
         code: 'BAD_GATEWAY',
         message: 'Google Sheets authentication or permission check failed.',
-        details: {
-          status: 403,
-          message: 'The caller does not have permission'
+        details: expect.objectContaining({
+          status: 403
+        })
+      }
+    });
+  });
+
+  it('relays Google watch registration failures to RPC callers without upstream details', async () => {
+    const sheet: SheetState = {
+      rows: [['_id', 'status']]
+    };
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/drive/v3/files/sheet-1/watch')) {
+        return Response.json({
+          error: {
+            code: 403,
+            message: 'Drive API has not been used in project 123456789012 before or it is disabled.',
+            status: 'PERMISSION_DENIED'
+          }
+        }, { status: 403 });
+      }
+
+      return createSheetsAndDriveFetch(sheet)(input, init);
+    });
+    const { env } = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')), {
+      type: 'project.create',
+      input: { slug: 'demo', name: 'Demo', spreadsheetId: 'sheet-1' }
+    });
+    const failure = await doRpc<ControlPlaneDoResponse>(env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane')), {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30
+    }).then(
+      () => {
+        throw new Error('Expected watch registration to fail.');
+      },
+      (error: unknown) => error
+    );
+
+    expect(toErrorResponse(failure)).toEqual({
+      status: 502,
+      body: {
+        error: {
+          code: 'BAD_GATEWAY',
+          message: 'Google Sheets authentication or permission check failed.',
+          details: null
         }
       }
     });
