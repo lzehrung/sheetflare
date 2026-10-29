@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { rowRecordSchema, type FieldRules } from '@sheetflare/contracts';
-import { applyFieldRuleNormalization, coerceFieldRuleValue } from '@sheetflare/domain';
+import { applyFieldRuleNormalization, coerceFieldRuleValue, normalizeRowValues } from '@sheetflare/domain';
 import { parseSheetCellValue, serializeSheetCell } from '@sheetflare/google-sheets';
 import { ScriptError } from './runtime';
 
@@ -58,8 +58,9 @@ function valuesMatch(expected: unknown, actual: unknown) {
 }
 
 /**
- * The value a successful write leaves in the sheet: field-rule normalization, then the same
- * cell serialization the Sheets adapter uses. Arrays come back as JSON text.
+ * The value a successful write leaves in the sheet: the write path's key trimming and field-rule
+ * normalization, then the same cell serialization the Sheets adapter uses. Arrays come back
+ * as JSON text.
  */
 function persistedExpectations(
   expectedValues: Record<string, unknown>,
@@ -70,7 +71,7 @@ function persistedExpectations(
     return expectedValues;
   }
 
-  const normalized = applyFieldRuleNormalization(parsed.data, fieldRules);
+  const normalized = applyFieldRuleNormalization(normalizeRowValues(parsed.data), fieldRules);
   const persisted: Record<string, unknown> = {};
   for (const [field, value] of Object.entries(normalized)) {
     persisted[field] = parseSheetCellValue(serializeSheetCell(value));
