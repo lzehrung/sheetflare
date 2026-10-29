@@ -5,7 +5,14 @@ import { ControlPlaneDO, ProjectDO, TableDO, doRpc, type CloudflareEnv } from '.
 import { createDurableObjectNamespace } from './support/do-harness';
 import { expectRpcResult } from './support/rpc-result';
 
-const rpcRequestSchema = z.object({ type: z.string(), projectSlug: z.string().optional() });
+const rpcRequestSchema = z.object({
+  type: z.string(),
+  projectSlug: z.string().optional(),
+  spreadsheetId: z.string().optional()
+});
+type ControlPlaneCall = z.infer<typeof rpcRequestSchema>;
+type ControlPlaneCallMatch = { type: string; projectSlug: string; spreadsheetId?: string };
+type HeldControlPlaneCall = { match: ControlPlaneCallMatch; arrived: () => void; released: Promise<void> };
 
 async function settle<T>(promise: Promise<T>) {
   try {
@@ -15,10 +22,10 @@ async function settle<T>(promise: Promise<T>) {
   }
 }
 
-function createTestEnv() {
+function createTestEnv(googlePrivateKey = 'default-private-key') {
   const env = {
     GOOGLE_CLIENT_EMAIL: 'default@example.com',
-    GOOGLE_PRIVATE_KEY: 'default-private-key',
+    GOOGLE_PRIVATE_KEY: googlePrivateKey,
     GOOGLE_CREDENTIALS_JSON: JSON.stringify({
       other: { clientEmail: 'other@example.com', privateKey: 'other-private-key' }
     })
@@ -26,16 +33,14 @@ function createTestEnv() {
   const controlPlaneNamespace = createDurableObjectNamespace(env, ControlPlaneDO);
   const projectNamespace = createDurableObjectNamespace(env, ProjectDO);
   const failingControlPlaneRequests = new Set<string>();
-  const heldControlPlaneResponses: Array<{
-    type: string;
-    projectSlug: string;
-    arrived: () => void;
-    released: Promise<void>;
-  }> = [];
+  const lostControlPlaneResponses = new Set<string>();
+  const heldControlPlaneRequests: HeldControlPlaneCall[] = [];
+  const heldControlPlaneResponses: HeldControlPlaneCall[] = [];
   // The control-plane binding fails a request type once when asked to, the way an overloaded or restarting Durable
-  // Object answers. It can also hold the response to one project's request until the test releases it, which lets
-  // another project run between the control plane answering a ProjectDO and that ProjectDO continuing. Everything else
-  // reaches the real ControlPlaneDO.
+  // Object answers before it has processed anything. It loses the response to a request type once when asked to, after
+  // the control plane applied the request, the way a dropped connection does. It can also hold one project's request
+  // before the control plane sees it, or the control plane's response to a request, until the test releases it, which
+  // lets other requests run in between. Everything else reaches the real ControlPlaneDO.
   env.CONTROL_PLANE_DO = {
     idFromName: (name: string) => controlPlaneNamespace.idFromName(name),
     get: (id: string) => {
@@ -43,23 +48,20 @@ function createTestEnv() {
       return {
         async fetch(input: RequestInfo | URL, init?: RequestInit) {
           const request = new Request(input, init);
-          const { type, projectSlug } = rpcRequestSchema.parse(await request.clone().json());
-          if (failingControlPlaneRequests.delete(type)) {
+          const call = rpcRequestSchema.parse(await request.clone().json());
+          if (failingControlPlaneRequests.delete(call.type)) {
             return Response.json({
               error: { code: 'SERVICE_UNAVAILABLE', message: 'Durable Object is overloaded.', details: null }
             }, { status: 503 });
           }
 
+          await waitWhileHeld(heldControlPlaneRequests, call);
           const response = await stub.fetch(request);
-          const held = heldControlPlaneResponses.find(
-            (entry) => entry.type === type && entry.projectSlug === projectSlug
-          );
-          if (held) {
-            heldControlPlaneResponses.splice(heldControlPlaneResponses.indexOf(held), 1);
-            held.arrived();
-            await held.released;
+          if (lostControlPlaneResponses.delete(call.type)) {
+            throw new Error('Network connection lost.');
           }
 
+          await waitWhileHeld(heldControlPlaneResponses, call);
           return response;
         }
       };
@@ -75,13 +77,37 @@ function createTestEnv() {
     failNextControlPlaneRequest(type: string) {
       failingControlPlaneRequests.add(type);
     },
+    loseNextControlPlaneResponse(type: string) {
+      lostControlPlaneResponses.add(type);
+    },
+    holdControlPlaneRequest(match: ControlPlaneCallMatch) {
+      return hold(heldControlPlaneRequests, match);
+    },
     holdControlPlaneResponse(type: string, projectSlug: string) {
-      const arrival = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
-      heldControlPlaneResponses.push({ type, projectSlug, arrived: arrival.resolve, released: release.promise });
-      return { arrived: arrival.promise, release: release.resolve };
+      return hold(heldControlPlaneResponses, { type, projectSlug });
     }
   };
+}
+
+function hold(held: HeldControlPlaneCall[], match: ControlPlaneCallMatch) {
+  const arrival = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  held.push({ match, arrived: arrival.resolve, released: release.promise });
+  return { arrived: arrival.promise, release: release.resolve };
+}
+
+async function waitWhileHeld(held: HeldControlPlaneCall[], call: ControlPlaneCall) {
+  const entry = held.find(
+    ({ match }) =>
+      match.type === call.type
+      && match.projectSlug === call.projectSlug
+      && (match.spreadsheetId === undefined || match.spreadsheetId === call.spreadsheetId)
+  );
+  if (entry) {
+    held.splice(held.indexOf(entry), 1);
+    entry.arrived();
+    await entry.released;
+  }
 }
 
 function getProjectStub(env: CloudflareEnv, projectSlug: string) {
@@ -120,6 +146,41 @@ async function verifyKey(env: CloudflareEnv, key: { id: string; hash: string }) 
     }),
     'control.api-key.verify.result'
   ).record;
+}
+
+async function listRegisteredPairings(env: CloudflareEnv) {
+  const registry = expectRpcResult(
+    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), { type: 'control.projects.list' }),
+    'control.projects.list.result'
+  );
+  return registry.data
+    .map((project) => `${project.slug}:${project.spreadsheetId}:${project.googleCredentialRef}`)
+    .sort();
+}
+
+// Lets every request that is not waiting on a held control-plane call run until it finishes or starts waiting.
+async function letOtherRequestsRun() {
+  for (let turn = 0; turn < 50; turn += 1) {
+    const nextTurn = Promise.withResolvers<void>();
+    setImmediate(nextTurn.resolve);
+    await nextTurn.promise;
+  }
+}
+
+// A private key the Google client can sign its token request with. Google itself is stubbed, so the key goes nowhere.
+async function generateGooglePrivateKey() {
+  const keyPair = await crypto.subtle.generateKey(
+    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    true,
+    ['sign', 'verify']
+  );
+  if (!('privateKey' in keyPair)) {
+    throw new Error('Expected a key pair.');
+  }
+
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey));
+  const base64Lines = btoa(String.fromCharCode(...pkcs8)).match(/.{1,64}/g) ?? [];
+  return ['-----BEGIN PRIVATE KEY-----', ...base64Lines, '-----END PRIVATE KEY-----'].join('\n');
 }
 
 describe('ProjectDO project lifecycle', () => {
@@ -236,6 +297,137 @@ describe('ProjectDO project lifecycle', () => {
   });
 });
 
+describe('ProjectDO lifecycle requests that overlap', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // Two admins create the same slug on different spreadsheets at once. The control plane reaches the second create's
+  // reservation only after the first create has registered its project and the project's admin has a key.
+  it('does not revoke the keys of a project that another create registered while this create was reserving', async () => {
+    const { env, holdControlPlaneRequest } = createTestEnv();
+    const project = getProjectStub(env, 'tenant');
+    const slowReservation = holdControlPlaneRequest({
+      type: 'control.project.reserve',
+      projectSlug: 'tenant',
+      spreadsheetId: 'sheet-2'
+    });
+    const first = settle(doRpc<ProjectDoResponse>(project, {
+      type: 'project.create',
+      input: { slug: 'tenant', name: 'First', spreadsheetId: 'sheet-1' }
+    }));
+    const second = settle(doRpc<ProjectDoResponse>(project, {
+      type: 'project.create',
+      input: { slug: 'tenant', name: 'Second', spreadsheetId: 'sheet-2' }
+    }));
+
+    expect(await first).toMatchObject({ ok: true, value: { type: 'project.create.result', result: { created: true } } });
+    const key = await createProjectKey(env, 'tenant');
+    slowReservation.release();
+
+    expect(await second).toMatchObject({ ok: false, error: { code: 'CONFLICT', status: 409 } });
+    expect(await verifyKey(env, key)).not.toBeNull();
+    // The create that lost holds no claim on its spreadsheet, so another project can use it under another ref.
+    await expect(doRpc<ProjectDoResponse>(getProjectStub(env, 'other-tenant'), {
+      type: 'project.create',
+      input: { slug: 'other-tenant', name: 'Other', spreadsheetId: 'sheet-2', googleCredentialRef: 'other' }
+    })).resolves.toMatchObject({ type: 'project.create.result' });
+  });
+
+  // The control plane has already dropped the project from its registry, and the delete is waiting for that answer,
+  // when a table request for the project arrives. Like every table change it registers the project, whether or not
+  // the table exists.
+  it('does not let a table request register a project again while the project is being deleted', async () => {
+    const { env, holdControlPlaneResponse } = createTestEnv();
+    const project = getProjectStub(env, 'tenant');
+    await doRpc<ProjectDoResponse>(project, {
+      type: 'project.create',
+      input: { slug: 'tenant', name: 'Tenant', spreadsheetId: 'sheet-1' }
+    });
+    const registryAnswer = holdControlPlaneResponse('control.project.delete', 'tenant');
+    const deleting = settle(doRpc<ProjectDoResponse>(project, { type: 'project.delete', projectSlug: 'tenant' }));
+    await registryAnswer.arrived;
+    const deletingTable = settle(doRpc<ProjectDoResponse>(project, {
+      type: 'project.table.delete',
+      projectSlug: 'tenant',
+      tableSlug: 'users'
+    }));
+    await letOtherRequestsRun();
+    registryAnswer.release();
+
+    expect(await deleting).toMatchObject({ ok: true, value: { type: 'project.delete.result' } });
+    expect(await deletingTable).toMatchObject({ ok: true, value: { type: 'project.table.delete.result' } });
+    expect(await listRegisteredPairings(env)).toEqual([]);
+    await expect(doRpc<ProjectDoResponse>(project, { type: 'project.get', projectSlug: 'tenant' }))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  // A table create is checking its tab with Google when a delete of the project arrives, and Google answers last.
+  it('does not let a table create that is waiting on Google bring back rows of a project being deleted', async () => {
+    const { env, projectNamespace } = createTestEnv(await generateGooglePrivateKey());
+    const project = getProjectStub(env, 'tenant');
+    await doRpc<ProjectDoResponse>(project, {
+      type: 'project.create',
+      input: { slug: 'tenant', name: 'Tenant', spreadsheetId: 'sheet-1' }
+    });
+    const tabsRequested = Promise.withResolvers<void>();
+    const tabsAnswered = Promise.withResolvers<void>();
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return Response.json({ access_token: 'token', expires_in: 3600 });
+      }
+
+      if (url.includes('?fields=sheets.properties')) {
+        tabsRequested.resolve();
+        await tabsAnswered.promise;
+        return Response.json({ sheets: [{ properties: { title: 'Users', sheetId: 1, sheetType: 'GRID' } }] });
+      }
+
+      if (url.includes('/values/')) {
+        return Response.json({ values: [['_id', 'status']] });
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const creatingTable = settle(doRpc<ProjectDoResponse>(project, {
+      type: 'project.table.create',
+      projectSlug: 'tenant',
+      input: { tableSlug: 'users', sheetTabName: 'Users' }
+    }));
+    await tabsRequested.promise;
+    const deleting = settle(doRpc<ProjectDoResponse>(project, { type: 'project.delete', projectSlug: 'tenant' }));
+    await letOtherRequestsRun();
+    tabsAnswered.resolve();
+
+    expect(await creatingTable).toMatchObject({ ok: true, value: { type: 'project.table.create.result' } });
+    expect(await deleting).toMatchObject({
+      ok: true,
+      value: { type: 'project.delete.result', result: { deletedTables: ['users'] } }
+    });
+    expect(projectNamespace.runSql('project:tenant', 'SELECT table_slug FROM tables')).toEqual([]);
+    expect(await listRegisteredPairings(env)).toEqual([]);
+  });
+
+  it('runs a lifecycle request that waited behind one that failed', async () => {
+    const { env, failNextControlPlaneRequest } = createTestEnv();
+    const project = getProjectStub(env, 'tenant');
+    const create = {
+      type: 'project.create',
+      input: { slug: 'tenant', name: 'Tenant', spreadsheetId: 'sheet-1' }
+    } satisfies ProjectDoRequest;
+    failNextControlPlaneRequest('control.project.upsert');
+    const first = settle(doRpc<ProjectDoResponse>(project, create));
+    const second = settle(doRpc<ProjectDoResponse>(project, create));
+
+    expect(await first).toMatchObject({ ok: false, error: { status: 503 } });
+    // The first create took its write back, so the second one finds no project and creates it.
+    expect(await second).toMatchObject({ ok: true, value: { type: 'project.create.result', result: { created: true } } });
+    expect(await listRegisteredPairings(env)).toEqual(['tenant:sheet-1:default']);
+  });
+});
+
 describe('ProjectDO spreadsheet reservation', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -259,16 +451,6 @@ describe('ProjectDO spreadsheet reservation', () => {
     }));
     alphaPrepared.release();
     return { env, projectNamespace, alpha: await alpha, beta };
-  }
-
-  async function listRegisteredPairings(env: CloudflareEnv) {
-    const registry = expectRpcResult(
-      await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), { type: 'control.projects.list' }),
-      'control.projects.list.result'
-    );
-    return registry.data
-      .map((project) => `${project.slug}:${project.spreadsheetId}:${project.googleCredentialRef}`)
-      .sort();
   }
 
   it('admits only one of two interleaved creations on a spreadsheet under different credential refs', async () => {
@@ -387,6 +569,105 @@ describe('ProjectDO spreadsheet reservation', () => {
 
     await doRpc<ProjectDoResponse>(alpha, { type: 'project.create', allowExisting: true, input });
     expect(await listRegisteredPairings(env)).toEqual(['alpha:sheet-1:default']);
+  });
+
+  it('takes back a project whose registration failed, so no unregistered project outlives its reservation', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-05-01T10:00:00.000Z'));
+    const { env, failNextControlPlaneRequest } = createTestEnv();
+    const alpha = getProjectStub(env, 'alpha');
+    const input = { slug: 'alpha', name: 'Alpha', spreadsheetId: 'sheet-1' };
+    failNextControlPlaneRequest('control.project.upsert');
+    await expect(doRpc<ProjectDoResponse>(alpha, { type: 'project.create', input }))
+      .rejects.toMatchObject({ status: 503 });
+
+    // Five minutes later the reservation that covered alpha's claim is gone, and another project registers the
+    // spreadsheet under another credential ref.
+    vi.setSystemTime(new Date('2026-05-01T10:05:00.000Z'));
+    await expect(doRpc<ProjectDoResponse>(getProjectStub(env, 'beta'), {
+      type: 'project.create',
+      input: { slug: 'beta', name: 'Beta', spreadsheetId: 'sheet-1', googleCredentialRef: 'other' }
+    })).resolves.toMatchObject({ type: 'project.create.result' });
+
+    // alpha is not left readable under a credential ref its spreadsheet no longer accepts, and repeating its create
+    // reports that conflict without writing anything.
+    await expect(doRpc<ProjectDoResponse>(alpha, { type: 'project.get', projectSlug: 'alpha' }))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(doRpc<ProjectDoResponse>(alpha, { type: 'project.create', input }))
+      .rejects.toMatchObject({ code: 'CONFLICT', details: { registeredGoogleCredentialRefs: ['other'] } });
+    await expect(doRpc<ProjectDoResponse>(alpha, { type: 'project.get', projectSlug: 'alpha' }))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(await listRegisteredPairings(env)).toEqual(['beta:sheet-1:other']);
+  });
+
+  it('restores an existing project to what is registered when registering its update fails', async () => {
+    const { env, failNextControlPlaneRequest } = createTestEnv();
+    const alpha = getProjectStub(env, 'alpha');
+    const update = {
+      type: 'project.create',
+      allowExisting: true,
+      input: { slug: 'alpha', name: 'Alpha moved', spreadsheetId: 'sheet-2', googleCredentialRef: 'other' }
+    } satisfies ProjectDoRequest;
+    await doRpc<ProjectDoResponse>(alpha, {
+      type: 'project.create',
+      input: { slug: 'alpha', name: 'Alpha', spreadsheetId: 'sheet-1' }
+    });
+
+    failNextControlPlaneRequest('control.project.upsert');
+    await expect(doRpc<ProjectDoResponse>(alpha, update)).rejects.toMatchObject({ status: 503 });
+
+    const stored = expectRpcResult(
+      await doRpc<ProjectDoResponse>(alpha, { type: 'project.get', projectSlug: 'alpha' }),
+      'project.get.result'
+    );
+    expect([stored.project.name, stored.project.spreadsheetId, stored.project.googleCredentialRef])
+      .toEqual(['Alpha', 'sheet-1', 'default']);
+    expect(await listRegisteredPairings(env)).toEqual(['alpha:sheet-1:default']);
+
+    // The update can be repeated, and then the project and its registration agree again.
+    await doRpc<ProjectDoResponse>(alpha, update);
+    expect(await listRegisteredPairings(env)).toEqual(['alpha:sheet-2:other']);
+  });
+
+  it('unregisters a project whose registration was applied but whose answer was lost', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { env, loseNextControlPlaneResponse } = createTestEnv();
+    const alpha = getProjectStub(env, 'alpha');
+    loseNextControlPlaneResponse('control.project.upsert');
+
+    await expect(doRpc<ProjectDoResponse>(alpha, {
+      type: 'project.create',
+      input: { slug: 'alpha', name: 'Alpha', spreadsheetId: 'sheet-1' }
+    })).rejects.toMatchObject({ code: 'INTERNAL_ERROR', status: 500 });
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Network connection lost.'));
+    await expect(doRpc<ProjectDoResponse>(alpha, { type: 'project.get', projectSlug: 'alpha' }))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(await listRegisteredPairings(env)).toEqual([]);
+  });
+
+  it('reports a registration it could not take back at the control plane, which deleting the project clears', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { env, loseNextControlPlaneResponse, failNextControlPlaneRequest } = createTestEnv();
+    const alpha = getProjectStub(env, 'alpha');
+    loseNextControlPlaneResponse('control.project.upsert');
+    failNextControlPlaneRequest('control.project.delete');
+
+    await expect(doRpc<ProjectDoResponse>(alpha, {
+      type: 'project.create',
+      input: { slug: 'alpha', name: 'Alpha', spreadsheetId: 'sheet-1' }
+    })).rejects.toMatchObject({ code: 'INTERNAL_ERROR', status: 500 });
+
+    // The control plane applied the registration, and the call that unregisters it failed too. alpha is gone from its
+    // own storage but still in the registry.
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"event":"project.reservation.release.failed"'));
+    await expect(doRpc<ProjectDoResponse>(alpha, { type: 'project.get', projectSlug: 'alpha' }))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(await listRegisteredPairings(env)).toEqual(['alpha:sheet-1:default']);
+
+    // Deleting the slug removes what is left of it, as for any project that is already gone.
+    await doRpc<ProjectDoResponse>(alpha, { type: 'project.delete', projectSlug: 'alpha' });
+    expect(await listRegisteredPairings(env)).toEqual([]);
   });
 
   it('keeps registering a project whose spreadsheet already has a registry entry under another credential ref', async () => {
