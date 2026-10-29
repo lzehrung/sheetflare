@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  allScopes,
   initialCreateKeyDraft,
   initialCreateProjectDraft,
   initialCreateTableDraft,
   validateCreateKeyDraft,
   validateCreateProjectDraft,
+  scopeDescriptions,
   validateCreateTableDraft
 } from './admin-drafts';
 
@@ -88,5 +90,22 @@ describe('validateCreateKeyDraft', () => {
 
     expect(result.isValid).toBe(false);
     expect(result.fieldErrors.projectScoped).toBe('Select a project before creating a scoped key.');
+  });
+
+  it('does not preselect admin scopes for a new key', () => {
+    expect(initialCreateKeyDraft.scopes.filter((scope) => scope.startsWith('admin:'))).toEqual([]);
+    expect(initialCreateKeyDraft.scopes).toEqual(['table:read']);
+  });
+
+  it('describes every selectable scope and flags the destructive ones', () => {
+    for (const scope of allScopes) {
+      expect(scopeDescriptions[scope].description.length).toBeGreaterThan(10);
+    }
+
+    expect(allScopes.filter((scope) => scopeDescriptions[scope].destructive).sort()).toEqual([
+      'admin:keys',
+      'admin:projects',
+      'table:delete'
+    ]);
   });
 });

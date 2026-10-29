@@ -48,13 +48,48 @@ export type DraftValidation<T, FieldName extends string> = {
 };
 
 export const allScopes: ApiScope[] = [
-  'admin:projects',
-  'admin:keys',
   'table:read',
   'table:create',
   'table:update',
-  'table:delete'
+  'table:delete',
+  'admin:projects',
+  'admin:keys'
 ];
+
+export type ScopeDescription = {
+  description: string;
+  destructive: boolean;
+};
+
+// Mirrors what the Worker authorizes for each scope (apps/api route assertions).
+export const scopeDescriptions = {
+  'table:read': {
+    description: 'Read rows and table schemas through the data API.',
+    destructive: false
+  },
+  'table:create': {
+    description: 'Create new rows in tables.',
+    destructive: false
+  },
+  'table:update': {
+    description: 'Change values in existing rows.',
+    destructive: false
+  },
+  'table:delete': {
+    description: 'Permanently delete rows from the spreadsheet.',
+    destructive: true
+  },
+  'admin:projects': {
+    description:
+      'Administer projects: add and delete tables, delete projects, and refresh or reindex caches. Without a project scope it can also create projects and read spreadsheet watches.',
+    destructive: true
+  },
+  'admin:keys': {
+    description:
+      'Manage API keys: list, create, and revoke keys, including keys that hold any scope this key has.',
+    destructive: true
+  }
+} satisfies Record<ApiScope, ScopeDescription>;
 
 export const initialCreateProjectDraft: CreateProjectDraft = {
   slug: '',
@@ -84,7 +119,7 @@ export const initialCreateTableDraft: CreateTableDraft = {
 export const initialCreateKeyDraft: CreateKeyDraft = {
   name: 'ops-key',
   projectScoped: true,
-  scopes: ['admin:projects', 'admin:keys', 'table:read']
+  scopes: ['table:read']
 };
 
 type ProjectFieldName = keyof CreateProjectDraft;

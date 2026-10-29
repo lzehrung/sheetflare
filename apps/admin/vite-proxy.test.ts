@@ -172,6 +172,11 @@ describe('resolveAdminApiTarget', () => {
 describe('rewriteAdminProxyRequest', () => {
   const adminUiHeaders = {
     host: '127.0.0.1:4173',
+    [adminRequestHeaderName]: '1',
+    'sec-fetch-site': 'same-origin'
+  } satisfies IncomingHttpHeaders;
+  const markerOnlyHeaders = {
+    host: '127.0.0.1:4173',
     [adminRequestHeaderName]: '1'
   } satisfies IncomingHttpHeaders;
 
@@ -221,6 +226,22 @@ describe('rewriteAdminProxyRequest', () => {
     expect(rewrite(adminUiHeaders, 'server-secret')).toEqual({
       host: 'api.example.test',
       authorization: 'Bearer server-secret'
+    });
+  });
+
+  it('never attaches the server credential to marker-only requests without browser Fetch Metadata', () => {
+    expect(rewrite(markerOnlyHeaders, 'server-secret')).toEqual({
+      host: 'api.example.test'
+    });
+    expect(rewrite({ ...markerOnlyHeaders, origin: 'http://127.0.0.1:4173' }, 'server-secret')).toEqual({
+      host: 'api.example.test'
+    });
+  });
+
+  it('forwards a caller-supplied credential on marker-only requests but never substitutes the server credential', () => {
+    expect(rewrite({ ...markerOnlyHeaders, authorization: 'Bearer caller-secret' }, 'server-secret')).toEqual({
+      host: 'api.example.test',
+      authorization: 'Bearer caller-secret'
     });
   });
 
