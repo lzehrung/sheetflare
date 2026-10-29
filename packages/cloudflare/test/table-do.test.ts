@@ -5229,4 +5229,35 @@ describe('TableDO', () => {
       message: 'This query requires a full scan and exceeds the configured scan threshold of 2 cached rows.'
     });
   });
+
+  it('applies rowNumber filters identically on indexed and scan paths', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+
+    const indexed = await listUsers(env, { filter: { rowNumber: { eq: '3' } } });
+    const scanned = await listUsers(env, { filter: { rowNumber: { eq: '3' }, name: { contains: 'a' } } });
+    const rangedScan = await listUsers(env, { filter: { rowNumber: { gte: '3' }, name: { contains: 'a' } } });
+
+    expect(indexed.data.map((row) => row.id)).toEqual(['row-2']);
+    expect(scanned.data.map((row) => row.id)).toEqual(['row-2']);
+    expect(rangedScan.data.map((row) => row.id)).toEqual(['row-2', 'row-3']);
+    await expect(listUsers(env, { filter: { rowNumber: { contains: '2' } } })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'rowNumber filters do not support startsWith or contains.'
+    });
+    await expect(listUsers(env, { filter: { rowNumber: { eq: 'two' } } })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'rowNumber filters require numeric values.'
+    });
+  });
 });

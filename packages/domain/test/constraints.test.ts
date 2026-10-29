@@ -139,7 +139,7 @@ describe('validateFieldRules', () => {
 });
 
 describe('coerceRowFilter', () => {
-  it('coerces typed scalar filter values while leaving id and rowNumber untouched', () => {
+  it('coerces typed scalar filter values, canonicalizes rowNumber operands, and leaves id untouched', () => {
     expect(coerceRowFilter({
       score: {
         eq: '10',
@@ -170,11 +170,32 @@ describe('coerceRowFilter', () => {
         eq: true
       },
       rowNumber: {
-        gt: '10'
+        gt: 10
       },
       id: {
         eq: 'row-10'
       }
     });
+  });
+
+  it('canonicalizes numeric rowNumber operands and rejects operands that cannot match a row number', () => {
+    expect(coerceRowFilter({
+      rowNumber: { in: ['2', 3, null] }
+    }, {})).toEqual({
+      rowNumber: { in: [2, 3, null] }
+    });
+    expect(coerceRowFilter({
+      rowNumber: { gte: '2', lt: 5 }
+    }, {})).toEqual({
+      rowNumber: { gte: 2, lt: 5 }
+    });
+
+    for (const definition of [{ eq: 'two' }, { eq: '02' }, { eq: true }, { neq: '' }, { in: [2, 'x'] }, { gt: 'abc' }]) {
+      expect(() => coerceRowFilter({ rowNumber: definition }, {})).toThrow('rowNumber filters require numeric values.');
+    }
+
+    for (const definition of [{ contains: '2' }, { startsWith: '1' }]) {
+      expect(() => coerceRowFilter({ rowNumber: definition }, {})).toThrow('rowNumber filters do not support startsWith or contains.');
+    }
   });
 });

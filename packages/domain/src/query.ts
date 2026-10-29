@@ -219,7 +219,7 @@ function applyRowNumberFilter(definition: FieldFilter, conditions: string[], par
   applyScalarFilter({
     fieldSql: 'cr.row_number',
     kindSql: null,
-    textSql: 'CAST(cr.row_number AS TEXT)',
+    textSql: null,
     numberSql: 'cr.row_number',
     booleanSql: null,
     definition,
