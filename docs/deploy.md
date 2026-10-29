@@ -43,11 +43,16 @@ npm run setup -- --smoke
 npm run setup -- --verify
 ```
 
-- `--apply-secrets` applies Worker secrets only.
+- `--apply-secrets` applies Worker secrets only. It mints a new bootstrap admin token and Drive webhook secret unless you export `ADMIN_BEARER_TOKEN` or `GOOGLE_DRIVE_WEBHOOK_SECRET`. A minted token is printed once. Because a new webhook secret orphans existing Drive watches, the run then re-registers them when it knows the API URL (`.sheetflare.setup.local.json` or `SHEETFLARE_BASE_URL`) and an admin credential (`SHEETFLARE_ADMIN_CREDENTIAL`, or the token it just applied). If it cannot, it warns and tells you to run `npm run ops:watch:drive`.
 - `--deploy` deploys the API Worker, including the hosted admin UI unless `adminUi` is `disabled`.
-- `--smoke` accepts a scoped admin API key or bootstrap credential through `SHEETFLARE_ADMIN_CREDENTIAL` or an interactive prompt; setup does not persist either credential.
+- `--bootstrap` upserts projects and tables, then creates the configured API keys. A key whose name already has an active key is skipped with a warning, so reruns never stack duplicate privileged keys. `--bootstrap --rotate-keys` deliberately replaces them: it creates all replacements first, then revokes every prior active key with those names through `DELETE /v1/admin/keys/{id}`. `--rotate-keys` requires `--bootstrap`. Running `npm run ops:bootstrap` directly rotates with `SHEETFLARE_BOOTSTRAP_ROTATE_KEYS=true`, and refuses unless `SHEETFLARE_SHOW_SECRETS=true`, because the new keys would otherwise be redacted after the old ones are revoked.
+- `--smoke` accepts a scoped admin API key or bootstrap credential through `SHEETFLARE_ADMIN_CREDENTIAL` or an interactive prompt; setup does not persist either credential. When bootstrap skipped existing keys, supply their values through `SHEETFLARE_PRIVATE_READ_KEY` and `SHEETFLARE_MUTATION_KEY` too (or rotate).
 - `--verify` and `npm run doctor` check the resolved Google credential, Worker `/ready`, the hosted admin UI state, and Drive watches. Verify-only runs do not require Wrangler authentication.
 - `.sheetflare.setup.local.json` stores the deployed `apiUrl` and resolved Google service-account email, not admin credentials.
+
+### Credential Handoff
+
+Setup prints every credential it minted once, in a block headed `SAVE THESE CREDENTIALS NOW`: the bootstrap admin token (only when setup generated it) and each API key bootstrap created. The block appears at the end of the run, including a failed run, so credentials minted before a failure are not lost. Setup never writes them to `sheetflare.setup.json` or `.sheetflare.setup.local.json` and cannot show them again. Credentials you supplied through the environment are not echoed. Output from a non-interactive run (CI logs, redirected files) contains this block, so treat it as secret. There is no flag to hide or reveal it.
 
 Use the rest of this document for CI, token scopes, Worker deployment, and post-deploy verification.
 
@@ -112,7 +117,7 @@ Wrangler-based CI needs:
 
 Scope the token to the target Cloudflare account and grant `Workers Scripts Write` for `wrangler deploy` and `wrangler secret put`. `CLOUDFLARE_ACCOUNT_ID` is an identifier rather than secret material, but it may remain a repository secret for workflow simplicity.
 
-This repository's staging Worker deployment also uses `SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY` and `SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN`.
+This repository's staging Worker deployment also uses `SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY` and `SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN`. The `Deploy Staging` workflow checks all four secrets right after installing dependencies, before it validates or deploys anything, and names each missing one in its failure; see [contributor-staging.md](../contributor-staging.md) for where the values come from.
 
 ## Pre-Deploy Checklist
 

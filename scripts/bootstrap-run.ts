@@ -11,7 +11,7 @@ import {
   shouldShowSecrets
 } from './lib/runtime';
 import { parseBootstrapConfig, type BootstrapConfig } from './lib/bootstrap-config';
-import { bootstrapApiKeys } from './lib/bootstrap-keys';
+import { assertRotationCanHandOffKeys, bootstrapApiKeys } from './lib/bootstrap-keys';
 
 type ProjectResponse = {
   project: {
@@ -30,6 +30,12 @@ async function main() {
   const baseUrl = requireEnv('SHEETFLARE_BASE_URL', 'Set SHEETFLARE_BASE_URL to the deployed API Worker URL.');
   const bearer = requireAdminCredential();
   const config = parseBootstrapConfig(readJsonEnv<BootstrapConfig>('SHEETFLARE_BOOTSTRAP_CONFIG_JSON'));
+  const rotateKeys = isEnvFlagEnabled('SHEETFLARE_BOOTSTRAP_ROTATE_KEYS');
+  assertRotationCanHandOffKeys({
+    rotate: rotateKeys,
+    showSecrets: shouldShowSecrets(),
+    capturedBySetup: process.env.SHEETFLARE_BOOTSTRAP_RESULT_MODE === 'full'
+  });
 
   for (const project of config.projects) {
     logStep(`Ensuring project ${project.slug}`);
@@ -68,7 +74,7 @@ async function main() {
     baseUrl,
     bearer,
     apiKeys: config.apiKeys ?? [],
-    rotate: isEnvFlagEnabled('SHEETFLARE_BOOTSTRAP_ROTATE_KEYS')
+    rotate: rotateKeys
   });
 
   const output = {

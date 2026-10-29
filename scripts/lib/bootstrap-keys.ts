@@ -4,7 +4,7 @@ import {
   type AdminCreateApiKeyResult
 } from '@sheetflare/contracts';
 import type { BootstrapApiKey } from './bootstrap-config';
-import { assertPresent, logStep, logSuccess, requestJson } from './runtime';
+import { assertPresent, logStep, logSuccess, requestJson, ScriptError } from './runtime';
 
 export type ManagedKeyRef = {
   name: string;
@@ -18,6 +18,23 @@ export type BootstrapApiKeysResult = {
   /** Prior active keys revoked after their replacements were issued (rotate mode only). */
   revoked: ManagedKeyRef[];
 };
+
+/**
+ * Rotation revokes the old keys, so the replacements must reach the operator. `ops:bootstrap`
+ * redacts secrets unless SHEETFLARE_SHOW_SECRETS is set; setup captures the full result itself
+ * and hands it over. Refuse before issuing anything rather than strand the operator without keys.
+ */
+export function assertRotationCanHandOffKeys(options: {
+  rotate: boolean;
+  showSecrets: boolean;
+  capturedBySetup: boolean;
+}) {
+  if (options.rotate && !options.showSecrets && !options.capturedBySetup) {
+    throw new ScriptError(
+      'Key rotation revokes the old keys and prints the replacements once. Set SHEETFLARE_SHOW_SECRETS=true so the new keys are not redacted, or rotate through npm run setup -- --bootstrap --rotate-keys.'
+    );
+  }
+}
 
 /**
  * Creates the configured API keys through the existing admin routes.

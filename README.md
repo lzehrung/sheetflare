@@ -30,7 +30,7 @@ npm run setup
 ```
 
 3. When setup prints a service-account email, share the sheet with it as **Editor**, then return to setup.
-4. Setup deploys and tests the API. Copy the generated API keys into your password manager when shown; they are shown once.
+4. Setup deploys and tests the API, then prints every credential it minted (the bootstrap admin token and the setup API keys) once, in a block headed `SAVE THESE CREDENTIALS NOW`. Copy them into your password manager before closing the terminal: setup never stores them and cannot show them again. Sign in to `/admin/` with the admin API key from that block.
 
 `npm run setup` prompts for your Sheet URL and tab name, deploys the Worker, and bootstraps the first project and API keys. It then prints your API URL and the admin UI at `<your-worker>/admin/`.
 
@@ -74,9 +74,10 @@ These target a live deployment. Most require `SHEETFLARE_BASE_URL` and `SHEETFLA
 **Setup reruns**
 
 ```powershell
-npm run setup -- --apply-secrets  # re-apply Worker secrets
+npm run setup -- --apply-secrets  # re-apply Worker secrets; mints a new bootstrap token (shown once) and re-registers Drive watches
 npm run setup -- --deploy         # redeploy the API Worker
-npm run setup -- --bootstrap      # re-run project and key bootstrap
+npm run setup -- --bootstrap      # re-run project/table bootstrap; existing API keys are left alone
+npm run setup -- --bootstrap --rotate-keys  # replace the setup API keys; new ones are shown once, old ones revoked
 npm run setup -- --smoke          # re-run smoke validation
 npm run setup -- --verify         # re-run post-deploy verification
 npm run doctor                    # alias for --verify; quickest health check
@@ -86,7 +87,7 @@ npm run doctor                    # alias for --verify; quickest health check
 
 ```powershell
 npm run ops:create-admin-key  # create a scoped admin API key
-npm run ops:bootstrap         # bootstrap projects/tables/keys from JSON config
+npm run ops:bootstrap         # bootstrap projects/tables/keys from JSON config (skips key names that are already active; rotation: see docs/operator-runbook.md)
 ```
 
 **Cache and reindex**

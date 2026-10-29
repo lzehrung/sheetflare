@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BootstrapApiKey } from './bootstrap-config';
-import { bootstrapApiKeys } from './bootstrap-keys';
+import { assertRotationCanHandOffKeys, bootstrapApiKeys } from './bootstrap-keys';
 
 type StoredKey = {
   id: string;
@@ -202,5 +202,22 @@ describe('bootstrapApiKeys', () => {
 
     expect(result).toEqual({ created: [], skipped: [], revoked: [] });
     expect(api.requests).toEqual([]);
+  });
+});
+
+describe('assertRotationCanHandOffKeys', () => {
+  it('refuses to rotate when the replacement keys would be redacted and nobody captures them', () => {
+    expect(() => assertRotationCanHandOffKeys({ rotate: true, showSecrets: false, capturedBySetup: false })).toThrow(
+      'SHEETFLARE_SHOW_SECRETS=true'
+    );
+  });
+
+  it('allows rotation when secrets are shown or setup captures and hands them over', () => {
+    expect(() => assertRotationCanHandOffKeys({ rotate: true, showSecrets: true, capturedBySetup: false })).not.toThrow();
+    expect(() => assertRotationCanHandOffKeys({ rotate: true, showSecrets: false, capturedBySetup: true })).not.toThrow();
+  });
+
+  it('does not constrain runs that are not rotating', () => {
+    expect(() => assertRotationCanHandOffKeys({ rotate: false, showSecrets: false, capturedBySetup: false })).not.toThrow();
   });
 });

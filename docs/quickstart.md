@@ -68,13 +68,13 @@ Beginner setup then uses safe defaults:
 
 When setup prints the service-account email, share your Google Sheet with that email as `Editor`, return to the terminal, and confirm. Setup then continues automatically.
 
-Generated API keys are shown once and are not written to local setup state. Copy them into your password manager before closing the terminal.
+Setup prints the credentials it minted exactly once, in a block headed `SAVE THESE CREDENTIALS NOW`: the bootstrap admin token (`ADMIN_BEARER_TOKEN`, break-glass only) and the setup API keys (admin, private read, mutation). Copy them into your password manager before closing the terminal. They are not written to `sheetflare.setup.json` or local setup state, and they cannot be displayed again. Sign in to the admin UI with the admin API key. Credentials you supplied yourself through the environment are never printed back. If a key is lost, see [If Setup Fails](#if-setup-fails) to replace it.
 
 ## 4. What Setup Creates
 
 Setup writes `sheetflare.setup.json` at the repo root. This gitignored, non-secret file describes the Sheetflare project, table, and smoke-test shape.
 
-When setup applies secrets, deploys, or bootstraps, it also creates or updates `.sheetflare.setup.local.json`. That file is gitignored local operator state containing the deployed Worker URL and resolved Google service-account email; keep it on your operator machine. Setup never persists bootstrap tokens or API keys.
+When setup applies secrets, deploys, or bootstraps, it also creates or updates `.sheetflare.setup.local.json`. That file is gitignored local operator state containing the deployed Worker URL and resolved Google service-account email; keep it on your operator machine. Setup never persists bootstrap tokens or API keys; it hands them to you once at the end of the run (see above).
 
 Setup can create or update:
 
@@ -242,3 +242,20 @@ For deeper troubleshooting, see [operator-runbook.md](./operator-runbook.md). To
 ```powershell
 npm run setup -- --bootstrap --smoke --verify
 ```
+
+Projects and tables are safely upserted on every rerun, but API keys are not: `--bootstrap` leaves any key whose name already has an active key alone, so the rerun mints nothing and cannot show the earlier keys again. Smoke then needs those keys from the credential block the first run printed. Export them before rerunning:
+
+```powershell
+$env:SHEETFLARE_ADMIN_CREDENTIAL = "<admin API key>"
+$env:SHEETFLARE_PRIVATE_READ_KEY = "<private read API key>"
+$env:SHEETFLARE_MUTATION_KEY = "<mutation API key>"
+npm run setup -- --bootstrap --smoke --verify
+```
+
+If you lost the keys, replace them instead. `--rotate-keys` issues new keys, prints them once, and revokes the old keys with the same names:
+
+```powershell
+npm run setup -- --bootstrap --rotate-keys --smoke --verify
+```
+
+Lost the bootstrap admin token? `npm run setup -- --apply-secrets` mints a new one and prints it once. It also re-registers Drive watches, because that run replaces the Drive webhook secret.
