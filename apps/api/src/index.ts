@@ -68,7 +68,6 @@ import {
   type DeleteTableResult,
   type GetTableCacheStatusResult,
   type ListRowsQuery,
-  type ProjectAccessResult,
   type ProjectDoResponse,
   type ResolvedProjectTableResult,
   type ResolvedTableConfigSnapshot,
@@ -84,10 +83,6 @@ import type { Env } from './env';
 type AppVariables = {
   requestId: string;
   authPrincipal?: string;
-  verifiedApiKeyCredential?: {
-    credential: string;
-    record: ApiKeyPrincipal | null;
-  };
   verifiedApiKeyRateLimitApplied?: boolean;
   rateLimit?: {
     limit: number;
@@ -306,6 +301,13 @@ const optionalBearerSecurity = [{ bearerAuth: [] }, {}];
 const apiKeyTouchIntervalMs = 5 * 60 * 1000;
 const maxRecentApiKeyTouches = 10_000;
 const recentApiKeyTouches = new Map<string, number>();
+// Each Worker isolate remembers what the control plane said about a credential for this long, so a revoked key can
+// keep working for up to this long on isolates that verified it earlier. The isolate that handles the revoke request
+// forgets the key immediately.
+const principalCacheTtlMs = 10_000;
+const maxPrincipalCacheEntries = 10_000;
+type CachedPrincipal = { record: ApiKeyPrincipal | null; expiresAtMs: number };
+const principalCache = new Map<string, CachedPrincipal>();
 const corsAllowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
 const corsAllowedHeaders = 'Authorization, Content-Type';
 const cacheStatusHeaderName = 'x-sheetflare-cache-status';
@@ -320,25 +322,25 @@ const corsExposedHeaders = [
   cacheInvalidationHeaderName
 ].join(', ');
 
-function pruneRecentApiKeyTouches(nowMs: number) {
-  if (recentApiKeyTouches.size < maxRecentApiKeyTouches) {
+// Makes room for one more entry: drops expired entries first, then the oldest ones.
+function evictForInsert<T>(entries: Map<string, T>, maxEntries: number, isExpired: (entry: T) => boolean) {
+  if (entries.size < maxEntries) {
     return;
   }
 
-  const cutoffMs = nowMs - apiKeyTouchIntervalMs;
-  for (const [cachedApiKeyId, cachedTouchedAtMs] of recentApiKeyTouches) {
-    if (cachedTouchedAtMs < cutoffMs) {
-      recentApiKeyTouches.delete(cachedApiKeyId);
+  for (const [key, entry] of entries) {
+    if (isExpired(entry)) {
+      entries.delete(key);
     }
   }
 
-  while (recentApiKeyTouches.size >= maxRecentApiKeyTouches) {
-    const oldestEntry = recentApiKeyTouches.entries().next().value;
-    if (!oldestEntry) {
+  while (entries.size >= maxEntries) {
+    const oldest = entries.keys().next();
+    if (oldest.done) {
       break;
     }
 
-    recentApiKeyTouches.delete(oldestEntry[0]);
+    entries.delete(oldest.value);
   }
 }
 
@@ -432,30 +434,36 @@ async function verifyApiKeyCredential(env: Env, credential: string): Promise<Api
     return null;
   }
 
+  const hash = await hashCredentialMaterial(apiKey.secret);
+  const cacheKey = `${apiKey.apiKeyId}.${hash}`;
+  const nowMs = Date.now();
+  const cached = principalCache.get(cacheKey);
+  if (cached && cached.expiresAtMs > nowMs) {
+    return cached.record;
+  }
+
   const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
     type: 'control.api-key.verify',
     apiKeyId: apiKey.apiKeyId,
-    hash: await hashCredentialMaterial(apiKey.secret)
+    hash
   });
   if (response.type !== 'control.api-key.verify.result') {
     throw new ServiceUnavailableError('Unexpected control plane api key verify response.');
   }
 
+  // Only answers from the control plane are remembered. A failed lookup is retried, never cached as a rejection.
+  principalCache.delete(cacheKey);
+  evictForInsert(principalCache, maxPrincipalCacheEntries, (entry) => entry.expiresAtMs <= nowMs);
+  principalCache.set(cacheKey, { record: response.result.record, expiresAtMs: nowMs + principalCacheTtlMs });
   return response.result.record;
 }
 
-async function verifyApiKeyCredentialCached(c: AppContext, credential: string): Promise<ApiKeyPrincipal | null> {
-  const cached = c.get('verifiedApiKeyCredential');
-  if (cached?.credential === credential) {
-    return cached.record;
+function forgetCachedPrincipals(apiKeyId: string) {
+  for (const cacheKey of principalCache.keys()) {
+    if (cacheKey.startsWith(`${apiKeyId}.`)) {
+      principalCache.delete(cacheKey);
+    }
   }
-
-  const record = await verifyApiKeyCredential(c.env, credential);
-  c.set('verifiedApiKeyCredential', {
-    credential,
-    record
-  });
-  return record;
 }
 
 function getRateLimitConfiguration(env: Env) {
@@ -708,7 +716,7 @@ async function touchApiKeyIfNeeded(env: Env, apiKeyId: string, requestId?: strin
     return;
   }
 
-  pruneRecentApiKeyTouches(nowMs);
+  evictForInsert(recentApiKeyTouches, maxRecentApiKeyTouches, (touchedAtMs) => touchedAtMs < nowMs - apiKeyTouchIntervalMs);
   recentApiKeyTouches.set(apiKeyId, nowMs);
 }
 
@@ -841,7 +849,8 @@ function buildTableRequestContext(c: AppContext, route: string) {
   };
 }
 
-async function authenticateRequest(c: AppContext): Promise<AuthContext> {
+// Who is calling? Verifies the credential but does not yet charge the key's rate limit or record its use.
+async function identifyCaller(c: AppContext): Promise<AuthContext> {
   const presented = readAuthorization(c.req.header('authorization'));
   if (presented.kind === 'none') {
     c.set('authPrincipal', 'anonymous');
@@ -858,19 +867,34 @@ async function authenticateRequest(c: AppContext): Promise<AuthContext> {
     return { kind: 'bootstrap-admin' };
   }
 
-  const record = await verifyApiKeyCredentialCached(c, presented.credential);
+  const record = await verifyApiKeyCredential(c.env, presented.credential);
   if (!record) {
     throw new UnauthorizedError('Invalid API key.');
   }
 
-  await enforceVerifiedApiKeyRateLimit(c, record.id);
   c.set('authPrincipal', `api-key:${record.id}`);
-  await touchApiKeyIfNeeded(c.env, record.id, c.get('requestId'));
-
   return {
     kind: 'api-key',
     record
   };
+}
+
+// The per-key rate limit and the last-used touch only need the key id, so they do not wait for each other.
+async function completeAuthentication(c: AppContext, auth: AuthContext) {
+  if (auth.kind !== 'api-key') {
+    return;
+  }
+
+  await Promise.all([
+    enforceVerifiedApiKeyRateLimit(c, auth.record.id),
+    touchApiKeyIfNeeded(c.env, auth.record.id, c.get('requestId'))
+  ]);
+}
+
+async function authenticateRequest(c: AppContext): Promise<AuthContext> {
+  const auth = await identifyCaller(c);
+  await completeAuthentication(c, auth);
+  return auth;
 }
 
 function hasScope(record: ApiKeyPrincipal, scope: ApiScope) {
@@ -955,54 +979,55 @@ async function loadProject(c: { env: Env }, projectSlug: string) {
   return (response as { type: 'project.get.result'; result: AdminGetProjectResult }).result;
 }
 
-async function loadProjectAccess(c: { env: Env }, projectSlug: string) {
-  const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, projectSlug), {
-    type: 'project.access.get',
-    projectSlug
-  });
+type Settled<T> = { ok: true; value: T } | { ok: false; reason: unknown };
 
-  return (response as {
-    type: 'project.access.get.result';
-    result: { data: ProjectAccessResult };
-  }).result.data;
+// Starting work early and then abandoning it (for a rejected credential, say) must not leave an unhandled rejection
+// behind, so such work is awaited through a copy that never rejects.
+function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
+  return promise.then(
+    (value): Settled<T> => ({ ok: true, value }),
+    (reason: unknown): Settled<T> => ({ ok: false, reason })
+  );
 }
 
-// Callers without a read grant may only read public-read projects. Private, missing, and unknown projects all fail
-// the same way, so the response never reveals which projects exist.
-async function requirePublicReadProject(c: { env: Env }, projectSlug: string, auth: AuthContext) {
-  const deny = () => (auth.kind === 'api-key' ? missingScopeError('table:read') : new UnauthorizedError());
-  try {
-    const projectAccess = await loadProjectAccess(c, projectSlug);
-    if (projectAccess.defaultAuthMode !== 'public-read') {
-      throw deny();
-    }
-  } catch (error) {
-    if (error instanceof NotFoundError) {
-      throw deny();
-    }
-
-    if (error instanceof DurableRpcError && error.status === 404) {
-      throw deny();
-    }
-
-    throw error;
-  }
+function isNotFound(error: unknown) {
+  return error instanceof NotFoundError || (error instanceof DurableRpcError && error.status === 404);
 }
 
 function grantsTableRead(auth: AuthContext) {
   return auth.kind === 'bootstrap-admin' || (auth.kind === 'api-key' && hasScope(auth.record, 'table:read'));
 }
 
-// Scope and project access are decided before the table is resolved, so a caller who may not read a table cannot
-// learn from the response whether it exists.
+// Table reads wait on the caller's rate limit and on the table lookup. Neither depends on the other, so once the
+// caller is known and its key is allowed near this project at all, both run together. A key that may not touch the
+// project never causes a project lookup.
 async function authorizeTableRead(c: AppContext, projectSlug: string, tableSlug: string) {
-  const auth = await authenticateRequest(c);
+  const auth = await identifyCaller(c);
   assertCredentialProjectBoundary(auth, projectSlug);
-  if (!grantsTableRead(auth)) {
-    await requirePublicReadProject(c, projectSlug, auth);
+
+  const resolution = settle(loadProjectTable(c, projectSlug, tableSlug));
+  await completeAuthentication(c, auth);
+  const resolved = await resolution;
+
+  if (grantsTableRead(auth)) {
+    if (!resolved.ok) {
+      throw resolved.reason;
+    }
+
+    return resolved.value;
   }
 
-  return loadProjectTable(c, projectSlug, tableSlug);
+  // Callers without a read grant may only read public-read projects. Private projects, missing projects, and missing
+  // tables all get the same denial, so the response never reveals which of them exist.
+  if (resolved.ok && resolved.value.project.defaultAuthMode === 'public-read') {
+    return resolved.value;
+  }
+
+  if (!resolved.ok && !isNotFound(resolved.reason)) {
+    throw resolved.reason;
+  }
+
+  throw auth.kind === 'api-key' ? missingScopeError('table:read') : new UnauthorizedError();
 }
 
 async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug: string) {
@@ -1158,10 +1183,21 @@ function isDurableObjectBoundaryRejection(error: unknown) {
   );
 }
 
+const durableObjectOverloadRetryAfterSeconds = 2;
+
+// Durable Object stubs reject with `overloaded: true` while an object is shedding load.
+function isDurableObjectOverloaded(error: unknown) {
+  return error instanceof Error && 'overloaded' in error && error.overloaded === true;
+}
+
 // Only intentional contract errors reach clients; everything else becomes the generic INTERNAL_ERROR body.
 function toPublicErrorResponse(error: unknown) {
   if (isDurableObjectBoundaryRejection(error)) {
     return toErrorResponse(new Error('A Durable Object rejected a gateway-built RPC payload.'));
+  }
+
+  if (isDurableObjectOverloaded(error)) {
+    return toErrorResponse(new ServiceUnavailableError('The service is temporarily overloaded. Retry shortly.'));
   }
 
   const rpcErrorResponse = error instanceof DurableRpcError ? parseDurableRpcErrorResponse(error) : null;
@@ -1711,10 +1747,11 @@ export type CachedTableReadProps = Readonly<{
   resolvedConfig: ResolvedTableConfigSnapshot;
 }>;
 
-function noStoreJsonResponse(body: unknown, status = 200) {
+function noStoreJsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
   return Response.json(body, {
     status,
     headers: {
+      ...headers,
       'cache-control': 'no-store'
     }
   });
@@ -1743,7 +1780,10 @@ function noStoreErrorResponse(error: unknown) {
       errorStack: normalizedError instanceof Error ? normalizedError.stack ?? null : null
     }));
   }
-  return noStoreJsonResponse(body, status);
+  const retryAfter = isDurableObjectOverloaded(normalizedError)
+    ? { 'retry-after': String(durableObjectOverloadRetryAfterSeconds) }
+    : {};
+  return noStoreJsonResponse(body, status, retryAfter);
 }
 
 function decodeCachedPathSegment(value: string) {
@@ -2055,6 +2095,10 @@ async function parseCachedTableReadResponse<TSchema extends z.ZodType>(
   }
 
   const errorBody = errorResponseSchema.parse(body);
+  const retryAfterSeconds = Number.parseInt(response.headers.get('retry-after') ?? '', 10);
+  if (Number.isFinite(retryAfterSeconds)) {
+    c.set('retryAfterSeconds', retryAfterSeconds);
+  }
   throw new AppError(errorBody.error.message, errorBody.error.code, response.status, errorBody.error.details);
 }
 
@@ -2320,7 +2364,8 @@ function createApp() {
       response.headers.set('x-ratelimit-remaining', String(rateLimit.remaining));
       response.headers.set('x-ratelimit-reset', new Date(rateLimit.resetAtMs).toISOString());
     }
-    const retryAfterSeconds = c.get('retryAfterSeconds');
+    const retryAfterSeconds = c.get('retryAfterSeconds')
+      ?? (isDurableObjectOverloaded(normalizedError) ? durableObjectOverloadRetryAfterSeconds : undefined);
     if (retryAfterSeconds !== undefined) {
       response.headers.set('retry-after', String(retryAfterSeconds));
     }
@@ -2396,7 +2441,13 @@ function createApp() {
   app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', {
     type: 'http',
     scheme: 'bearer',
-    bearerFormat: 'API key or bootstrap admin token'
+    bearerFormat: 'API key or bootstrap admin token',
+    description: [
+      'Send `Authorization: Bearer <credential>`; the scheme name is case-insensitive.',
+      'Each Worker isolate caches API key verification results for up to 10 seconds, so a revoked key can keep working',
+      'for up to 10 seconds on isolates that verified it earlier. The isolate that handles the revoke request stops',
+      'accepting the key immediately.'
+    ].join(' ')
   });
 
   app.doc('/doc', {
@@ -2909,6 +2960,7 @@ function createApp() {
       apiKeyId: id,
       revokedAt: new Date().toISOString()
     });
+    forgetCachedPrincipals(id);
 
     return c.json({ ok: true });
   });
@@ -2918,12 +2970,18 @@ function createApp() {
 
 const app = createApp();
 
-function resetRecentApiKeyTouchesForTests() {
+// Isolate-level caches survive between requests, which is the point in production but leaks state between tests.
+function resetGatewayStateForTests() {
   recentApiKeyTouches.clear();
+  principalCache.clear();
 }
 
 function getRecentApiKeyTouchCacheSizeForTests() {
   return recentApiKeyTouches.size;
+}
+
+function getPrincipalCacheSizeForTests() {
+  return principalCache.size;
 }
 
 export {
@@ -2933,7 +2991,9 @@ export {
   RateLimitDO,
   createApp,
   touchApiKeyIfNeeded as __touchApiKeyIfNeededForTests,
-  resetRecentApiKeyTouchesForTests as __resetRecentApiKeyTouchesForTests,
-  getRecentApiKeyTouchCacheSizeForTests as __getRecentApiKeyTouchCacheSizeForTests
+  verifyApiKeyCredential as __verifyApiKeyCredentialForTests,
+  resetGatewayStateForTests as __resetGatewayStateForTests,
+  getRecentApiKeyTouchCacheSizeForTests as __getRecentApiKeyTouchCacheSizeForTests,
+  getPrincipalCacheSizeForTests as __getPrincipalCacheSizeForTests
 };
 export default app;

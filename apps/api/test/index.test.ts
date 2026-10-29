@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../src/env';
 import {
   __getRecentApiKeyTouchCacheSizeForTests,
-  __resetRecentApiKeyTouchesForTests,
+  __resetGatewayStateForTests,
   __touchApiKeyIfNeededForTests,
   createApp
 } from '../src/index';
@@ -297,7 +297,7 @@ describe('CachedTableReads', () => {
 
 describe('api routes', () => {
   beforeEach(() => {
-    __resetRecentApiKeyTouchesForTests();
+    __resetGatewayStateForTests();
   });
 
   it('applies no-store to default-gateway dynamic and privileged routes', async () => {
@@ -1656,16 +1656,15 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(401);
-    expect(env.__projectRequests).toContain('project.access.get');
-    expect(env.__projectRequests).not.toContain('project.table.resolve');
+    expect(env.__projectRequests).toEqual(['project.table.resolve']);
   });
 
   it('does not leak missing project existence on anonymous read routes', async () => {
     const app = createApp();
-    const env = createEnv({ projectAccessStatus: 404 }) as Env & { __projectRequests: string[] };
+    const env = createEnv() as Env & { __projectRequests: string[] };
 
     const response = await app.request(
-      '/v1/projects/demo/tables/users/rows',
+      '/v1/projects/absent/tables/users/rows',
       {},
       env
     );
@@ -1678,8 +1677,7 @@ describe('api routes', () => {
         details: null
       }
     });
-    expect(env.__projectRequests).toContain('project.access.get');
-    expect(env.__projectRequests).not.toContain('project.table.resolve');
+    expect(env.__projectRequests).toEqual(['project.table.resolve']);
   });
 
   it('rejects wrong-project scoped read keys before resolving private table existence', async () => {
@@ -1700,10 +1698,13 @@ describe('api routes', () => {
     expect(env.__projectRequests).toEqual([]);
   });
 
-  it('preserves internal project access failures instead of rewriting them as unauthorized', async () => {
+  it('preserves internal project lookup failures instead of rewriting them as unauthorized', async () => {
     const app = createApp();
     const response = await app.request('/v1/projects/demo/tables/users/rows', {}, createEnv({
-      projectAccessStatus: 500
+      hooks: {
+        project: ({ body }) =>
+          body.type === 'project.table.resolve' ? new Response('project lookup failed', { status: 500 }) : undefined
+      }
     }));
 
     expect(response.status).toBe(500);
@@ -1734,8 +1735,7 @@ describe('api routes', () => {
     expect(response.headers.get('cache-control')).toBe('private, no-store');
     expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
     expect(response.headers.get('cache-tag')).toBeNull();
-    expect(env.__projectRequests).toContain('project.access.get');
-    expect(env.__projectRequests).toContain('project.table.resolve');
+    expect(env.__projectRequests).toEqual(['project.table.resolve']);
     expect(env.__cachedReadRequests).toHaveLength(1);
     expect(env.__cachedReadRequests[0].authorization).toBeNull();
     expect(env.__cachedReadRequests[0].url).toBe(

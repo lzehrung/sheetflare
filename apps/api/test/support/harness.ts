@@ -136,7 +136,6 @@ type UnexpectedTableResponseRequest =
 export function createEnv(options?: {
   rateLimitAllowed?: boolean;
   defaultAuthMode?: 'private' | 'public-read';
-  projectAccessStatus?: 200 | 404 | 500;
   tableCacheClearStatus?: 200 | 503;
   tableCacheGetUnexpectedResponse?: boolean;
   tableUnexpectedResponseFor?: UnexpectedTableResponseRequest;
@@ -504,39 +503,6 @@ export function createEnv(options?: {
             defaultAuthMode: options?.defaultAuthMode ?? 'private'
           },
           tables: [table]
-        }
-      });
-    }
-
-    if (body.type === 'project.access.get') {
-      if (body.projectSlug !== 'demo') {
-        return notFoundResponse(`Project ${body.projectSlug} was not found.`);
-      }
-
-      if (options?.projectAccessStatus === 404) {
-        return Response.json(
-          {
-            error: {
-              code: 'NOT_FOUND',
-              message: 'Project demo was not found.',
-              details: null
-            }
-          },
-          { status: 404 }
-        );
-      }
-
-      if (options?.projectAccessStatus === 500) {
-        return new Response('project access failed', { status: 500 });
-      }
-
-      return Response.json({
-        type: 'project.access.get.result',
-        result: {
-          data: {
-            slug: 'demo',
-            defaultAuthMode: options?.defaultAuthMode ?? 'private'
-          }
         }
       });
     }

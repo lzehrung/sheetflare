@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { projectDoRequestSchema, toErrorResponse } from '@sheetflare/contracts';
-import { __resetRecentApiKeyTouchesForTests, createApp } from '../src/index';
+import { __resetGatewayStateForTests, createApp } from '../src/index';
 import { apiKeys, forgedApiKey, withWrongSecret } from './support/api-keys';
 import { createEnv, probesOf } from './support/harness';
 import { readJsonLogs } from './support/logs';
@@ -26,7 +26,7 @@ function request(path: string, authorization?: string, init: RequestInit = {}) {
 }
 
 beforeEach(() => {
-  __resetRecentApiKeyTouchesForTests();
+  __resetGatewayStateForTests();
 });
 
 describe('403 for insufficient scope, 401 only for missing or invalid credentials', () => {
@@ -379,6 +379,128 @@ describe('Durable Object RPC validation failures are internal errors', () => {
       message: 'Field "email" is not indexed.',
       details: { field: 'email' }
     });
+  });
+});
+
+describe('Durable Object overload', () => {
+  function overloadedStubError() {
+    return Object.assign(new Error('Durable Object is overloaded. Requests queued for too long.'), {
+      overloaded: true,
+      retryable: true
+    });
+  }
+
+  const overloadedBody = {
+    code: 'SERVICE_UNAVAILABLE',
+    message: 'The service is temporarily overloaded. Retry shortly.',
+    details: null
+  };
+
+  it.each([
+    {
+      name: 'the control plane',
+      path: '/v1/admin/projects',
+      authorization: 'Bearer secret',
+      createTestEnv: () =>
+        createEnv({
+          hooks: {
+            controlPlane: ({ body }) => {
+              if (body.type === 'control.projects.list') {
+                throw overloadedStubError();
+              }
+              return undefined;
+            }
+          }
+        })
+    },
+    {
+      name: 'the rate limiter',
+      path: '/v1/admin/projects',
+      authorization: 'Bearer secret',
+      createTestEnv: () =>
+        createEnv({
+          hooks: {
+            rateLimit: () => {
+              throw overloadedStubError();
+            }
+          }
+        })
+    },
+    {
+      name: 'a project object',
+      path: rowsPath,
+      authorization: apiKeys.project.authorization,
+      createTestEnv: () =>
+        createEnv({
+          hooks: {
+            project: ({ body }) => {
+              if (body.type === 'project.table.resolve') {
+                throw overloadedStubError();
+              }
+              return undefined;
+            }
+          }
+        })
+    },
+    {
+      name: 'a table object behind the cached read entrypoint',
+      path: rowsPath,
+      authorization: apiKeys.project.authorization,
+      createTestEnv: () =>
+        createEnv({
+          hooks: {
+            table: ({ body }) => {
+              if (body.type === 'table.rows.list') {
+                throw overloadedStubError();
+              }
+              return undefined;
+            }
+          }
+        })
+    }
+  ])('answers 503 with Retry-After when $name is overloaded', async ({ path, authorization, createTestEnv }) => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const response = await createApp().request(path, { headers: { authorization } }, createTestEnv());
+
+      expect(response.status).toBe(503);
+      expect(response.headers.get('retry-after')).toBe('2');
+      expect(await readError(response)).toEqual(overloadedBody);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('keeps other stub failures as generic 500s without Retry-After', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const response = await createApp().request(
+        '/v1/admin/projects',
+        { headers: { authorization: 'Bearer secret' } },
+        createEnv({
+          hooks: {
+            controlPlane: ({ body }) => {
+              if (body.type === 'control.projects.list') {
+                throw Object.assign(new Error('Durable Object reset because its code was updated.'), { retryable: true });
+              }
+              return undefined;
+            }
+          }
+        })
+      );
+
+      expect(response.status).toBe(500);
+      expect(response.headers.get('retry-after')).toBeNull();
+      expect(await readError(response)).toEqual({
+        code: 'INTERNAL_ERROR',
+        message: 'Internal server error.',
+        details: null
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });
 
