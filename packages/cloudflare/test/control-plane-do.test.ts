@@ -1898,6 +1898,139 @@ describe('ControlPlaneDO project removal', () => {
   });
 });
 
+describe('ControlPlaneDO Drive reindex', () => {
+  const webhookUrl = 'https://sheetflare.example/v1/system/google/drive/notifications';
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function getControlPlane(env: CloudflareEnv) {
+    return env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+  }
+
+  function getTable(env: CloudflareEnv, projectSlug: string, tableSlug: string) {
+    return env.TABLE_DO.get(env.TABLE_DO.idFromName(`table:${projectSlug}:${tableSlug}`));
+  }
+
+  async function createWatchedTables(env: CloudflareEnv, tables: Array<{ projectSlug: string; tableSlug: string }>) {
+    for (const { projectSlug, tableSlug } of tables) {
+      const project = env.PROJECT_DO.get(env.PROJECT_DO.idFromName(`project:${projectSlug}`));
+      await doRpc<ProjectDoResponse>(project, {
+        type: 'project.create',
+        allowExisting: true,
+        input: { slug: projectSlug, name: projectSlug, spreadsheetId: 'sheet-1' }
+      });
+      await doRpc<ProjectDoResponse>(project, {
+        type: 'project.table.create',
+        projectSlug,
+        input: { tableSlug, sheetTabName: 'Users', cacheTtlSeconds: 3600 }
+      });
+    }
+
+    await doRpc<ControlPlaneDoResponse>(getControlPlane(env), {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl,
+      webhookToken: 'secret-token',
+      debounceSeconds: 30,
+      expirationMs: Date.parse('2026-05-06T10:00:00.000Z')
+    });
+  }
+
+  async function notifyChange(env: CloudflareEnv, messageNumber: string, changedAt: string) {
+    return expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(getControlPlane(env), {
+        type: 'control.spreadsheet-watch.notify',
+        channelId: 'channel-sheet-1',
+        resourceId: 'resource-sheet-1',
+        resourceState: 'update',
+        messageNumber,
+        changedAt,
+        channelExpiration: null
+      }),
+      'control.spreadsheet-watch.notify.result'
+    );
+  }
+
+  async function getWatch(env: CloudflareEnv) {
+    const [watch] = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(getControlPlane(env), { type: 'control.spreadsheet-watches.list' }),
+      'control.spreadsheet-watches.list.result'
+    ).data;
+    return watch;
+  }
+
+  async function getRowStatus(env: CloudflareEnv, projectSlug: string, tableSlug: string) {
+    return expectRpcResult(
+      await doRpc<TableDoResponse>(getTable(env, projectSlug, tableSlug), {
+        type: 'table.row.get',
+        projectSlug,
+        tableSlug,
+        rowId: 'row-1'
+      }),
+      'table.row.get.result'
+    ).data.values.status;
+  }
+
+  it('keeps a notification that arrives during an alarm reindex pending and re-arms the alarm for it', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'v1']
+      ]
+    };
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    const dataReadHeld = Promise.withResolvers<void>();
+    const dataReadReleased = Promise.withResolvers<void>();
+    let holdNextDataRead = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await fallbackFetch(input, init);
+      if (holdNextDataRead && decodeURIComponent(String(input)).includes("/values/'Users'!A")) {
+        holdNextDataRead = false;
+        dataReadHeld.resolve();
+        await dataReadReleased.promise;
+      }
+
+      return response;
+    });
+    const { env, controlPlaneNamespace } = createTestEnv();
+    await createWatchedTables(env, [{ projectSlug: 'demo', tableSlug: 'users' }]);
+    await notifyChange(env, '2', '2026-04-29T10:00:00.000Z');
+
+    vi.setSystemTime(new Date('2026-04-29T10:00:31.000Z'));
+    holdNextDataRead = true;
+    const alarm = controlPlaneNamespace.triggerAlarm('control-plane');
+    await dataReadHeld.promise;
+
+    // The reindex already holds the v1 snapshot when the sheet changes again.
+    sheet.rows = [
+      ['_id', 'status'],
+      ['row-1', 'v2']
+    ];
+    vi.setSystemTime(new Date('2026-04-29T10:00:32.000Z'));
+    await notifyChange(env, '3', '2026-04-29T10:00:32.000Z');
+    dataReadReleased.resolve();
+    await alarm;
+
+    expect(await getWatch(env)).toMatchObject({
+      pendingChangedAt: '2026-04-29T10:00:32.000Z',
+      debounceUntil: '2026-04-29T10:01:02.000Z',
+      lastReindexCompletedAt: '2026-04-29T10:00:32.000Z',
+      lastReindexError: null
+    });
+    expect(controlPlaneNamespace.getAlarm('control-plane')).toBe(Date.parse('2026-04-29T10:01:02.000Z'));
+
+    vi.setSystemTime(new Date('2026-04-29T10:01:02.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect(await getWatch(env)).toMatchObject({ pendingChangedAt: null, debounceUntil: null });
+    expect(await getRowStatus(env, 'demo', 'users')).toBe('v2');
+  });
+});
+
 describe('ControlPlaneDO API key lifecycle', () => {
   it('keeps the first revocation timestamp when a key is revoked again', async () => {
     const { env } = createTestEnv();

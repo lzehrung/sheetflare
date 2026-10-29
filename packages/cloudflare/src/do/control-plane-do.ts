@@ -1139,9 +1139,7 @@ export class ControlPlaneDO {
       this.ctx.storage.sql.exec(
         `
         UPDATE spreadsheet_watches
-        SET pending_changed_at = NULL,
-            debounce_until = NULL,
-            last_reindex_completed_at = ?,
+        SET last_reindex_completed_at = ?,
             last_reindex_error = NULL,
             updated_at = ?
         WHERE spreadsheet_id = ?
@@ -1149,6 +1147,19 @@ export class ControlPlaneDO {
         completedAt,
         completedAt,
         watch.spreadsheet_id
+      );
+      // Clear only the change this reindex started from. A notification recorded meanwhile may describe edits the
+      // reindex did not read, so it stays pending and the alarm is re-armed for its debounce.
+      this.ctx.storage.sql.exec(
+        `
+        UPDATE spreadsheet_watches
+        SET pending_changed_at = NULL,
+            debounce_until = NULL
+        WHERE spreadsheet_id = ?
+          AND pending_changed_at = ?
+        `,
+        watch.spreadsheet_id,
+        watch.pending_changed_at
       );
     } catch (error) {
       const retryAt = new Date(Date.now() + Math.max(watch.debounce_seconds, 30) * 1000).toISOString();
