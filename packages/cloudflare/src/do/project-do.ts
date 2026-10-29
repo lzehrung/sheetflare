@@ -56,6 +56,10 @@ type TableRow = {
   updated_at: string;
 };
 
+// Upper bound of TableConfig.cacheTtlSeconds. Tables stored before the bound existed are served at the bound so their
+// configuration still satisfies the TableDO RPC schema.
+const maxCacheTtlSeconds = 3600;
+
 function getControlPlaneStub(env: CloudflareEnv) {
   return env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
 }
@@ -81,12 +85,27 @@ function normalizeFieldNames(values: readonly string[]) {
 
 export class ProjectDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
+  // Anonymous reads address a ProjectDO for any valid slug. Tables are created by the first project write, so a
+  // Durable Object for an unknown slug answers NOT_FOUND without persisting storage.
+  private hasSchema: boolean;
 
   constructor(
     private readonly ctx: DurableObjectState,
     private readonly env: CloudflareEnv
   ) {
-    this.initialize();
+    this.hasSchema = this.ctx.storage.sql
+      .exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'project'`)
+      .toArray().length > 0;
+    if (this.hasSchema) {
+      this.initialize();
+    }
+  }
+
+  private ensureSchema() {
+    if (!this.hasSchema) {
+      this.initialize();
+      this.hasSchema = true;
+    }
   }
 
   private initialize() {
@@ -232,16 +251,27 @@ export class ProjectDO {
     const googleCredentialRef = normalizeOptionalFieldName(input.googleCredentialRef) ?? defaultGoogleCredentialRef;
 
     resolveGoogleCredential(this.env, googleCredentialRef);
-    const existing = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, input.slug);
+    const previous = this.findProjectToCreate(input.slug, allowExisting);
 
-    if (!allowExisting) {
-      if (existing) {
-        throw new ConflictError(`Project ${input.slug} already exists.`, {
-          projectSlug: input.slug
-        });
-      }
+    // The control plane rejects a spreadsheet that other projects use under another credential ref and, for a slug
+    // without a project, revokes keys an earlier project with this slug left behind, before anything is written here.
+    if (
+      !previous
+      || previous.spreadsheet_id !== input.spreadsheetId
+      || previous.google_credential_ref !== googleCredentialRef
+    ) {
+      await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), {
+        type: 'control.project.prepare',
+        projectSlug: input.slug,
+        spreadsheetId: input.spreadsheetId,
+        googleCredentialRef,
+        revokeApiKeys: previous === null
+      });
     }
 
+    // Other requests run while the control plane answers, so the existence check that guards the write is repeated.
+    const existing = this.findProjectToCreate(input.slug, allowExisting);
+    this.ensureSchema();
     this.ctx.storage.sql.exec(
       `
       INSERT INTO project (
@@ -268,6 +298,17 @@ export class ProjectDO {
       data: await this.getProject(input.slug),
       created: existing === null
     };
+  }
+
+  private findProjectToCreate(projectSlug: string, allowExisting: boolean) {
+    const existing = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, projectSlug);
+    if (existing && !allowExisting) {
+      throw new ConflictError(`Project ${projectSlug} already exists.`, {
+        projectSlug
+      });
+    }
+
+    return existing;
   }
 
   private async getProject(projectSlug: string): Promise<AdminGetProjectResult> {
@@ -448,9 +489,11 @@ export class ProjectDO {
     const tables = await this.listTables(projectSlug);
     const deletedTables = tables.map((table) => table.tableSlug);
 
+    // Revoke the project's keys and drop its registry entry first. If the control plane fails, nothing here has been
+    // deleted yet: the project keeps working, its slug cannot be re-created, and retrying the delete converges.
+    await this.deleteRegistryProject(projectSlug);
     this.ctx.storage.sql.exec(`DELETE FROM tables WHERE project_slug = ?`, projectSlug);
     this.ctx.storage.sql.exec(`DELETE FROM project WHERE slug = ?`, projectSlug);
-    await this.deleteRegistryProject(projectSlug);
 
     return {
       ok: true,
@@ -537,6 +580,10 @@ export class ProjectDO {
   }
 
   private selectOptionalRow<Row>(query: string, ...params: unknown[]): Row | null {
+    if (!this.hasSchema) {
+      return null;
+    }
+
     const rows = this.ctx.storage.sql.exec(query, ...params).toArray() as Row[];
     return rows[0] ?? null;
   }
@@ -602,7 +649,7 @@ export class ProjectDO {
       createEnabled: Boolean(row.create_enabled),
       updateEnabled: Boolean(row.update_enabled),
       deleteEnabled: Boolean(row.delete_enabled),
-      cacheTtlSeconds: row.cache_ttl_seconds,
+      cacheTtlSeconds: Math.min(row.cache_ttl_seconds, maxCacheTtlSeconds),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
