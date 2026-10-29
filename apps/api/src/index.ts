@@ -1524,7 +1524,7 @@ const adminCreateProjectRoute = createRoute({
       content: jsonContent(adminGetProjectResultSchema)
     },
     409: {
-      description: 'Project already exists. Repeat the request with upsert=true to replace it intentionally.',
+      description: 'Project already exists. Repeat the request with upsert=true to replace it intentionally. Also returned when another project already uses the spreadsheet with a different Google credential ref: projects that share a spreadsheet must use the same credential ref.',
       content: jsonContent(errorResponseSchema)
     },
     400: badRequestResponse,
@@ -1962,7 +1962,11 @@ const revokeApiKeyRoute = createRoute({
       description: 'Revoke an API key',
       content: jsonContent(okResultSchema)
     },
-    ...protectedRouteErrorResponses
+    ...protectedRouteErrorResponses,
+    404: {
+      description: 'The API key does not exist. Project-scoped admin keys get 403 instead for keys outside their project, whether or not the id exists.',
+      content: jsonContent(errorResponseSchema)
+    }
   }
 });
 

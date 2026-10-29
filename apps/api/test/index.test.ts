@@ -3198,6 +3198,24 @@ describe('api routes', () => {
     expect(document.components?.securitySchemes?.bearerAuth).toBeDefined();
   });
 
+  it('documents the revoke-key not-found response and the shared-spreadsheet credential conflict', async () => {
+    const response = await createApp().request('/doc', {}, createEnv());
+    const operation = z.object({
+      responses: z.record(z.string(), z.object({ description: z.string() }))
+    });
+    const document = z.object({
+      paths: z.object({
+        '/v1/admin/keys/{id}': z.object({ delete: operation }),
+        '/v1/admin/projects': z.object({ post: operation })
+      })
+    }).parse(await response.json());
+
+    expect(document.paths['/v1/admin/keys/{id}'].delete.responses['404']?.description).toContain('does not exist');
+    const conflict = document.paths['/v1/admin/projects'].post.responses['409']?.description;
+    expect(conflict).toContain('upsert=true');
+    expect(conflict).toContain('credential ref');
+  });
+
   it('serves the interactive docs page', async () => {
     const app = createApp();
     const response = await app.request('/docs', {}, createEnv());

@@ -40,15 +40,11 @@ Required external inputs:
 
 After deployment, run the complete staging gate in `docs/workers-cache-plan.md`. Preserve the resulting URLs, cache-status observations, mutation freshness checks, response-size result, and purge-error check as rollout evidence.
 
-## Cache degradation contract
+## Cache freshness contract
 
-A committed mutation remains successful if Workers Cache invalidation fails. The response carries:
+Cached reads are keyed by the table's data generation, so a committed mutation, sync, cache clear, configuration change, or recorded Drive change makes older edge entries unreachable. Freshness does not depend on Workers Cache purge, whose rate limit is far below the write rate of a busy table (Free-tier limits: a 25-request burst, then 5 a minute).
 
-```http
-X-Sheetflare-Cache-Invalidation: failed
-```
-
-The Worker emits `cache.invalidation.failed` with request context and the internal purge error. Clients must not retry a successful mutation solely because cache invalidation degraded. Operators should investigate immediately because cached reads may remain stale until TTL expiry or a later successful purge.
+The gateway still purges superseded entries after a committed change as best-effort cleanup: one `purge()` call per request or Drive notification with all tags batched, run through `waitUntil` after the response is sent. A mutation response never reports purge status, and clients have nothing to retry or check. Superseded entries expire with their TTL, which is never more than the table's remaining freshness. When Cloudflare rejects a purge, the Worker logs the warning event `cache.invalidation.failed`. Watch its rate to see cleanup pressure, and treat any stale read as a bug whatever the purge state.
 
 Inner cache behavior is exposed as:
 
