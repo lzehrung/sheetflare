@@ -24,6 +24,7 @@ import {
   getOnlyCachedReadRequest,
   requireCacheKey
 } from './support/harness';
+import { WorkersCacheEmulator } from './support/workers-cache';
 
 describe('timingSafeEqualSecret', () => {
   it('matches equal secrets and rejects unequal or different-length secrets', async () => {
@@ -256,10 +257,10 @@ describe('CachedTableReads', () => {
     expect(env.__tableRequests).toEqual([]);
   });
 
-  it('purges the project tag when invalidating a project', async () => {
+  it('purges the project tag for a project target', async () => {
     const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
 
-    await entrypoint.invalidateProject('demo');
+    await entrypoint.purge([{ kind: 'project', projectSlug: 'demo' }]);
 
     expect(purgeCalls).toEqual([
       {
@@ -268,10 +269,10 @@ describe('CachedTableReads', () => {
     ]);
   });
 
-  it('purges the table tag when invalidating a table', async () => {
+  it('purges the table tag for a table target', async () => {
     const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
 
-    await entrypoint.invalidateTable('demo', 'users');
+    await entrypoint.purge([{ kind: 'table', projectSlug: 'demo', tableSlug: 'users' }]);
 
     expect(purgeCalls).toEqual([
       {
@@ -280,18 +281,12 @@ describe('CachedTableReads', () => {
     ]);
   });
 
-  it('rejects table invalidation when Workers Cache returns a failed purge result', async () => {
-    const { entrypoint } = createCachedTableReadsHarness(createEnv(), {
-      purgeResultShouldFail: true
-    });
-
-    await expect(entrypoint.invalidateTable('demo', 'users')).rejects.toThrow();
-  });
-
-  it('purges table and encoded row tags when invalidating a row', async () => {
+  it('purges table and encoded row tags for a row target', async () => {
     const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
 
-    await entrypoint.invalidateRow('demo', 'users', 'row/1:alpha,beta?sheet#frag%space value');
+    await entrypoint.purge([
+      { kind: 'row', projectSlug: 'demo', tableSlug: 'users', rowId: 'row/1:alpha,beta?sheet#frag%space value' }
+    ]);
 
     expect(purgeCalls).toEqual([
       {
@@ -307,13 +302,69 @@ describe('CachedTableReads', () => {
     const longRowId = 'x'.repeat(1025);
     const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
 
-    await entrypoint.invalidateRow('demo', 'users', longRowId);
+    await entrypoint.purge([{ kind: 'row', projectSlug: 'demo', tableSlug: 'users', rowId: longRowId }]);
 
     expect(purgeCalls).toEqual([
       {
         tags: ['table:demo:users']
       }
     ]);
+  });
+
+  it('sends the tags of several targets in one purge request, once each', async () => {
+    const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
+
+    await entrypoint.purge([
+      { kind: 'project', projectSlug: 'alpha' },
+      { kind: 'row', projectSlug: 'alpha', tableSlug: 'users', rowId: '1' },
+      { kind: 'row', projectSlug: 'alpha', tableSlug: 'users', rowId: '2' },
+      { kind: 'project', projectSlug: 'alpha' }
+    ]);
+
+    expect(purgeCalls).toEqual([
+      {
+        tags: ['project:alpha', 'table:alpha:users', 'row:alpha:users:1', 'row:alpha:users:2']
+      }
+    ]);
+  });
+
+  it('splits more than 100 tags into purge requests of at most 100', async () => {
+    const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
+    const targets = Array.from({ length: 250 }, (_, index) => ({ kind: 'project' as const, projectSlug: `project-${index}` }));
+
+    await entrypoint.purge(targets);
+
+    expect(purgeCalls.map((call) => call.tags?.length)).toEqual([100, 100, 50]);
+    expect(purgeCalls.flatMap((call) => call.tags ?? [])).toEqual(targets.map((target) => `project:${target.projectSlug}`));
+  });
+
+  it('makes no purge request when there is nothing to purge', async () => {
+    const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
+
+    await entrypoint.purge([]);
+
+    expect(purgeCalls).toEqual([]);
+  });
+
+  it('rejects when Workers Cache returns a failed purge result', async () => {
+    const { entrypoint } = createCachedTableReadsHarness(createEnv(), {
+      purgeResultShouldFail: true
+    });
+
+    await expect(entrypoint.purge([{ kind: 'table', projectSlug: 'demo', tableSlug: 'users' }])).rejects.toThrow(
+      'Workers Cache purge was unsuccessful: 1000: Workers Cache purge was rejected for test.'
+    );
+  });
+
+  it('stops after the first rejected purge request instead of spending more of the purge budget', async () => {
+    const { entrypoint, purgeCalls } = createCachedTableReadsHarness(createEnv(), {
+      workersCache: new WorkersCacheEmulator({ purgeBurst: 1 })
+    });
+    const targets = Array.from({ length: 250 }, (_, index) => ({ kind: 'project' as const, projectSlug: `project-${index}` }));
+
+    await expect(entrypoint.purge(targets)).rejects.toThrow('Workers Cache purge was unsuccessful: 429');
+
+    expect(purgeCalls).toHaveLength(2);
   });
 });
 
@@ -729,78 +780,12 @@ describe('api routes', () => {
         resourceState: 'update'
       })
     }));
-    expect(env.__controlPlaneRequests).toContainEqual(expect.objectContaining({
+    expect(env.__controlPlaneRequests).not.toContainEqual(expect.objectContaining({
       type: 'control.projects.list'
     }));
     expectCachedReadPurgeCalls(env, [
       ['project:demo']
     ]);
-  });
-
-  it('returns a controlled service unavailable error when an accepted Drive notification gets an unexpected project list response', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const app = createApp();
-    const path = '/v1/system/google/drive/notifications';
-
-    try {
-      const response = await app.request(
-        path,
-        {
-          method: 'POST',
-          headers: {
-            'x-goog-channel-id': 'channel-1',
-            'x-goog-resource-id': 'resource-1',
-            'x-goog-resource-state': 'update',
-            'x-goog-message-number': '2',
-            'x-goog-channel-token': 'drive-secret'
-          }
-        },
-        createEnv({ controlProjectsListUnexpectedResponse: true })
-      );
-
-      expect(response.status).toBe(503);
-      const responseBody: unknown = await response.json();
-      expect(responseBody).toEqual({
-        error: {
-          code: 'SERVICE_UNAVAILABLE',
-          message: 'Unexpected control plane projects list response.',
-          details: null
-        }
-      });
-
-      const requestId = response.headers.get('x-request-id');
-      expect(requestId).toEqual(expect.any(String));
-      if (requestId === null) {
-        throw new Error('Expected the response to include a request ID.');
-      }
-      const matchingEvents = errorSpy.mock.calls.flatMap(([errorLog]) => {
-        if (typeof errorLog !== 'string') {
-          return [];
-        }
-        try {
-          const event: unknown = JSON.parse(errorLog);
-          const identity = z.object({
-            event: z.literal('request.error'),
-            path: z.literal(path),
-            requestId: z.literal(requestId)
-          }).safeParse(event);
-          return identity.success ? [event] : [];
-        } catch {
-          return [];
-        }
-      });
-      expect(matchingEvents).toHaveLength(1);
-      expect(matchingEvents[0]).toMatchObject({
-        event: 'request.error',
-        method: 'POST',
-        path,
-        requestId,
-        errorName: 'ServiceUnavailableError',
-        errorMessage: 'Unexpected control plane projects list response.'
-      });
-    } finally {
-      errorSpy.mockRestore();
-    }
   });
 
   it('returns a controlled service unavailable error before project lookup when a Drive notification gets an unexpected notify response', async () => {
@@ -1639,8 +1624,8 @@ describe('api routes', () => {
     ]);
   });
 
-  it('returns a committed row creation with a warning and structured log when cache invalidation fails', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  it('returns a committed row creation unchanged and only logs when cache invalidation fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const app = createApp();
     const env = createEnv({ cachedReadPurgeShouldFail: true }) as Env & {
       __tableRequests: Array<{ type: string }>;
@@ -1666,7 +1651,7 @@ describe('api routes', () => {
       );
 
       expect(response.status).toBe(201);
-      expect(response.headers.get('x-sheetflare-cache-invalidation')).toBe('failed');
+      expect(response.headers.get('x-sheetflare-cache-invalidation')).toBeNull();
       expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
       expect(response.headers.get('cache-tag')).toBeNull();
       const requestId = response.headers.get('x-request-id');
@@ -1685,13 +1670,13 @@ describe('api routes', () => {
       expectCachedReadPurgeCalls(env, [
         ['table:demo:users']
       ]);
-      expect(errorSpy).toHaveBeenCalledTimes(1);
-      const errorLog = errorSpy.mock.calls[0]?.[0];
-      expect(errorLog).toEqual(expect.any(String));
-      if (typeof errorLog !== 'string') {
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const warnLog = warnSpy.mock.calls[0]?.[0];
+      expect(warnLog).toEqual(expect.any(String));
+      if (typeof warnLog !== 'string') {
         throw new Error('Expected cache invalidation failure to emit a JSON log line.');
       }
-      const event: unknown = JSON.parse(errorLog);
+      const event: unknown = JSON.parse(warnLog);
       expect(event).toEqual({
         event: 'cache.invalidation.failed',
         method: 'POST',
@@ -1701,7 +1686,7 @@ describe('api routes', () => {
         errorMessage: 'Workers Cache purge failed for test.'
       });
     } finally {
-      errorSpy.mockRestore();
+      warnSpy.mockRestore();
     }
   });
 
@@ -1994,10 +1979,8 @@ describe('api routes', () => {
     const exposedHeaders = response.headers.get('access-control-expose-headers')
       ?.split(',')
       .map((header) => header.trim().toLowerCase());
-    expect(exposedHeaders).toEqual(expect.arrayContaining([
-      'x-sheetflare-cache-status',
-      'x-sheetflare-cache-invalidation'
-    ]));
+    expect(exposedHeaders).toEqual(expect.arrayContaining(['x-sheetflare-cache-status']));
+    expect(exposedHeaders).not.toContain('x-sheetflare-cache-invalidation');
     expect(response.headers.get('vary')).toBe('Origin');
     expect(response.headers.get('x-ratelimit-limit')).toBe('300');
     expect(response.headers.get('x-ratelimit-remaining')).toBe('299');

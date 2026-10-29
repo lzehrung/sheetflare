@@ -39,6 +39,7 @@ import {
   reindexTableResultSchema,
   rowParamsSchema,
   tableConfigSchema,
+  spreadsheetWatchNotifyResultSchema,
   tableDataGenerationSchema,
   BadRequestError,
   ForbiddenError,
@@ -342,15 +343,13 @@ const webhookFailureBlocks = new Map<string, WebhookFailureBlock>();
 const corsAllowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
 const corsAllowedHeaders = 'Authorization, Content-Type';
 const cacheStatusHeaderName = 'x-sheetflare-cache-status';
-const cacheInvalidationHeaderName = 'x-sheetflare-cache-invalidation';
 const corsExposedHeaders = [
   'X-Request-Id',
   'X-RateLimit-Limit',
   'X-RateLimit-Remaining',
   'X-RateLimit-Reset',
   'Retry-After',
-  cacheStatusHeaderName,
-  cacheInvalidationHeaderName
+  cacheStatusHeaderName
 ].join(', ');
 
 // Makes room for one more entry: drops expired entries first, then the oldest ones.
@@ -1314,49 +1313,54 @@ async function getTableCacheStatusData(c: AppContext, projectSlug: string, table
   return response.result.data;
 }
 
-async function invalidateCachedProject(projectSlug: string) {
-  await workerExports.CachedTableReads.invalidateProject(projectSlug);
-}
-
-async function invalidateCachedTable(projectSlug: string, tableSlug: string) {
-  await workerExports.CachedTableReads.invalidateTable(projectSlug, tableSlug);
-}
-
-async function invalidateCachedRow(projectSlug: string, tableSlug: string, rowId: string) {
-  await workerExports.CachedTableReads.invalidateRow(projectSlug, tableSlug, rowId);
-}
-
-async function invalidateAfterCommittedChange(c: AppContext, invalidate: () => Promise<void>) {
+// Hono throws when a request was dispatched without an ExecutionContext, as unit tests calling `app.request` do. The
+// Workers runtime always supplies one.
+function getExecutionContext(c: AppContext) {
   try {
-    await invalidate();
+    return c.executionCtx;
+  } catch {
+    return null;
+  }
+}
+
+type CachePurgeLogContext = { method: string; path: string; requestId: string };
+
+// A purge failure never reaches the client. It is logged for operators, and the next request is served as usual.
+async function purgeCachedEntriesQuietly(context: CachePurgeLogContext, targets: readonly CachePurgeTarget[]) {
+  try {
+    await workerExports.CachedTableReads.purge(targets);
   } catch (error) {
     const normalizedError = normalizeRequestError(error);
-    c.header(cacheInvalidationHeaderName, 'failed');
-    console.error(JSON.stringify({
+    console.warn(JSON.stringify({
       event: 'cache.invalidation.failed',
-      method: c.req.method,
-      path: c.req.path,
-      requestId: c.get('requestId'),
+      ...context,
       errorName: normalizedError instanceof Error ? normalizedError.name : 'UnknownError',
       errorMessage: normalizedError instanceof Error ? normalizedError.message : String(normalizedError)
     }));
   }
 }
 
-async function invalidateCachedProjectsForSpreadsheet(c: AppContext, spreadsheetId: string) {
-  const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
-    type: 'control.projects.list'
-  });
-  if (response.type !== 'control.projects.list.result') {
-    throw new ServiceUnavailableError('Unexpected control plane projects list response.');
+// Cached reads are keyed by the table's data generation, so an edge entry a committed change superseded can no longer be
+// served, and freshness never depends on this purge. It only frees edge storage ahead of the entry's TTL. That makes it
+// best-effort: one batched call per request, started after the change is committed and finished through waitUntil so the
+// response never waits for it. Workers Cache purge always uses Free-tier limits (a burst of 25 requests, then 5 a
+// minute), so on a busy table most of these calls are expected to be rejected.
+async function purgeCachedEntries(c: AppContext, targets: readonly CachePurgeTarget[]) {
+  if (targets.length === 0) {
+    return;
   }
-  const result = response.result;
 
-  for (const project of result.data) {
-    if (project.spreadsheetId === spreadsheetId) {
-      await invalidateAfterCommittedChange(c, () => invalidateCachedProject(project.slug));
-    }
+  const purge = purgeCachedEntriesQuietly(
+    { method: c.req.method, path: c.req.path, requestId: c.get('requestId') },
+    targets
+  );
+  const executionCtx = getExecutionContext(c);
+  if (executionCtx) {
+    executionCtx.waitUntil(purge);
+    return;
   }
+
+  await purge;
 }
 
 async function getApiKeyRecord(c: { env: Env }, apiKeyId: string) {
@@ -2424,6 +2428,36 @@ function getRowCacheTag(projectSlug: string, tableSlug: string, rowId: string) {
   return `row:${encodeCacheTagPart(projectSlug)}:${encodeCacheTagPart(tableSlug)}:${encodeCacheTagPart(rowId)}`;
 }
 
+// Workers Cache accepts at most this many tags in one purge request.
+const maxPurgeTagsPerRequest = 100;
+
+export type CachePurgeTarget =
+  | { kind: 'project'; projectSlug: string }
+  | { kind: 'table'; projectSlug: string; tableSlug: string }
+  | { kind: 'row'; projectSlug: string; tableSlug: string; rowId: string };
+
+// The tags the targets cover, once each. A row whose tag cannot be a valid Cache-Tag has no entry stored under it, so
+// its table tag alone covers it.
+function collectPurgeTags(targets: readonly CachePurgeTarget[]) {
+  const tags = new Set<string>();
+  for (const target of targets) {
+    if (target.kind === 'project') {
+      tags.add(getProjectCacheTag(target.projectSlug));
+      continue;
+    }
+
+    tags.add(getTableCacheTag(target.projectSlug, target.tableSlug));
+    if (target.kind === 'row') {
+      const rowTag = getRowCacheTag(target.projectSlug, target.tableSlug, target.rowId);
+      if (isValidCacheTag(rowTag)) {
+        tags.add(rowTag);
+      }
+    }
+  }
+
+  return [...tags];
+}
+
 export class CachedTableReads extends WorkerEntrypoint<Env, CachedTableReadProps> {
   async fetch(request: Request): Promise<Response> {
     if (request.method === 'HEAD') {
@@ -2460,36 +2494,28 @@ export class CachedTableReads extends WorkerEntrypoint<Env, CachedTableReadProps
     }
   }
 
-  private async purgeTags(tags: string[]): Promise<void> {
+  // Deletes the edge entries the targets superseded. The gateway calls it over RPC as best-effort cleanup: reads are
+  // keyed by the table's data generation, so freshness never depends on a purge. Tags go out in as few purge requests
+  // as the limit of 100 tags per request allows.
+  async purge(targets: readonly CachePurgeTarget[]): Promise<void> {
+    const tags = collectPurgeTags(targets);
+    if (tags.length === 0) {
+      return;
+    }
+
     const workerCache = this.ctx.cache;
     if (!workerCache) {
       throw new ServiceUnavailableError('Workers Cache purge API is unavailable.');
     }
 
-    const result = await workerCache.purge({ tags });
-    if (!result.success) {
-      const failures = result.errors.map(({ code, message }) => `${code}: ${message}`).join('; ');
-      const suffix = failures ? `: ${failures}` : '.';
-      throw new Error(`Workers Cache purge was unsuccessful${suffix}`);
+    for (let start = 0; start < tags.length; start += maxPurgeTagsPerRequest) {
+      const result = await workerCache.purge({ tags: tags.slice(start, start + maxPurgeTagsPerRequest) });
+      if (!result.success) {
+        const failures = result.errors.map(({ code, message }) => `${code}: ${message}`).join('; ');
+        const suffix = failures ? `: ${failures}` : '.';
+        throw new Error(`Workers Cache purge was unsuccessful${suffix}`);
+      }
     }
-  }
-
-  async invalidateProject(projectSlug: string): Promise<void> {
-    await this.purgeTags([getProjectCacheTag(projectSlug)]);
-  }
-
-  async invalidateTable(projectSlug: string, tableSlug: string): Promise<void> {
-    await this.purgeTags([getTableCacheTag(projectSlug, tableSlug)]);
-  }
-
-  async invalidateRow(projectSlug: string, tableSlug: string, rowId: string): Promise<void> {
-    const tags = [getTableCacheTag(projectSlug, tableSlug)];
-    const rowTag = getRowCacheTag(projectSlug, tableSlug, rowId);
-    if (isValidCacheTag(rowTag)) {
-      tags.push(rowTag);
-    }
-
-    await this.purgeTags(tags);
   }
 }
 
@@ -2805,7 +2831,7 @@ function createApp() {
       result: { data: AdminGetProjectResult; created: boolean };
     }).result;
     if (!result.created) {
-      await invalidateAfterCommittedChange(c, () => invalidateCachedProject(result.data.project.slug));
+      await purgeCachedEntries(c, [{ kind: 'project', projectSlug: result.data.project.slug }]);
     }
     return c.json(result.data, result.created ? 201 : 200);
   });
@@ -2827,7 +2853,7 @@ function createApp() {
       type: 'project.delete.result';
       result: DeleteProjectResult;
     }).result;
-    await invalidateAfterCommittedChange(c, () => invalidateCachedProject(project));
+    await purgeCachedEntries(c, [{ kind: 'project', projectSlug: project }]);
 
     return c.json(result);
   });
@@ -2899,7 +2925,7 @@ function createApp() {
       result: { data: UpsertTableResult['data']; created: boolean };
     }).result;
     if (!result.created) {
-      await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, result.data.tableSlug));
+      await purgeCachedEntries(c, [{ kind: 'table', projectSlug: project, tableSlug: result.data.tableSlug }]);
     }
     return c.json(
       { data: result.data },
@@ -2921,7 +2947,7 @@ function createApp() {
       type: 'project.table.delete.result';
       result: DeleteTableResult;
     }).result;
-    await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
+    await purgeCachedEntries(c, [{ kind: 'table', projectSlug: project, tableSlug: table }]);
 
     return c.json(result);
   });
@@ -2972,7 +2998,7 @@ function createApp() {
       throw new ServiceUnavailableError('Unexpected table cache refresh response.');
     }
     if (cacheStatusBeforeRefresh.status !== 'ready' || cacheStatusBeforeRefresh.stale) {
-      await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
+      await purgeCachedEntries(c, [{ kind: 'table', projectSlug: project, tableSlug: table }]);
     }
     return c.json(response.result);
   });
@@ -2991,7 +3017,7 @@ function createApp() {
     if (response.type !== 'table.reindex.result') {
       throw new ServiceUnavailableError('Unexpected table reindex response.');
     }
-    await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
+    await purgeCachedEntries(c, [{ kind: 'table', projectSlug: project, tableSlug: table }]);
     return c.json(response.result);
   });
 
@@ -3100,9 +3126,18 @@ function createApp() {
     if (response.type !== 'control.spreadsheet-watch.notify.result') {
       throw new ServiceUnavailableError('Unexpected control plane spreadsheet watch notify response.');
     }
-    const result = response.result;
-    if (result.accepted && result.spreadsheetId && result.debounceUntil) {
-      await invalidateCachedProjectsForSpreadsheet(c, result.spreadsheetId);
+    const notified = spreadsheetWatchNotifyResultSchema.safeParse(response.result);
+    if (!notified.success) {
+      throw new ServiceUnavailableError('Unexpected control plane spreadsheet watch notify response.');
+    }
+    // Only a notification that recorded a new content change can have superseded cached reads. Sync messages and
+    // replayed or out-of-order deliveries change nothing, so they cost no purge. The result names the projects on the
+    // spreadsheet, which spares the registry scan.
+    if (notified.data.changed) {
+      await purgeCachedEntries(
+        c,
+        notified.data.projectSlugs.map((projectSlug): CachePurgeTarget => ({ kind: 'project', projectSlug }))
+      );
     }
 
     return new Response(null, { status: 204 });
@@ -3134,7 +3169,7 @@ function createApp() {
     if (response.type !== 'table.row.create.result') {
       throw new ServiceUnavailableError('Unexpected table row create response.');
     }
-    await invalidateAfterCommittedChange(c, () => invalidateCachedTable(project, table));
+    await purgeCachedEntries(c, [{ kind: 'table', projectSlug: project, tableSlug: table }]);
     return c.json(response.result, 201);
   });
 
@@ -3155,7 +3190,7 @@ function createApp() {
     if (response.type !== 'table.row.update.result') {
       throw new ServiceUnavailableError('Unexpected table row update response.');
     }
-    await invalidateAfterCommittedChange(c, () => invalidateCachedRow(project, table, id));
+    await purgeCachedEntries(c, [{ kind: 'row', projectSlug: project, tableSlug: table, rowId: id }]);
     return c.json(response.result);
   });
 
@@ -3174,7 +3209,7 @@ function createApp() {
     if (response.type !== 'table.row.delete.result') {
       throw new ServiceUnavailableError('Unexpected table row delete response.');
     }
-    await invalidateAfterCommittedChange(c, () => invalidateCachedRow(project, table, id));
+    await purgeCachedEntries(c, [{ kind: 'row', projectSlug: project, tableSlug: table, rowId: id }]);
     return c.json(response.result);
   });
 

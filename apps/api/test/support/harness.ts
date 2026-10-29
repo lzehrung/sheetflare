@@ -12,7 +12,7 @@ import {
   type TableDoResponse
 } from '@sheetflare/contracts';
 import type { Env } from '../../src/env';
-import { CachedTableReads, type CachedTableReadProps } from '../../src/index';
+import { CachedTableReads, type CachePurgeTarget, type CachedTableReadProps } from '../../src/index';
 import type { WorkersCacheEmulator } from './workers-cache';
 import { apiKeyFixtures } from './api-keys';
 
@@ -149,7 +149,6 @@ export function createEnv(options?: {
   tableCacheClearStatus?: 200 | 503;
   tableCacheGetUnexpectedResponse?: boolean;
   tableUnexpectedResponseFor?: UnexpectedTableResponseRequest;
-  controlProjectsListUnexpectedResponse?: boolean;
   controlSpreadsheetWatchNotifyUnexpectedResponse?: boolean;
   tableRowsListStatus?: 200 | 503;
   tableCacheTtlSeconds?: number;
@@ -399,14 +398,6 @@ export function createEnv(options?: {
           changed: true,
           projectSlugs: ['demo']
         }
-      } satisfies ControlPlaneDoResponse;
-      return Response.json(response);
-    }
-
-    if (body.type === 'control.projects.list' && options?.controlProjectsListUnexpectedResponse === true) {
-      const response = {
-        type: 'control.project.upsert.result',
-        result: { ok: true }
       } satisfies ControlPlaneDoResponse;
       return Response.json(response);
     }
@@ -1013,26 +1004,12 @@ export function createEnv(options?: {
     {
       fetch: (request: Request, init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]) =>
         fetchCachedTableRead(defaultCachedTableReadProps, request, init),
-      async invalidateProject(projectSlug: string) {
+      async purge(targets: readonly CachePurgeTarget[]) {
         await createCachedTableReadsHarness(env, {
           purgeCalls: cachedReadPurgeCalls,
           purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false,
           workersCache: options?.workersCache
-        }).entrypoint.invalidateProject(projectSlug);
-      },
-      async invalidateTable(projectSlug: string, tableSlug: string) {
-        await createCachedTableReadsHarness(env, {
-          purgeCalls: cachedReadPurgeCalls,
-          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false,
-          workersCache: options?.workersCache
-        }).entrypoint.invalidateTable(projectSlug, tableSlug);
-      },
-      async invalidateRow(projectSlug: string, tableSlug: string, rowId: string) {
-        await createCachedTableReadsHarness(env, {
-          purgeCalls: cachedReadPurgeCalls,
-          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false,
-          workersCache: options?.workersCache
-        }).entrypoint.invalidateRow(projectSlug, tableSlug, rowId);
+        }).entrypoint.purge(targets);
       }
     }
   );
