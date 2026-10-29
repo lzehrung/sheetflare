@@ -5263,6 +5263,39 @@ describe('TableDO', () => {
     });
   });
 
+  it('applies id filters identically on indexed and scan paths, including numeric and boolean operands', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['5', 'Ada'],
+        ['6', 'Bea'],
+        ['10', 'Cora'],
+        ['true', 'Dora']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+
+    // Every name contains "a", so the second query is identical except that it must run as a scan.
+    const idsOnBothPaths = async (filter: NonNullable<ListRowsQuery['filter']>) => {
+      const indexed = await listUsers(env, { filter });
+      const scanned = await listUsers(env, { filter: { ...filter, name: { contains: 'a' } } });
+      return { indexed: indexed.data.map((row) => row.id), scanned: scanned.data.map((row) => row.id) };
+    };
+
+    await expect(idsOnBothPaths({ id: { eq: 5 } })).resolves.toEqual({ indexed: ['5'], scanned: ['5'] });
+    await expect(idsOnBothPaths({ id: { eq: '5' } })).resolves.toEqual({ indexed: ['5'], scanned: ['5'] });
+    await expect(idsOnBothPaths({ id: { neq: 5 } })).resolves.toEqual({ indexed: ['6', '10', 'true'], scanned: ['6', '10', 'true'] });
+    await expect(idsOnBothPaths({ id: { in: [5, '6', false] } })).resolves.toEqual({ indexed: ['5', '6'], scanned: ['5', '6'] });
+    await expect(idsOnBothPaths({ id: { eq: true } })).resolves.toEqual({ indexed: ['true'], scanned: ['true'] });
+    // Range operators compare IDs as text on both paths: '10' sorts before '5'.
+    await expect(idsOnBothPaths({ id: { gt: 5 } })).resolves.toEqual({ indexed: ['6', 'true'], scanned: ['6', 'true'] });
+    await expect(idsOnBothPaths({ id: { gte: 10, lt: 6 } })).resolves.toEqual({ indexed: ['5', '10'], scanned: ['5', '10'] });
+    await expect(idsOnBothPaths({ id: { eq: "5' OR '1'='1" } })).resolves.toEqual({ indexed: [], scanned: [] });
+  });
+
   it('compares unique and filtered values through the field normalization rules', async () => {
     const sheet: SheetState = {
       rows: [
