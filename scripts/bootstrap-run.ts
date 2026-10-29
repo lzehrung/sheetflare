@@ -1,5 +1,7 @@
 import {
   assertPresent,
+  getProcessEnv,
+  isDirectScriptExecution,
   isEnvFlagEnabled,
   logStep,
   logSuccess,
@@ -26,7 +28,7 @@ type TableResponse = {
   };
 };
 
-async function main() {
+export async function runOpsBootstrap() {
   const baseUrl = requireEnv('SHEETFLARE_BASE_URL', 'Set SHEETFLARE_BASE_URL to the deployed API Worker URL.');
   const bearer = requireAdminCredential();
   const config = parseBootstrapConfig(readJsonEnv<BootstrapConfig>('SHEETFLARE_BOOTSTRAP_CONFIG_JSON'));
@@ -34,7 +36,7 @@ async function main() {
   assertRotationCanHandOffKeys({
     rotate: rotateKeys,
     showSecrets: shouldShowSecrets(),
-    capturedBySetup: process.env.SHEETFLARE_BOOTSTRAP_RESULT_MODE === 'full'
+    capturedBySetup: getProcessEnv().SHEETFLARE_BOOTSTRAP_RESULT_MODE === 'full'
   });
 
   for (const project of config.projects) {
@@ -95,12 +97,14 @@ async function main() {
     }))
   }, null, 2));
 
-  if (process.env.SHEETFLARE_BOOTSTRAP_RESULT_MODE === 'full') {
+  if (getProcessEnv().SHEETFLARE_BOOTSTRAP_RESULT_MODE === 'full') {
     console.log(`__SHEETFLARE_BOOTSTRAP_RESULT__=${JSON.stringify(output)}`);
   }
 }
 
-void main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+if (isDirectScriptExecution(import.meta.url)) {
+  void runOpsBootstrap().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}
