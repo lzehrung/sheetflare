@@ -68,7 +68,7 @@ type SpreadsheetWatchRow = {
 
 type SpreadsheetWatchRenewalRow = Pick<
   SpreadsheetWatchRow,
-  'spreadsheet_id' | 'expiration_at' | 'expiration_duration_ms' | 'last_watch_error' | 'updated_at'
+  'spreadsheet_id' | 'channel_id' | 'expiration_at' | 'expiration_duration_ms' | 'last_watch_error' | 'updated_at'
 >;
 
 type SpreadsheetWatchTombstoneRow = {
@@ -118,6 +118,7 @@ const unexpectedReindexErrorMessage = 'Reindex failed unexpectedly. See the driv
 const unexpectedWatchErrorMessage = 'Watch renewal failed unexpectedly. See the drive.watch.renew.failed log event for details.';
 const driveWatchQuotaErrorMessage = 'Google Drive rate limit exceeded for creating file subscriptions.';
 const credentialConflictChannelPrefix = 'credential-conflict:';
+const credentialConflictChannelLike = `${credentialConflictChannelPrefix}%`;
 
 // GoogleSheetsService sets this flag and omits Google's message. Detection uses only the flag.
 const driveWatchQuotaErrorDetailsSchema = z.object({
@@ -528,11 +529,17 @@ export class ControlPlaneDO {
       WHERE pending_changed_at IS NOT NULL
         AND debounce_until IS NOT NULL
         AND debounce_until <= ?
+        AND channel_id NOT LIKE ?
       ORDER BY debounce_until ASC, spreadsheet_id ASC
       `,
-      new Date(nowMs).toISOString()
+      new Date(nowMs).toISOString(),
+      credentialConflictChannelLike
     ).toArray() as SpreadsheetWatchRow[];
     const dueRenewals = this.listSpreadsheetWatches().filter((watch) => {
+      if (!isActiveGoogleSpreadsheetWatch(watch)) {
+        return false;
+      }
+
       const renewAtMs = this.getWatchRenewAtMs(watch);
       return renewAtMs !== null && renewAtMs <= nowMs;
     });
@@ -774,8 +781,10 @@ export class ControlPlaneDO {
     const stopped: AdminRegisterSpreadsheetWatchesResult['data'] = [];
 
     for (const watch of watches) {
-      await this.stopExistingSpreadsheetWatch(watch);
-      this.recordSpreadsheetWatchTombstone(watch);
+      if (isActiveGoogleSpreadsheetWatch(watch)) {
+        await this.stopExistingSpreadsheetWatch(watch);
+        this.recordSpreadsheetWatchTombstone(watch);
+      }
       stopped.push(
         this.mapSpreadsheetWatch(watch, projectSlugsBySpreadsheetId.get(watch.spreadsheet_id) ?? [])
       );
@@ -808,16 +817,22 @@ export class ControlPlaneDO {
     );
     const nextMessageNumber = normalizeMessageNumber(messageNumber);
 
-    if (!watch || watch.resource_id !== resourceId) {
+    if (!watch || !isActiveGoogleSpreadsheetWatch(watch) || watch.resource_id !== resourceId) {
       // Expected for channels that were replaced or stopped and still deliver until they expire; a steady stream for a
-      // current channel points at a watch the control plane lost track of.
+      // current channel points at a watch the control plane lost track of. Conflict placeholders are not channels.
+      let reason: 'unknown-channel' | 'credential-conflict' | 'resource-mismatch' = 'resource-mismatch';
+      if (!watch) {
+        reason = 'unknown-channel';
+      } else if (!isActiveGoogleSpreadsheetWatch(watch)) {
+        reason = 'credential-conflict';
+      }
       console.warn(JSON.stringify({
         event: 'drive.notification.rejected',
         channelId,
         resourceId,
         resourceState,
         messageNumber,
-        reason: watch ? 'resource-mismatch' : 'unknown-channel'
+        reason
       }));
       return {
         accepted: false,
@@ -1047,14 +1062,23 @@ export class ControlPlaneDO {
   private listSpreadsheetWatchRetryAdviceForAdmin(): AdminListSpreadsheetWatchRetryAdviceResult {
     const projectSlugsBySpreadsheetId = this.getProjectSlugsBySpreadsheetId();
     const activeWatchesBySpreadsheetId = new Map(
-      this.listSpreadsheetWatches().map((watch) => [watch.spreadsheet_id, watch] as const)
+      this.listSpreadsheetWatches()
+        .filter((watch) => isActiveGoogleSpreadsheetWatch(watch))
+        .map((watch) => [watch.spreadsheet_id, watch] as const)
     );
+    const conflictingRefsBySpreadsheetId = new Map<string, readonly string[]>();
+    for (const registration of this.getSpreadsheetRegistrations()) {
+      if (registration.conflictingGoogleCredentialRefs) {
+        conflictingRefsBySpreadsheetId.set(registration.spreadsheetId, registration.conflictingGoogleCredentialRefs);
+      }
+    }
     const tombstonesBySpreadsheetId = new Map(
       this.listSpreadsheetWatchTombstones().map((row) => [row.spreadsheet_id, row] as const)
     );
     const spreadsheetIds = new Set<string>([
       ...projectSlugsBySpreadsheetId.keys(),
       ...activeWatchesBySpreadsheetId.keys(),
+      ...conflictingRefsBySpreadsheetId.keys(),
       ...tombstonesBySpreadsheetId.keys()
     ]);
 
@@ -1066,7 +1090,8 @@ export class ControlPlaneDO {
             spreadsheetId,
             activeWatchesBySpreadsheetId.get(spreadsheetId) ?? null,
             tombstonesBySpreadsheetId.get(spreadsheetId) ?? null,
-            projectSlugsBySpreadsheetId.get(spreadsheetId) ?? []
+            projectSlugsBySpreadsheetId.get(spreadsheetId) ?? [],
+            conflictingRefsBySpreadsheetId.get(spreadsheetId) ?? null
           )
         )
     };
@@ -1113,6 +1138,11 @@ export class ControlPlaneDO {
     const registeredSpreadsheetIds = this.getProjectSlugsBySpreadsheetId();
     for (const watch of this.listSpreadsheetWatches()) {
       if (registeredSpreadsheetIds.has(watch.spreadsheet_id)) {
+        continue;
+      }
+
+      if (!isActiveGoogleSpreadsheetWatch(watch)) {
+        this.deleteSpreadsheetWatch(watch.spreadsheet_id);
         continue;
       }
 
@@ -1243,8 +1273,10 @@ export class ControlPlaneDO {
           stoppedExistingWatch: true
         };
       } catch (retryError) {
-        this.recordSpreadsheetWatchTombstone(existingWatch);
-        this.deleteSpreadsheetWatch(existingWatch.spreadsheet_id);
+        if (isActiveGoogleSpreadsheetWatch(existingWatch)) {
+          this.recordSpreadsheetWatchTombstone(existingWatch);
+          this.deleteSpreadsheetWatch(existingWatch.spreadsheet_id);
+        }
         await this.scheduleNextAlarm();
         throw retryError;
       }
@@ -1262,6 +1294,10 @@ export class ControlPlaneDO {
   }
 
   private async renewSpreadsheetWatch(watch: SpreadsheetWatchRow) {
+    if (!isActiveGoogleSpreadsheetWatch(watch)) {
+      return;
+    }
+
     const credentialRefs = this.listSpreadsheetCredentialRefs(watch.spreadsheet_id);
     if (credentialRefs.length > 1) {
       this.recordWatchRenewalFailure(watch, describeCredentialRefConflict(watch.spreadsheet_id, credentialRefs), null);
@@ -1595,9 +1631,11 @@ export class ControlPlaneDO {
       FROM spreadsheet_watches
       WHERE pending_changed_at IS NOT NULL
         AND debounce_until IS NOT NULL
+        AND channel_id NOT LIKE ?
       ORDER BY debounce_until ASC
       LIMIT 1
-      `
+      `,
+      credentialConflictChannelLike
     );
 
     if (!next?.debounce_until) {
@@ -1613,12 +1651,18 @@ export class ControlPlaneDO {
 
     for (const watch of this.selectRows<SpreadsheetWatchRenewalRow>(
       `
-      SELECT spreadsheet_id, expiration_at, expiration_duration_ms, last_watch_error, updated_at
+      SELECT spreadsheet_id, channel_id, expiration_at, expiration_duration_ms, last_watch_error, updated_at
       FROM spreadsheet_watches
       WHERE expiration_at IS NOT NULL
+        AND channel_id NOT LIKE ?
       ORDER BY expiration_at ASC, spreadsheet_id ASC
-      `
+      `,
+      credentialConflictChannelLike
     )) {
+      if (!isActiveGoogleSpreadsheetWatch(watch)) {
+        continue;
+      }
+
       const renewAtMs = this.getWatchRenewAtMs(watch);
       if (renewAtMs === null) {
         continue;
@@ -1725,7 +1769,8 @@ export class ControlPlaneDO {
     spreadsheetId: string,
     activeWatch: SpreadsheetWatchRow | null,
     tombstone: SpreadsheetWatchTombstoneRow | null,
-    projectSlugs: string[]
+    projectSlugs: string[],
+    conflictingGoogleCredentialRefs: readonly string[] | null
   ): AdminListSpreadsheetWatchRetryAdviceResult['data'][number] {
     if (activeWatch) {
       return {
@@ -1736,6 +1781,20 @@ export class ControlPlaneDO {
         lastKnownExpirationAt: tombstone?.expiration_at ?? null,
         safeRetryAt: null,
         note: 'A known Drive watch is still active for this spreadsheet.',
+        projectSlugs
+      };
+    }
+
+    if (conflictingGoogleCredentialRefs && conflictingGoogleCredentialRefs.length > 1) {
+      const safeRetryAt = getActiveWatchCooldownUntil(tombstone);
+      return {
+        spreadsheetId,
+        status: 'credential-conflict',
+        currentWatchExpirationAt: null,
+        lastKnownStoppedAt: tombstone?.stopped_at ?? null,
+        lastKnownExpirationAt: tombstone?.expiration_at ?? null,
+        safeRetryAt,
+        note: describeCredentialConflictRetryNote(spreadsheetId, conflictingGoogleCredentialRefs, safeRetryAt),
         projectSlugs
       };
     }
@@ -1838,6 +1897,42 @@ function describeCredentialRefConflict(spreadsheetId: string, googleCredentialRe
 
 function isCredentialConflictPlaceholder(channelId: string) {
   return channelId.startsWith(credentialConflictChannelPrefix);
+}
+
+function isActiveGoogleSpreadsheetWatch(watch: Pick<SpreadsheetWatchRow, 'channel_id'>) {
+  return !isCredentialConflictPlaceholder(watch.channel_id);
+}
+
+function getActiveWatchCooldownUntil(tombstone: SpreadsheetWatchTombstoneRow | null) {
+  if (!tombstone) {
+    return null;
+  }
+
+  const safeRetryAt = getSpreadsheetWatchSafeRetryAt(tombstone);
+  if (!safeRetryAt) {
+    return null;
+  }
+
+  const safeRetryAtMs = Date.parse(safeRetryAt);
+  if (Number.isNaN(safeRetryAtMs) || safeRetryAtMs <= Date.now()) {
+    return null;
+  }
+
+  return safeRetryAt;
+}
+
+function describeCredentialConflictRetryNote(
+  spreadsheetId: string,
+  googleCredentialRefs: readonly string[],
+  cooldownUntil: string | null
+) {
+  const conflict = describeCredentialRefConflict(spreadsheetId, googleCredentialRefs);
+  const recovery = 'No Google Drive watch is active. Align googleCredentialRef on every project for this spreadsheet, then register watches again.';
+  if (!cooldownUntil) {
+    return `${conflict} ${recovery}`;
+  }
+
+  return `${conflict} ${recovery} A previously stopped Google channel stays in cooldown until ${cooldownUntil}.`;
 }
 
 function isDriveWatchSubscriptionQuotaError(error: unknown) {

@@ -111,7 +111,7 @@ export const adminStopSpreadsheetWatchesInputSchema = z.object({
 
 export const spreadsheetWatchRetryAdviceSchema = z.object({
   spreadsheetId: spreadsheetIdSchema,
-  status: z.enum(['active-watch-present', 'cooldown-recommended', 'ready-to-retry']),
+  status: z.enum(['active-watch-present', 'cooldown-recommended', 'ready-to-retry', 'credential-conflict']),
   currentWatchExpirationAt: z.string().datetime().nullable(),
   lastKnownStoppedAt: z.string().datetime().nullable(),
   lastKnownExpirationAt: z.string().datetime().nullable(),
