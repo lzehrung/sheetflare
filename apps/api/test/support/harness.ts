@@ -85,7 +85,8 @@ const resolvedTableConfigSnapshot = resolvedTableConfigSnapshotSchema.parse({
 export const cannedTableSyncCompletedAt = '2026-04-26T00:00:01.000Z';
 
 export const defaultCachedTableReadProps: CachedTableReadProps = {
-  resolvedConfig: resolvedTableConfigSnapshot
+  resolvedConfig: resolvedTableConfigSnapshot,
+  dataGeneration: 0
 };
 
 class FakeDurableObjectStub {
@@ -116,6 +117,8 @@ export type EnvProbes = {
   controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }>;
   durableObjectRequests: string[];
   cachedReadRequests: CachedReadRequestRecord[];
+  /** The `ctx.props` of every cached-read invocation, in order. */
+  cachedReadProps: CachedTableReadProps[];
   cachedReadPurgeCalls: CachePurgeCall[];
   readonly verifyApiKeyCallCount: number;
   readonly apiKeyTouchCallCount: number;
@@ -183,6 +186,7 @@ export function createEnv(options?: {
   const controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> = [];
   const durableObjectRequests: string[] = [];
   const cachedReadRequests: CachedReadRequestRecord[] = [];
+  const cachedReadProps: CachedTableReadProps[] = [];
   const cachedReadPurgeCalls: CachePurgeCall[] = [];
   let verifyApiKeyCallCount = 0;
   let apiKeyTouchCallCount = 0;
@@ -974,6 +978,7 @@ export function createEnv(options?: {
     request: Request,
     init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]
   ) => {
+    cachedReadProps.push(props);
     cachedReadRequests.push({
       url: request.url,
       method: request.method,
@@ -1076,6 +1081,7 @@ export function createEnv(options?: {
     controlPlaneRequests,
     durableObjectRequests,
     cachedReadRequests,
+    cachedReadProps,
     cachedReadPurgeCalls,
     get verifyApiKeyCallCount() {
       return verifyApiKeyCallCount;

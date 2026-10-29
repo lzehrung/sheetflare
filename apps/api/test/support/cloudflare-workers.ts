@@ -33,6 +33,7 @@ export type CachedWorkerEntrypoint = {
 
 export type CachedWorkerEntrypointProps = Readonly<{
   resolvedConfig: ResolvedTableConfigSnapshot;
+  dataGeneration: number;
 }>;
 
 export type CachedWorkerEntrypointBinding = CachedWorkerEntrypoint &

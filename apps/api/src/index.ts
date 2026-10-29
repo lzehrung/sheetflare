@@ -39,6 +39,7 @@ import {
   reindexTableResultSchema,
   rowParamsSchema,
   tableConfigSchema,
+  tableDataGenerationSchema,
   BadRequestError,
   ForbiddenError,
   NotFoundError,
@@ -72,6 +73,7 @@ import {
   type ResolvedProjectTableResult,
   type ResolvedTableConfigSnapshot,
   type RateLimitDoResponse,
+  type TableDataGeneration,
   type TableDoResponse,
   TooManyRequestsError,
   type UpdateRowInput,
@@ -1176,37 +1178,13 @@ function grantsTableRead(auth: AuthContext) {
   return auth.kind === 'bootstrap-admin' || (auth.kind === 'api-key' && hasScope(auth.record, 'table:read'));
 }
 
-// Table reads wait on the caller's rate limit and on the table lookup. Neither depends on the other, so once the
-// caller is known and its key is allowed near this project at all, both run together. A key that may not touch the
-// project never causes a project lookup.
-async function authorizeTableRead(c: AppContext, projectSlug: string, tableSlug: string) {
-  const auth = await identifyCaller(c);
-  assertCredentialProjectBoundary(auth, projectSlug);
+type TableReadTarget = {
+  tableAccess: ResolvedProjectTableResult;
+  /** The table's data generation just before the read. Cached reads are keyed by it. */
+  generation: TableDataGeneration;
+};
 
-  const resolution = settle(loadProjectTable(c, projectSlug, tableSlug));
-  await completeAuthentication(c, auth);
-  const resolved = await resolution;
-
-  if (grantsTableRead(auth)) {
-    if (!resolved.ok) {
-      throw resolved.reason;
-    }
-
-    return resolved.value;
-  }
-
-  // Callers without a read grant may only read public-read projects. Private projects, missing projects, and missing
-  // tables all get the same denial, so the response never reveals which of them exist.
-  if (resolved.ok && resolved.value.project.defaultAuthMode === 'public-read') {
-    return resolved.value;
-  }
-
-  if (!resolved.ok && !isNotFound(resolved.reason)) {
-    throw resolved.reason;
-  }
-
-  throw auth.kind === 'api-key' ? missingScopeError('table:read') : new UnauthorizedError();
-}
+type TableLookup = { readable: true; target: TableReadTarget } | { readable: false };
 
 async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug: string) {
   const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, projectSlug), {
@@ -1219,6 +1197,74 @@ async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug:
     type: 'project.table.resolve.result';
     result: { data: ResolvedProjectTableResult };
   }).result.data;
+}
+
+// Cheap and free of Google calls: the table answers from its own metadata without syncing. It carries the resolved
+// config so the table notices a configuration change before the cache key is built.
+async function loadTableDataGeneration(
+  env: Env,
+  projectSlug: string,
+  tableSlug: string,
+  resolvedConfig: ResolvedTableConfigSnapshot
+): Promise<TableDataGeneration> {
+  const response = await doRpc<TableDoResponse>(getTableStub(env, projectSlug, tableSlug), {
+    type: 'table.generation.get',
+    projectSlug,
+    tableSlug,
+    resolvedConfig
+  });
+  if (response.type !== 'table.generation.get.result') {
+    throw new ServiceUnavailableError('Unexpected table generation response.');
+  }
+
+  const generation = tableDataGenerationSchema.safeParse(response.result);
+  if (!generation.success) {
+    throw new ServiceUnavailableError('Unexpected table generation response.');
+  }
+
+  return generation.data;
+}
+
+// The table lookup and, only when this caller may read the table (a read grant, or a public-read project), the table's
+// data generation. A caller that may not read it never causes a table call.
+async function lookupTableForCaller(
+  c: AppContext,
+  auth: AuthContext,
+  projectSlug: string,
+  tableSlug: string
+): Promise<TableLookup> {
+  const tableAccess = await loadProjectTable(c, projectSlug, tableSlug);
+  if (!grantsTableRead(auth) && tableAccess.project.defaultAuthMode !== 'public-read') {
+    return { readable: false };
+  }
+
+  const generation = await loadTableDataGeneration(c.env, projectSlug, tableSlug, tableAccess.resolvedConfig);
+  return { readable: true, target: { tableAccess, generation } };
+}
+
+// Table reads wait on the caller's rate limit and on the table lookup. Neither depends on the other, so once the
+// caller is known and its key is allowed near this project at all, both run together, and the generation lookup rides
+// along with the table lookup instead of queueing behind the rate limit. A key that may not touch the project never
+// causes a project lookup.
+async function authorizeTableRead(c: AppContext, projectSlug: string, tableSlug: string): Promise<TableReadTarget> {
+  const auth = await identifyCaller(c);
+  assertCredentialProjectBoundary(auth, projectSlug);
+
+  const lookup = settle(lookupTableForCaller(c, auth, projectSlug, tableSlug));
+  await completeAuthentication(c, auth);
+  const looked = await lookup;
+
+  if (looked.ok) {
+    if (looked.value.readable) {
+      return looked.value.target;
+    }
+  } else if (grantsTableRead(auth) || !isNotFound(looked.reason)) {
+    throw looked.reason;
+  }
+
+  // Callers without a read grant may only read public-read projects. Private projects, missing projects, and missing
+  // tables all get the same denial, so the response never reveals which of them exist.
+  throw auth.kind === 'api-key' ? missingScopeError('table:read') : new UnauthorizedError();
 }
 
 async function loadProjectTables(c: { env: Env }, projectSlug: string) {
@@ -1925,6 +1971,9 @@ type CachedTableReadOperation =
 
 export type CachedTableReadProps = Readonly<{
   resolvedConfig: ResolvedTableConfigSnapshot;
+  // The table's data generation when the gateway built the cache key. A read that finds the table at another
+  // generation must not be stored, because no later request would look under this key.
+  dataGeneration: number;
 }>;
 
 function noStoreJsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
@@ -2082,17 +2131,40 @@ async function getCachedTableReadCacheStatus(
     throw new ServiceUnavailableError('Unexpected table cache status response.');
   }
 
-  return response.result.data;
+  const status = getTableCacheStatusResultSchema.safeParse(response.result);
+  if (!status.success) {
+    throw new ServiceUnavailableError('Unexpected table cache status response.');
+  }
+
+  return status.data.data;
 }
 
-function getCachedTableReadEdgeTtlSeconds(cacheStatus: GetTableCacheStatusResult['data']) {
-  // TableDO reports a pending external change as stale (`external-change`), so this also keeps entries out of the
-  // edge cache from the Drive notification until the change has been reindexed.
+// An edge entry may live only as long as the table itself would keep serving this data without a resync, which is its
+// TTL counted from the last sync and not from the moment the entry is stored. A table that is stale, not ready, or out
+// of freshness stores nothing. TableDO reports a pending external change as stale (`external-change`), so nothing is
+// stored from a Drive notification until the change has been reindexed.
+function getCachedTableReadEdgeTtlSeconds(
+  cacheStatus: GetTableCacheStatusResult['data'],
+  keyedDataGeneration: number,
+  nowMs: number
+) {
   if (cacheStatus.cacheTtlSeconds <= 0 || cacheStatus.status !== 'ready' || cacheStatus.stale) {
     return 0;
   }
 
-  return cacheStatus.cacheTtlSeconds;
+  // The table moved on while this read ran (a write, a sync, a config change), so the key was built for an earlier
+  // generation and no later request would look under it.
+  if (cacheStatus.dataGeneration !== keyedDataGeneration || cacheStatus.lastSyncCompletedAt === null) {
+    return 0;
+  }
+
+  const lastSyncMs = Date.parse(cacheStatus.lastSyncCompletedAt);
+  if (Number.isNaN(lastSyncMs)) {
+    return 0;
+  }
+
+  const remainingSeconds = Math.floor(cacheStatus.cacheTtlSeconds - (nowMs - lastSyncMs) / 1000);
+  return Math.min(cacheStatus.cacheTtlSeconds, Math.max(0, remainingSeconds));
 }
 
 function getCachedTableReadTags(operation: CachedTableReadOperation) {
@@ -2109,8 +2181,7 @@ function getCachedTableReadTags(operation: CachedTableReadOperation) {
   ];
 }
 
-function cachedTableReadSuccessHeaders(operation: CachedTableReadOperation, cacheStatus: GetTableCacheStatusResult['data']) {
-  const edgeTtlSeconds = getCachedTableReadEdgeTtlSeconds(cacheStatus);
+function cachedTableReadSuccessHeaders(operation: CachedTableReadOperation, edgeTtlSeconds: number) {
   const cacheTags = serializeCacheTags(getCachedTableReadTags(operation));
   const headers = new Headers({
     'cache-control': 'private, no-store'
@@ -2133,13 +2204,16 @@ function cachedTableReadSuccessHeaders(operation: CachedTableReadOperation, cach
 async function cachedTableReadSuccessResponse(
   env: Env,
   operation: CachedTableReadOperation,
-  resolvedConfig: ResolvedTableConfigSnapshot
+  props: CachedTableReadProps
 ) {
-  const result = await runCachedTableRead(env, operation, resolvedConfig);
+  const result = await runCachedTableRead(env, operation, props.resolvedConfig);
   const parsed = parseCachedTableReadResult(operation, result);
-  const cacheStatus = await getCachedTableReadCacheStatus(env, operation, resolvedConfig);
+  const cacheStatus = await getCachedTableReadCacheStatus(env, operation, props.resolvedConfig);
   return Response.json(parsed, {
-    headers: cachedTableReadSuccessHeaders(operation, cacheStatus)
+    headers: cachedTableReadSuccessHeaders(
+      operation,
+      getCachedTableReadEdgeTtlSeconds(cacheStatus, props.dataGeneration, Date.now())
+    )
   });
 }
 
@@ -2217,8 +2291,7 @@ async function buildCachedTableReadConfigVersion(tableAccess: ResolvedProjectTab
   }));
 }
 
-type CachedTableReadFetchOptions = {
-  tableAccess: ResolvedProjectTableResult;
+type CachedTableReadFetchOptions = TableReadTarget & {
   query?: ListRowsQuery;
 };
 
@@ -2244,6 +2317,8 @@ async function createCachedTableReadRequest(c: AppContext, pathname: string, opt
   cacheKey.search = url.search;
   cacheKey.searchParams.set('__sf_auth', options.tableAccess.project.defaultAuthMode);
   cacheKey.searchParams.set('__sf_config', await buildCachedTableReadConfigVersion(options.tableAccess));
+  // A committed change moves the table to a new generation, which makes every older entry unreachable without a purge.
+  cacheKey.searchParams.set('__sf_gen', String(options.generation.dataGeneration));
 
   return {
     request: new Request(url, {
@@ -2258,7 +2333,8 @@ async function fetchCachedTableRead(c: AppContext, pathname: string, options: Ca
   const { request, cacheKey } = await createCachedTableReadRequest(c, pathname, options);
   return workerExports.CachedTableReads({
     props: {
-      resolvedConfig: options.tableAccess.resolvedConfig
+      resolvedConfig: options.tableAccess.resolvedConfig,
+      dataGeneration: options.generation.dataGeneration
     }
   }).fetch(request, {
     cf: {
@@ -2377,7 +2453,7 @@ export class CachedTableReads extends WorkerEntrypoint<Env, CachedTableReadProps
       return await cachedTableReadSuccessResponse(
         this.env,
         parseCachedTableReadRequest(request),
-        this.ctx.props.resolvedConfig
+        this.ctx.props
       );
     } catch (error) {
       return noStoreErrorResponse(error);
@@ -2852,22 +2928,22 @@ function createApp() {
 
   app.openapi(listRowsRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
-    const tableAccess = await authorizeTableRead(c, params.project, params.table);
+    const target = await authorizeTableRead(c, params.project, params.table);
     const query = parseListRowsQuery(c);
     return passThroughCachedReadResponse(await fetchCachedTableRead(
       c,
       `${cachedTableReadBasePath(params.project, params.table)}/rows`,
-      { tableAccess, query }
+      { ...target, query }
     ));
   });
 
   app.openapi(getSchemaRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
-    const tableAccess = await authorizeTableRead(c, params.project, params.table);
+    const target = await authorizeTableRead(c, params.project, params.table);
     return passThroughCachedReadResponse(await fetchCachedTableRead(
       c,
       `${cachedTableReadBasePath(params.project, params.table)}/schema`,
-      { tableAccess }
+      target
     ));
   });
 
@@ -3034,11 +3110,11 @@ function createApp() {
 
   app.openapi(getRowRoute, async (c) => {
     const params = parsePathParams(c, rowParamsSchema);
-    const tableAccess = await authorizeTableRead(c, params.project, params.table);
+    const target = await authorizeTableRead(c, params.project, params.table);
     return passThroughCachedReadResponse(await fetchCachedTableRead(
       c,
       `${cachedTableReadBasePath(params.project, params.table)}/rows/${encodeURIComponent(params.id)}`,
-      { tableAccess }
+      target
     ));
   });
 

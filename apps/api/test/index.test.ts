@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../src/env';
 import {
   __getRecentApiKeyTouchCacheSizeForTests,
@@ -11,6 +11,7 @@ import {
 import { apiKeys, forgedApiKey } from './support/api-keys';
 import {
   type CachePurgeCall,
+  cannedTableSyncCompletedAt,
   type CachedReadRequestRecord,
   createCachedTableReadsHarness,
   createEnv,
@@ -34,6 +35,17 @@ describe('timingSafeEqualSecret', () => {
 
 
 describe('CachedTableReads', () => {
+  beforeEach(() => {
+    // Edge freshness counts from the table's last sync, so a test that asserts an exact max-age stands at the instant
+    // the canned table completed its sync.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.parse(cannedTableSyncCompletedAt));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('sets client-safe and Workers Cache headers for list rows', async () => {
     const { entrypoint } = createCachedTableReadsHarness(createEnv({ tableCacheTtlSeconds: 42 }));
 
@@ -1810,9 +1822,11 @@ describe('api routes', () => {
     expect(env.__cachedReadRequests[0].url).toBe(
       'http://localhost/internal/cache/v1/projects/demo/tables/users/rows'
     );
-    expect(env.__tableRequests[0]).toMatchObject({
-      type: 'table.rows.list'
-    });
+    expect(env.__tableRequests.map((request) => request.type)).toEqual([
+      'table.generation.get',
+      'table.rows.list',
+      'table.cache.get'
+    ]);
   });
 
   it('preserves cached data-read no-store headers without exposing edge cache metadata', async () => {
@@ -2875,6 +2889,10 @@ describe('api routes', () => {
       type: 'table.rows.list',
       resolvedConfig: expectedResolvedConfig
     });
+    expect(env.__tableRequests.find(({ type }) => type === 'table.generation.get')).toMatchObject({
+      type: 'table.generation.get',
+      resolvedConfig: expectedResolvedConfig
+    });
     expect(env.__tableRequests.find(({ type }) => type === 'table.cache.get')).toMatchObject({
       type: 'table.cache.get',
       resolvedConfig: expectedResolvedConfig
@@ -2947,6 +2965,7 @@ describe('api routes', () => {
     expect(cacheKeyUrl.searchParams.get('filter')).toBe('{"email":{"eq":"a@example.com"},"status":{"eq":"active"}}');
     expect(cacheKeyUrl.searchParams.get('__sf_auth')).toBe('private');
     expect(cacheKeyUrl.searchParams.get('__sf_config')).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+    expect(cacheKeyUrl.searchParams.get('__sf_gen')).toBe('0');
     expectNoCredentialMaterial(firstRecord.url);
     expectNoCredentialMaterial(firstCacheKey);
   });
@@ -3090,7 +3109,17 @@ describe('api routes', () => {
     expect(schemaCacheKeyUrl.searchParams.get('__sf_config')).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
     expectNoCredentialMaterial(env.__cachedReadRequests[0]?.url ?? '');
     expectNoCredentialMaterial(schemaCacheKey);
+    expect(schemaCacheKeyUrl.searchParams.get('__sf_gen')).toBe('0');
+    expect(env.__tableRequests.map((request) => request.type)).toEqual([
+      'table.generation.get',
+      'table.schema.get',
+      'table.cache.get'
+    ]);
     expect(env.__tableRequests[0]).toMatchObject({
+      type: 'table.generation.get',
+      resolvedConfig: defaultCachedTableReadProps.resolvedConfig
+    });
+    expect(env.__tableRequests[1]).toMatchObject({
       type: 'table.schema.get',
       resolvedConfig: defaultCachedTableReadProps.resolvedConfig,
       requestContext: undefined
@@ -3139,7 +3168,17 @@ describe('api routes', () => {
     expect(rowCacheKeyUrl.searchParams.get('__sf_config')).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
     expectNoCredentialMaterial(env.__cachedReadRequests[0]?.url ?? '');
     expectNoCredentialMaterial(rowCacheKey);
+    expect(rowCacheKeyUrl.searchParams.get('__sf_gen')).toBe('0');
+    expect(env.__tableRequests.map((request) => request.type)).toEqual([
+      'table.generation.get',
+      'table.row.get',
+      'table.cache.get'
+    ]);
     expect(env.__tableRequests[0]).toMatchObject({
+      type: 'table.generation.get',
+      resolvedConfig: defaultCachedTableReadProps.resolvedConfig
+    });
+    expect(env.__tableRequests[1]).toMatchObject({
       type: 'table.row.get',
       resolvedConfig: defaultCachedTableReadProps.resolvedConfig,
       requestContext: undefined
