@@ -108,7 +108,8 @@ const dataGenerationMetaKey = 'data.generation';
 // (a sync that changed data, a mutation or repair applied to the cache, a cache clear).
 // Pagination cursors carry it, so a resync that changes nothing keeps cursors valid. A sync
 // compares it before and after its snapshot read: a change in between means a write reached the
-// cache that the snapshot may not include, so the sync leaves the cache stale (see performSync).
+// cache that the snapshot may not include, so the sync keeps the cached rows instead of promoting
+// the snapshot and leaves the cache stale (see performSync).
 const contentRevisionMetaKey = 'cache.contentRevision';
 // externalChangeGeneration advances on every recorded external change (Drive notification or an
 // unconfirmed write). A sync clears the pending change only if no newer one arrived after it began.
@@ -776,7 +777,8 @@ export class TableDO {
     const cacheNeedsRebuild = await this.runExclusiveWrite(() => this.removeRow(config, rowId, requestContext));
     if (cacheNeedsRebuild) {
       // Rebuilding reads the whole sheet, so it runs after the write lock is released: the next
-      // write does not wait for it, and a sync that overlaps a write is flagged stale anyway.
+      // write does not wait for it. A write that lands meanwhile supersedes the rebuild, which then
+      // leaves the cache stale for the next read to rebuild (see performSync).
       await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
     }
 
@@ -1045,7 +1047,13 @@ export class TableDO {
       const snapshot = await sheets.readTableSnapshot(config);
       // Everything below runs without yielding, so no write can reach the cache between this check
       // and the promotion. A write applied since the sync began may be missing from the snapshot.
+      const configSignature = buildCacheConfigSignature(config);
       const supersededByWrite = this.getCounter(contentRevisionMetaKey) !== observedContentRevision;
+      // Keep the cached rows unless they cannot serve this config (handled further down).
+      if (supersededByWrite && this.getMeta('config.signature') === configSignature) {
+        return this.discardSupersededSnapshot(config, requestContext, syncStartedAtMs);
+      }
+
       const headers = snapshot.headers;
       const rows = snapshot.rows;
       assertUniqueManagedRowIds(rows, config.idColumn);
@@ -1058,7 +1066,6 @@ export class TableDO {
         this.upsertCachedCells(config, row, 'staging');
       }
 
-      const configSignature = buildCacheConfigSignature(config);
       const contentChanged = this.getMeta('config.signature') !== configSignature || this.stagedRowsDifferFromLive();
       this.promoteStagingCache();
 
@@ -1070,8 +1077,9 @@ export class TableDO {
       this.setMeta('validation.summary', JSON.stringify(validation));
       this.completeExternalChangeSync(completedAt, requestContext?.syncSource === 'external-change', observedExternalChangeGeneration);
       if (supersededByWrite) {
-        // Promoting the snapshot replaced that write with older rows, so do not report the cache
-        // as fresh: the next read resyncs instead of serving them.
+        // The cached rows could not serve this config (they were built for another one, or the
+        // cache was cleared), so there is nothing to keep and the snapshot is promoted anyway. It
+        // may lack the write, so do not report the cache as fresh: the next read resyncs.
         this.recordPendingExternalChange(completedAt, null);
       }
       this.setSyncMeta({
@@ -1123,6 +1131,34 @@ export class TableDO {
       }));
       throw error;
     }
+  }
+
+  // A write reached the cache while this sync was reading its snapshot, so the snapshot may be older
+  // than the cached rows. Promoting it would drop that write from the cache while a request that
+  // already checked the cache (a create's unique check, for one) is still working from it. Keep the
+  // cached rows, which hold the write, and report the cache as stale so the next read resyncs.
+  private discardSupersededSnapshot(
+    config: ResolvedTableConfig,
+    requestContext: TableRequestContext | null,
+    syncStartedAtMs: number
+  ): TableCacheStatus {
+    this.setSyncMeta({
+      ...this.getSyncMeta(),
+      status: 'ready',
+      rowCount: this.countCachedRows()
+    });
+    this.recordPendingExternalChange(new Date().toISOString(), null);
+    console.info(JSON.stringify({
+      event: 'table.sync.superseded',
+      projectSlug: config.projectSlug,
+      tableSlug: config.tableSlug,
+      durationMs: Date.now() - syncStartedAtMs,
+      requestId: requestContext?.requestId ?? null,
+      route: requestContext?.route ?? null,
+      principal: requestContext?.principal ?? null
+    }));
+
+    return this.computeCacheStatus(config);
   }
 
   private async resolveRowById(

@@ -340,6 +340,8 @@ Expected result:
 - `cache.status: "ready"`
 - `cache.staleReason: "fresh"` for a successful healthy rebuild
 
+If a row write lands while the reindex is reading the sheet, the result shows `cache.staleReason: "external-change"` instead. The cache keeps the rows that write produced and drops the reindex's older snapshot (see [Superseded table sync](./observability.md#superseded-table-sync)), so nothing was refreshed. Run the reindex again once writes pause.
+
 ## Interpreting Common Failures
 
 ### Duplicate managed row IDs
