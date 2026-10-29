@@ -4223,7 +4223,7 @@ describe('TableDO', () => {
     });
   });
 
-  it('keeps scan-based pagination stable when the cursor row disappears between pages', async () => {
+  it('rejects scan-based pagination cursors once the cursor row disappears between pages', async () => {
     const sheet: SheetState = {
       rows: [
         ['_id', 'name'],
@@ -4307,35 +4307,31 @@ describe('TableDO', () => {
       }
     );
 
-    const secondPage = await doRpc<TableDoResponse>(
-      env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users')),
-      {
-        type: 'table.rows.list',
-        projectSlug: 'demo',
-        tableSlug: 'users',
-        query: {
-          limit: 2,
-          sort: 'name:asc',
-          filter: {
-            name: {
-              contains: 'a'
-            }
-          },
-          cursor: firstResult.result.nextCursor
+    await expect(listUsers(env, {
+      limit: 2,
+      sort: 'name:asc',
+      filter: {
+        name: {
+          contains: 'a'
+        }
+      },
+      cursor: firstResult.result.nextCursor
+    })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      details: { reason: 'stale-cursor' }
+    });
+
+    const restarted = await listUsers(env, {
+      limit: 2,
+      sort: 'name:asc',
+      filter: {
+        name: {
+          contains: 'a'
         }
       }
-    );
-
-    const secondResult = secondPage as {
-      type: 'table.rows.list.result';
-      result: {
-        data: Array<{ id: string }>;
-        nextCursor: string | null;
-      };
-    };
-
-    expect(secondResult.result.data.map((row) => row.id)).toEqual(['row-3']);
-    expect(secondResult.result.nextCursor).toBeNull();
+    });
+    expect(restarted.data.map((row) => row.id)).toEqual(['row-1', 'row-3']);
+    expect(restarted.nextCursor).toBeNull();
   });
 
   it('rejects list projections that request unknown fields', async () => {
@@ -5367,5 +5363,64 @@ describe('TableDO', () => {
     requestsBefore = googleRequestCount;
     expect((await getGeneration()).dataGeneration).toBe(lastGeneration);
     expect(googleRequestCount).toBe(requestsBefore);
+  });
+
+  it('rejects pagination cursors after a row changes sort position between pages', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'score'],
+        ['row-a', '1'],
+        ['row-b', '2'],
+        ['row-c', '3']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      indexedFields: ['score'],
+      fieldRules: { score: { type: 'number' } },
+      cacheTtlSeconds: 3600
+    });
+
+    const firstPage = await listUsers(env, { sort: 'score:asc', limit: 1 });
+    expect(firstPage.data.map((row) => row.id)).toEqual(['row-a']);
+
+    await updateUser(env, 'row-b', { score: '0' });
+
+    await expect(listUsers(env, { sort: 'score:asc', limit: 1, cursor: firstPage.nextCursor })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Pagination cursor is stale because the table data changed after it was issued. Restart pagination without a cursor.',
+      details: { reason: 'stale-cursor' }
+    });
+  });
+
+  it('keeps pagination cursors valid across a resync that leaves the cached rows unchanged', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-28T12:00:00.000Z'));
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'score'],
+        ['row-a', '1'],
+        ['row-b', '2']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      indexedFields: ['score'],
+      fieldRules: { score: { type: 'number' } },
+      cacheTtlSeconds: 1
+    });
+
+    const firstPage = await listUsers(env, { sort: 'score:asc', limit: 1 });
+    vi.setSystemTime(new Date('2026-10-28T12:00:05.000Z'));
+    sheet.requestedRanges = [];
+    const secondPage = await listUsers(env, { sort: 'score:asc', limit: 1, cursor: firstPage.nextCursor });
+
+    expect(sheet.requestedRanges).toContain("'Users'!A1:B");
+    expect(secondPage.data.map((row) => row.id)).toEqual(['row-b']);
+    vi.useRealTimers();
   });
 });

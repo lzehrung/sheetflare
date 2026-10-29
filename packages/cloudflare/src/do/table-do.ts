@@ -93,7 +93,11 @@ const emptyExternalChangeState: TableExternalChange = {
 // and recording or clearing an external change. The gateway keys cached reads by it, so committed
 // changes never depend on edge purges. It survives cache clears so a value is never reused.
 const dataGenerationMetaKey = 'data.generation';
-const monotonicCounterMetaKeys = [dataGenerationMetaKey];
+// contentRevision advances only when cached rows or their indexed values may have changed
+// (a sync that changed data, a mutation or repair applied to the cache, a cache clear).
+// Pagination cursors carry it, so a resync that changes nothing keeps cursors valid.
+const contentRevisionMetaKey = 'cache.contentRevision';
+const monotonicCounterMetaKeys = [dataGenerationMetaKey, contentRevisionMetaKey];
 const readConfigSignatureMetaKey = 'config.readSignature';
 
 type ResolvedTableConfig = GoogleSheetTableConfig & {
@@ -933,13 +937,15 @@ export class TableDO {
         this.upsertCachedCells(config, row, 'staging');
       }
 
+      const configSignature = buildCacheConfigSignature(config);
+      const contentChanged = this.getMeta('config.signature') !== configSignature || this.stagedRowsDifferFromLive();
       this.promoteStagingCache();
 
       const completedAt = new Date().toISOString();
       const validation = this.buildValidationSummary(rows, config, completedAt);
       this.setMeta('headers', JSON.stringify(headers));
       this.setMeta('schema', JSON.stringify(schema));
-      this.setMeta('config.signature', buildCacheConfigSignature(config));
+      this.setMeta('config.signature', configSignature);
       this.setMeta('validation.summary', JSON.stringify(validation));
       this.completeExternalChangeSync(completedAt, requestContext?.syncSource === 'external-change');
       this.setSyncMeta({
@@ -949,7 +955,10 @@ export class TableDO {
         lastSyncCompletedAt: completedAt,
         lastSyncError: null
       });
-      this.noteCacheContentChanged();
+      if (contentChanged) {
+        this.incrementCounter(contentRevisionMetaKey);
+      }
+      this.incrementCounter(dataGenerationMetaKey);
       console.info(JSON.stringify({
         event: 'table.sync.complete',
         projectSlug: config.projectSlug,
@@ -1377,6 +1386,7 @@ export class TableDO {
   }
 
   private noteCacheContentChanged() {
+    this.incrementCounter(contentRevisionMetaKey);
     this.incrementCounter(dataGenerationMetaKey);
   }
 
@@ -1536,6 +1546,25 @@ export class TableDO {
     this.ctx.storage.sql.exec(`DELETE FROM ${tables.cachedCells}`);
   }
 
+  // True when the staged snapshot differs from the live cache in any row id, row number, or
+  // value. Row ids are primary keys, so equal counts plus no unmatched staged row means equal sets.
+  private stagedRowsDifferFromLive() {
+    const difference = this.selectOptionalRow<{ changed: number }>(`
+      SELECT 1 AS changed
+      WHERE (SELECT COUNT(*) FROM cached_rows) != (SELECT COUNT(*) FROM cached_rows_staging)
+        OR EXISTS (
+          SELECT 1
+          FROM cached_rows_staging staged
+          LEFT JOIN cached_rows live ON live.row_id = staged.row_id
+          WHERE live.row_id IS NULL
+            OR live.row_number != staged.row_number
+            OR live.values_json != staged.values_json
+        )
+    `);
+
+    return difference !== null;
+  }
+
   private promoteStagingCache() {
     const live = getCacheTableNames('live');
     const staging = getCacheTableNames('staging');
@@ -1620,7 +1649,8 @@ export class TableDO {
   private queryCachedRows(config: GoogleSheetTableConfig, rawQuery: ListRowsQuery) {
     const query = this.normalizeQueryForConfig(config, rawQuery);
     const fingerprint = getListQueryFingerprint(query);
-    const cursor = decodeQueryCursor(query.cursor, fingerprint, query.sort);
+    const revision = this.getCounter(contentRevisionMetaKey);
+    const cursor = decodeQueryCursor(query.cursor, fingerprint, query.sort, revision);
     const filterPlan = buildFilterSql(query.filter, config.indexedFields);
     const capability = validateFilterCapabilities(query.filter, config.indexedFields);
     const requiresScan = capability.requiresFullScan || filterPlan.requiresFullScan;
@@ -1637,7 +1667,7 @@ export class TableDO {
           }
         );
       }
-      return this.queryCachedRowsByScan(config, query, fingerprint, cursor);
+      return this.queryCachedRowsByScan(config, query, fingerprint, revision, cursor);
     }
 
     const sortPlan = this.buildSortPlan(config, query.sort.field, query.sort.direction);
@@ -1681,6 +1711,7 @@ export class TableDO {
         rows.length > query.limit && lastRow
           ? encodeQueryCursor({
               fingerprint,
+              revision,
               sortField: query.sort.field,
               sortDirection: query.sort.direction,
               rowId: lastRow.row_id,
@@ -1695,6 +1726,7 @@ export class TableDO {
     config: GoogleSheetTableConfig,
     query: ReturnType<typeof normalizeListQuery>,
     fingerprint: string,
+    revision: number,
     cursor: ReturnType<typeof decodeQueryCursor>
   ) {
     const sortField = query.sort.field;
@@ -1740,6 +1772,7 @@ export class TableDO {
         hasMore && lastRow
           ? encodeQueryCursor({
               fingerprint,
+              revision,
               sortField: query.sort.field,
               sortDirection: query.sort.direction,
               rowId: lastRow.id,
