@@ -785,6 +785,21 @@ describe('GoogleSheetsService.findRowById neighbours', () => {
     expect(first?.neighbours).toEqual({ previous: null, next: null });
     expect(last?.neighbours).toEqual({ previous: null, next: null });
   });
+
+  it('reads neighbour ids from the managed id column wherever it sits in the row', async () => {
+    const { service } = createRangeService({
+      "'Users'!1:1": [['name', '_id']],
+      "'Users'!A2:B4": [['Ada', 'row-0'], ['Bea', 'row-1'], ['Cora', 'row-2']]
+    });
+
+    const result = await service.findRowById(usersConfig, 'row-1', 3, { verifyUnique: false });
+
+    expect(result?.row.values).toEqual({ name: 'Bea', _id: 'row-1' });
+    expect(result?.neighbours).toEqual({
+      previous: { rowId: 'row-0', rowNumber: 2 },
+      next: { rowId: 'row-2', rowNumber: 4 }
+    });
+  });
 });
 
 describe('GoogleSheetsService.listSheetTabs', () => {
