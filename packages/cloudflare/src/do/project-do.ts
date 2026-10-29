@@ -242,15 +242,17 @@ export class ProjectDO {
     resolveGoogleCredential(this.env, googleCredentialRef);
     const previous = this.findProjectToCreate(input.slug, allowExisting);
 
-    // The control plane rejects a spreadsheet that other projects use under another credential ref and, for a slug
-    // without a project, revokes keys an earlier project with this slug left behind, before anything is written here.
-    if (
+    // Before anything is written here, the control plane checks in one step that the spreadsheet's other projects use
+    // this credential ref and records this project's claim to the spreadsheet, so two creations cannot both pass the
+    // check for one spreadsheet under different refs. For a slug without a project it also revokes keys an earlier
+    // project with this slug left behind.
+    const reservesSpreadsheet =
       !previous
       || previous.spreadsheet_id !== input.spreadsheetId
-      || previous.google_credential_ref !== googleCredentialRef
-    ) {
+      || previous.google_credential_ref !== googleCredentialRef;
+    if (reservesSpreadsheet) {
       await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), {
-        type: 'control.project.prepare',
+        type: 'control.project.reserve',
         projectSlug: input.slug,
         spreadsheetId: input.spreadsheetId,
         googleCredentialRef,
@@ -258,8 +260,29 @@ export class ProjectDO {
       });
     }
 
-    // Other requests run while the control plane answers, so the existence check that guards the write is repeated.
+    // Other requests run while the control plane answers, so the existence check that guards the write is repeated. A
+    // conflict here means another create for this slug wrote first and holds the reservation, so it is not released.
     const existing = this.findProjectToCreate(input.slug, allowExisting);
+    try {
+      this.writeProject(input, googleCredentialRef, now);
+    } catch (error) {
+      if (reservesSpreadsheet) {
+        await this.releaseReservation(input.slug);
+      }
+
+      throw error;
+    }
+
+    // Registering the project ends its reservation. If registering fails, the reservation keeps the spreadsheet
+    // claimed, and repeating the create with allowExisting registers the project.
+    await this.syncRegistry(input.slug);
+    return {
+      data: await this.getProject(input.slug),
+      created: existing === null
+    };
+  }
+
+  private writeProject(input: CreateProjectInput, googleCredentialRef: string, now: string) {
     this.ensureSchema();
     this.ctx.storage.sql.exec(
       `
@@ -281,12 +304,25 @@ export class ProjectDO {
       now,
       now
     );
+  }
 
-    await this.syncRegistry(input.slug);
-    return {
-      data: await this.getProject(input.slug),
-      created: existing === null
-    };
+  // Best effort: the write error that led here is the one the caller needs, so a failed release is logged and does not
+  // replace it. A reservation left behind expires on its own, and a retried create or a delete of the slug replaces or
+  // removes it sooner.
+  private async releaseReservation(projectSlug: string) {
+    try {
+      await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), {
+        type: 'control.project.release',
+        projectSlug
+      });
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: 'project.reservation.release.failed',
+        projectSlug,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+        errorMessage: error instanceof Error ? error.message : String(error)
+      }));
+    }
   }
 
   private findProjectToCreate(projectSlug: string, allowExisting: boolean) {

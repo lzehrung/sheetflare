@@ -224,7 +224,24 @@ function createTestEnv(overrides?: Partial<CloudflareEnv>) {
   env.PROJECT_DO = createDurableObjectNamespace(env, ProjectDO) as never;
   env.TABLE_DO = createDurableObjectNamespace(env, TableDO) as never;
   env.RATE_LIMIT_DO = null as never;
-  return { env, controlPlaneNamespace };
+  return {
+    env,
+    controlPlaneNamespace,
+    // Registries written before credential refs were checked at project creation can hold projects that share a
+    // spreadsheet under different refs. Registering such a pair is rejected now, so the rows go into storage the way
+    // that release wrote them.
+    seedRegistryProject(slug: string, spreadsheetId: string, googleCredentialRef: string) {
+      controlPlaneNamespace.runSql(
+        'control-plane',
+        `INSERT INTO project_registry (slug, name, spreadsheet_id, google_credential_ref, table_count, updated_at)
+         VALUES (?, ?, ?, ?, 0, '2026-05-01T00:00:00.000Z')`,
+        slug,
+        slug,
+        spreadsheetId,
+        googleCredentialRef
+      );
+    }
+  };
 }
 
 async function hashApiKeySecret(secret: string) {
@@ -1860,22 +1877,10 @@ describe('ControlPlaneDO project removal', () => {
 
   it('deletes a project while other projects share a spreadsheet under conflicting credential refs', async () => {
     vi.stubGlobal('fetch', createSheetsAndDriveFetch({ rows: [['_id']] }));
-    const { env } = createTestEnv();
+    const { env, seedRegistryProject } = createTestEnv();
     const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
-    // Registries written before credential refs were checked at project creation can hold such a pair.
-    for (const [slug, googleCredentialRef] of [['alpha', 'default'], ['beta', 'other']]) {
-      await doRpc<ControlPlaneDoResponse>(controlPlane, {
-        type: 'control.project.upsert',
-        summary: {
-          slug,
-          name: slug,
-          spreadsheetId: 'sheet-1',
-          googleCredentialRef,
-          tableCount: 0,
-          updatedAt: '2026-05-01T00:00:00.000Z'
-        }
-      });
-    }
+    seedRegistryProject('alpha', 'sheet-1', 'default');
+    seedRegistryProject('beta', 'sheet-1', 'other');
     const gamma = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:gamma'));
     await doRpc<ProjectDoResponse>(gamma, {
       type: 'project.create',
@@ -1891,6 +1896,175 @@ describe('ControlPlaneDO project removal', () => {
       await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.projects.list' }),
       'control.projects.list.result'
     ).data.map((project) => project.slug).sort()).toEqual(['alpha', 'beta']);
+  });
+});
+
+describe('ControlPlaneDO project reservations', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function createProjectRegistry() {
+    const { env, controlPlaneNamespace, seedRegistryProject } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    return {
+      controlPlane,
+      controlPlaneNamespace,
+      seedRegistryProject,
+      reserve: (projectSlug: string, spreadsheetId: string, googleCredentialRef: string, revokeApiKeys = false) =>
+        doRpc<ControlPlaneDoResponse>(controlPlane, {
+          type: 'control.project.reserve',
+          projectSlug,
+          spreadsheetId,
+          googleCredentialRef,
+          revokeApiKeys
+        }),
+      release: (projectSlug: string) =>
+        doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.project.release', projectSlug }),
+      register: (slug: string, spreadsheetId: string, googleCredentialRef: string) =>
+        doRpc<ControlPlaneDoResponse>(controlPlane, {
+          type: 'control.project.upsert',
+          summary: { slug, name: slug, spreadsheetId, googleCredentialRef, tableCount: 0, updatedAt: '2026-05-01T00:00:00.000Z' }
+        }),
+      async listRegistered() {
+        const registry = expectRpcResult(
+          await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.projects.list' }),
+          'control.projects.list.result'
+        );
+        return registry.data
+          .map((project) => `${project.slug}:${project.spreadsheetId}:${project.googleCredentialRef}`)
+          .sort();
+      }
+    };
+  }
+
+  it('rejects a spreadsheet reserved under another credential ref and records nothing for the rejected project', async () => {
+    const { reserve, release } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+
+    await expect(reserve('beta', 'sheet-1', 'other')).rejects.toMatchObject({
+      code: 'CONFLICT',
+      status: 409,
+      details: { spreadsheetId: 'sheet-1', googleCredentialRef: 'other', registeredGoogleCredentialRefs: ['default'] }
+    });
+
+    // beta left no claim behind: once alpha lets go, the spreadsheet is free for any ref.
+    await release('alpha');
+    await expect(reserve('gamma', 'sheet-1', 'third')).resolves.toMatchObject({ type: 'control.project.reserve.result' });
+  });
+
+  it('lets projects reserve one spreadsheet under the same credential ref and different spreadsheets under different refs', async () => {
+    const { reserve } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+
+    await expect(reserve('beta', 'sheet-1', 'default')).resolves.toMatchObject({ type: 'control.project.reserve.result' });
+    await expect(reserve('gamma', 'sheet-2', 'other')).resolves.toMatchObject({ type: 'control.project.reserve.result' });
+  });
+
+  it('replaces the reservation of a slug that reserves again', async () => {
+    const { reserve } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+
+    // A retried create does not conflict with its own earlier reservation, and a create that moved takes its claim along.
+    await reserve('alpha', 'sheet-1', 'default');
+    await reserve('alpha', 'sheet-2', 'other');
+
+    await expect(reserve('beta', 'sheet-1', 'third')).resolves.toMatchObject({ type: 'control.project.reserve.result' });
+    await expect(reserve('gamma', 'sheet-2', 'default')).rejects.toMatchObject({
+      code: 'CONFLICT',
+      details: { registeredGoogleCredentialRefs: ['other'] }
+    });
+  });
+
+  it('drops a reservation when it is released or when its slug is deleted', async () => {
+    const { controlPlane, reserve, release } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+    await release('alpha');
+    await reserve('beta', 'sheet-1', 'other');
+    await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.project.delete', projectSlug: 'beta' });
+
+    // Neither reservation outlived its release or delete, and releasing a slug that holds none is not an error.
+    await expect(reserve('gamma', 'sheet-1', 'third')).resolves.toMatchObject({ type: 'control.project.reserve.result' });
+    await expect(release('nobody')).resolves.toMatchObject({ type: 'control.project.release.result' });
+  });
+
+  it('stops holding a spreadsheet for a reservation that expired', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-01T10:00:00.000Z'));
+    const { reserve } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+
+    vi.setSystemTime(new Date('2026-05-01T10:04:59.999Z'));
+    await expect(reserve('beta', 'sheet-1', 'other')).rejects.toMatchObject({ code: 'CONFLICT' });
+
+    vi.setSystemTime(new Date('2026-05-01T10:05:00.000Z'));
+    await expect(reserve('beta', 'sheet-1', 'other')).resolves.toMatchObject({ type: 'control.project.reserve.result' });
+  });
+
+  it('revokes the leftover keys of a slug only when its reservation is accepted', async () => {
+    const { controlPlane, reserve } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+    const created = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.api-key.create',
+        input: { name: 'Beta reader', projectSlug: 'beta', scopes: ['table:read'] }
+      }),
+      'control.api-key.create.result'
+    );
+    const readRevokedAt = async () => expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.api-key.get', apiKeyId: created.record.id }),
+      'control.api-key.get.result'
+    ).record?.revokedAt;
+
+    await expect(reserve('beta', 'sheet-1', 'other', true)).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(await readRevokedAt()).toBeNull();
+
+    await reserve('beta', 'sheet-1', 'default', true);
+    expect(await readRevokedAt()).toEqual(expect.any(String));
+  });
+
+  it('rejects registering a project under a credential ref that conflicts with a registered or reserved project', async () => {
+    const { reserve, register, listRegistered } = createProjectRegistry();
+    await register('alpha', 'sheet-1', 'default');
+    await reserve('gamma', 'sheet-2', 'default');
+
+    await expect(register('beta', 'sheet-1', 'other')).rejects.toMatchObject({
+      code: 'CONFLICT',
+      status: 409,
+      details: { spreadsheetId: 'sheet-1', googleCredentialRef: 'other', registeredGoogleCredentialRefs: ['default'] }
+    });
+    await expect(register('delta', 'sheet-2', 'other')).rejects.toMatchObject({ code: 'CONFLICT' });
+
+    // A rejected registration writes nothing, and a project that uses the spreadsheet's ref registers.
+    expect(await listRegistered()).toEqual(['alpha:sheet-1:default']);
+    await expect(register('epsilon', 'sheet-1', 'default')).resolves.toMatchObject({ type: 'control.project.upsert.result' });
+  });
+
+  it('ends the reservation of a project when it registers and leaves its claim to the registry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-01T10:00:00.000Z'));
+    const { controlPlaneNamespace, reserve, register } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+    await register('alpha', 'sheet-1', 'default');
+
+    expect(controlPlaneNamespace.runSql('control-plane', 'SELECT slug FROM project_reservations')).toEqual([]);
+    // The registry holds the spreadsheet well past the lifetime of the reservation that preceded it.
+    vi.setSystemTime(new Date('2026-05-01T11:00:00.000Z'));
+    await expect(reserve('beta', 'sheet-1', 'other')).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('keeps projects of a registry that already conflicts updatable and lets operators converge it', async () => {
+    const { seedRegistryProject, register, listRegistered } = createProjectRegistry();
+    seedRegistryProject('alpha', 'sheet-1', 'default');
+    seedRegistryProject('beta', 'sheet-1', 'other');
+
+    // Registering the pairing a project already has is not a new claim. A third ref is, and conflicts, while a ref the
+    // spreadsheet already has converges the registry.
+    await expect(register('beta', 'sheet-1', 'other')).resolves.toMatchObject({ type: 'control.project.upsert.result' });
+    await expect(register('beta', 'sheet-1', 'third')).rejects.toMatchObject({ code: 'CONFLICT' });
+    await register('beta', 'sheet-1', 'default');
+
+    expect(await listRegistered()).toEqual(['alpha:sheet-1:default', 'beta:sheet-1:default']);
   });
 });
 
