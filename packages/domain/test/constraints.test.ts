@@ -148,7 +148,7 @@ describe('validateFieldRules', () => {
 });
 
 describe('coerceRowFilter', () => {
-  it('coerces typed scalar filter values, canonicalizes rowNumber operands, and leaves id untouched', () => {
+  it('coerces typed scalar filter values, canonicalizes rowNumber operands, and leaves string id operands untouched', () => {
     expect(coerceRowFilter({
       score: {
         eq: '10',
@@ -206,6 +206,17 @@ describe('coerceRowFilter', () => {
     for (const definition of [{ contains: '2' }, { startsWith: '1' }]) {
       expect(() => coerceRowFilter({ rowNumber: definition }, {})).toThrow('rowNumber filters do not support startsWith or contains.');
     }
+  });
+
+  it('canonicalizes numeric and boolean id operands to the id strings they denote', () => {
+    expect(coerceRowFilter({ id: { eq: 5 } }, {})).toEqual({ id: { eq: '5' } });
+    expect(coerceRowFilter({ id: { neq: false } }, {})).toEqual({ id: { neq: 'false' } });
+    expect(coerceRowFilter({ id: { in: [5, '6', true, null] } }, {})).toEqual({ id: { in: ['5', '6', 'true', null] } });
+    expect(coerceRowFilter({ id: { gte: 10.5, lt: '20' } }, {})).toEqual({ id: { gte: '10.5', lt: '20' } });
+    expect(coerceRowFilter({ id: { eq: null } }, {})).toEqual({ id: { eq: null } });
+    expect(coerceRowFilter({ id: { isNull: false } }, {})).toEqual({ id: { isNull: false } });
+    expect(coerceRowFilter({ id: { startsWith: 'row-' } }, {})).toEqual({ id: { startsWith: 'row-' } });
+    expect(coerceRowFilter({ id: { contains: '5' } }, {})).toEqual({ id: { contains: '5' } });
   });
 
   it('normalizes operands for normalized fields, folding only case for pattern operators', () => {

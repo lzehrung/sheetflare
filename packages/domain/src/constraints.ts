@@ -154,6 +154,30 @@ function canonicalizeRowNumberFilter(definition: FieldFilter): FieldFilter {
   };
 }
 
+// Managed row IDs are strings (see parseManagedRowId). The indexed path binds operands to SQLite,
+// which converts a numeric operand to text under the column's TEXT affinity (5 binds as the REAL
+// 5.0, which is not the ID '5') and cannot bind booleans at all, while scans compare JavaScript
+// values strictly. Convert numeric and boolean operands to the ID string they denote once, so
+// both paths compare the same text.
+function toRowIdOperand(value: QueryScalarValue): string | null {
+  return value === null ? null : String(value);
+}
+
+function canonicalizeRowIdFilter(definition: FieldFilter): FieldFilter {
+  return {
+    ...(definition.eq !== undefined ? { eq: toRowIdOperand(definition.eq) } : {}),
+    ...(definition.neq !== undefined ? { neq: toRowIdOperand(definition.neq) } : {}),
+    ...(definition.gt !== undefined ? { gt: String(definition.gt) } : {}),
+    ...(definition.gte !== undefined ? { gte: String(definition.gte) } : {}),
+    ...(definition.lt !== undefined ? { lt: String(definition.lt) } : {}),
+    ...(definition.lte !== undefined ? { lte: String(definition.lte) } : {}),
+    ...(definition.in !== undefined ? { in: definition.in.map(toRowIdOperand) } : {}),
+    ...(definition.contains !== undefined ? { contains: definition.contains } : {}),
+    ...(definition.startsWith !== undefined ? { startsWith: definition.startsWith } : {}),
+    ...(definition.isNull !== undefined ? { isNull: definition.isNull } : {})
+  };
+}
+
 export function coerceRowFilter(filter: RowFilter | null, fieldRules: FieldRules): RowFilter | null {
   if (!filter) {
     return filter;
@@ -165,7 +189,7 @@ export function coerceRowFilter(filter: RowFilter | null, fieldRules: FieldRules
     }
 
     if (field === 'id') {
-      return [field, definition] as const;
+      return [field, canonicalizeRowIdFilter(definition)] as const;
     }
 
     return [field, coerceFieldFilterDefinition(definition, fieldRules[field])] as const;

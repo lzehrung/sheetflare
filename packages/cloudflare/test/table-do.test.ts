@@ -47,6 +47,8 @@ type SheetState = {
   requestedRanges: string[];
 };
 
+type FetchHandler = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
 function decodeRangeFromUrl(url: string) {
   const valuesMarker = '/values/';
   const start = url.indexOf(valuesMarker);
@@ -365,6 +367,35 @@ function createSignal() {
   });
 
   return { promise, resolve };
+}
+
+// Holds the next snapshot read back after Google has answered it, so a test can change the sheet
+// or the table while the sync that issued the read is still in flight. The held snapshot predates
+// everything the test does before calling release().
+function createSnapshotGate(baseFetch: FetchHandler, snapshotRange: string) {
+  const reached = createSignal();
+  const released = createSignal();
+  let armed = false;
+  const gatedFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (armed && decodeRangeFromUrl(String(input)) === snapshotRange) {
+      armed = false;
+      const snapshot = await baseFetch(input, init);
+      reached.resolve();
+      await released.promise;
+      return snapshot;
+    }
+
+    return baseFetch(input, init);
+  };
+
+  return {
+    fetch: gatedFetch,
+    arm: () => {
+      armed = true;
+    },
+    reached: reached.promise,
+    release: released.resolve
+  };
 }
 
 describe('TableDO', () => {
@@ -5263,6 +5294,39 @@ describe('TableDO', () => {
     });
   });
 
+  it('applies id filters identically on indexed and scan paths, including numeric and boolean operands', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['5', 'Ada'],
+        ['6', 'Bea'],
+        ['10', 'Cora'],
+        ['true', 'Dora']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+
+    // Every name contains "a", so the second query is identical except that it must run as a scan.
+    const idsOnBothPaths = async (filter: NonNullable<ListRowsQuery['filter']>) => {
+      const indexed = await listUsers(env, { filter });
+      const scanned = await listUsers(env, { filter: { ...filter, name: { contains: 'a' } } });
+      return { indexed: indexed.data.map((row) => row.id), scanned: scanned.data.map((row) => row.id) };
+    };
+
+    await expect(idsOnBothPaths({ id: { eq: 5 } })).resolves.toEqual({ indexed: ['5'], scanned: ['5'] });
+    await expect(idsOnBothPaths({ id: { eq: '5' } })).resolves.toEqual({ indexed: ['5'], scanned: ['5'] });
+    await expect(idsOnBothPaths({ id: { neq: 5 } })).resolves.toEqual({ indexed: ['6', '10', 'true'], scanned: ['6', '10', 'true'] });
+    await expect(idsOnBothPaths({ id: { in: [5, '6', false] } })).resolves.toEqual({ indexed: ['5', '6'], scanned: ['5', '6'] });
+    await expect(idsOnBothPaths({ id: { eq: true } })).resolves.toEqual({ indexed: ['true'], scanned: ['true'] });
+    // Range operators compare IDs as text on both paths: '10' sorts before '5'.
+    await expect(idsOnBothPaths({ id: { gt: 5 } })).resolves.toEqual({ indexed: ['6', 'true'], scanned: ['6', 'true'] });
+    await expect(idsOnBothPaths({ id: { gte: 10, lt: 6 } })).resolves.toEqual({ indexed: ['5', '10'], scanned: ['5', '10'] });
+    await expect(idsOnBothPaths({ id: { eq: "5' OR '1'='1" } })).resolves.toEqual({ indexed: [], scanned: [] });
+  });
+
   it('compares unique and filtered values through the field normalization rules', async () => {
     const sheet: SheetState = {
       rows: [
@@ -5547,6 +5611,76 @@ describe('TableDO', () => {
     expect(snapshotReads).toBe(2);
   });
 
+  it('keeps writes committed during a sync from being lost when that sync promotes its older snapshot', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const gate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:B");
+    vi.stubGlobal('fetch', gate.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    gate.arm();
+    const reindex = callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result');
+    await gate.reached;
+    await updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+    const created = await createUser(env, { name: 'Grace' });
+    expect((await listUsers(env)).data.map((row) => row.values.name)).toEqual(['Ada Lovelace', 'Grace']);
+
+    gate.release();
+    await reindex;
+
+    // The promoted snapshot predates both writes, so the cache must not claim to be fresh.
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: true, staleReason: 'external-change' });
+    expect((await listUsers(env)).data.map((row) => [row.id, row.values.name])).toEqual([
+      ['row-1', 'Ada Lovelace'],
+      [created.data.id, 'Grace']
+    ]);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh' });
+  });
+
+  it('does not hand a read that arrives after a write the snapshot of a sync that began before that write', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const gate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:B");
+    vi.stubGlobal('fetch', gate.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    gate.arm();
+    const reindex = callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result');
+    await gate.reached;
+    await updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+    // A pending change makes the next read sync, and it arrives while the older sync is in flight.
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: '2026-10-28T12:00:00.000Z',
+      debounceUntil: null
+    }, 'table.external-change.record.result');
+    const lateRead = listUsers(env);
+    // Let the read reach the in-flight sync before releasing it (see the config-change test above).
+    for (let turn = 0; turn < 10; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    gate.release();
+    await reindex;
+
+    expect((await lateRead).data.map((row) => row.values.name)).toEqual(['Ada Lovelace']);
+  });
+
   it('rejects a sync whose data read returns a different header row than the layout read', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const sheet: SheetState = {
@@ -5759,5 +5893,278 @@ describe('TableDO', () => {
     loseResponseFor = ':batchUpdate';
     await expect(deleteUser(env, 'row-2')).rejects.toMatchObject({ name: 'ServiceUnavailableError' });
     expect((await listUsers(env)).data.map((row) => row.id)).toEqual(['row-1']);
+  });
+
+  it('runs concurrent row writes one at a time so each lands on its own row', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'a'],
+        ['row-2', 'b'],
+        ['row-3', 'c'],
+        ['row-4', 'd'],
+        ['row-5', 'e'],
+        ['row-6', 'f']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // Writes address Google rows by index, so interleaved deletes would shift one another's targets.
+    await Promise.all([
+      deleteUser(env, 'row-2'),
+      deleteUser(env, 'row-3'),
+      updateUser(env, 'row-6', { name: 'F' }),
+      deleteUser(env, 'row-5')
+    ]);
+
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-1', 'a'],
+      ['row-4', 'd'],
+      ['row-6', 'F']
+    ]);
+    expect((await listUsers(env)).data.map((row) => [row.id, row.rowNumber, row.values.name])).toEqual([
+      ['row-1', 2, 'a'],
+      ['row-4', 3, 'd'],
+      ['row-6', 4, 'F']
+    ]);
+  });
+
+  it('checks a unique field against the rows written by the create that ran before it', async () => {
+    const sheet: SheetState = {
+      rows: [['_id', 'email']],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      indexedFields: ['email'],
+      cacheTtlSeconds: 3600,
+      fieldRules: { email: { unique: true } }
+    });
+    await listUsers(env);
+
+    const outcomes = await Promise.allSettled([
+      createUser(env, { email: 'ada@example.com' }),
+      createUser(env, { email: 'ada@example.com' })
+    ]);
+
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(['fulfilled', 'rejected']);
+    expect(outcomes[1]).toMatchObject({ reason: { name: 'ConflictError', message: 'email must be unique.' } });
+    expect(sheet.rows.filter((row) => row[1] === 'ada@example.com')).toHaveLength(1);
+
+    // A rejected write must not stall the queue behind it.
+    await expect(createUser(env, { email: 'bea@example.com' })).resolves.toMatchObject({ data: { values: { email: 'bea@example.com' } } });
+  });
+
+  it('fails closed and marks the cache stale when rows shift by more than one position while a delete is in flight', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'a'],
+        ['row-2', 'b'],
+        ['row-3', 'c'],
+        ['row-4', 'd'],
+        ['row-5', 'e'],
+        ['row-6', 'f']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let shiftBeforeDelete = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (shiftBeforeDelete && String(input).includes(':batchUpdate') && !String(input).includes('/values:batchUpdate')) {
+        shiftBeforeDelete = false;
+        // Three rows land above the target after its row was resolved, so the delete removes a different row.
+        sheet.rows.splice(1, 0, ['manual-1', 'x'], ['manual-2', 'x'], ['manual-3', 'x']);
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    shiftBeforeDelete = true;
+    await expect(deleteUser(env, 'row-5')).rejects.toMatchObject({
+      name: 'ConflictError',
+      details: { rowId: 'row-5' }
+    });
+
+    // The cache must not claim row-5 is gone: the next read resyncs and shows what the sheet holds.
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: true, staleReason: 'external-change' });
+    expect((await listUsers(env)).data.map((row) => row.id)).toEqual([
+      'manual-1',
+      'manual-2',
+      'manual-3',
+      'row-1',
+      'row-3',
+      'row-4',
+      'row-5',
+      'row-6'
+    ]);
+  });
+
+  it('deletes the first and the last data rows, which have no neighbour on one side', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'a'],
+        ['row-2', 'b'],
+        ['row-3', 'c']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    await deleteUser(env, 'row-3');
+    await deleteUser(env, 'row-1');
+
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-2', 'b']
+    ]);
+    expect((await listUsers(env)).data.map((row) => [row.id, row.rowNumber])).toEqual([['row-2', 2]]);
+  });
+
+  it('rejects a fresh-cache update or delete when the target id is repeated in the row beside it', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // Someone copies row-1 into the next row. No change signal has arrived, so the cache looks fresh.
+    sheet.rows.splice(2, 0, ['row-1', 'Copy']);
+
+    await expect(updateUser(env, 'row-1', { name: 'Ada Lovelace' })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Duplicate managed row id detected for row-1.'
+    });
+    await expect(deleteUser(env, 'row-1')).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Duplicate managed row id detected for row-1.'
+    });
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-1', 'Ada'],
+      ['row-1', 'Copy'],
+      ['row-2', 'Bea']
+    ]);
+  });
+
+  it('lets a fresh-cache update through when the duplicate id is not adjacent, and rejects it at the next sync', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // The copy is outside the rows a point write reads, so only a sync can see it.
+    sheet.rows.push(['row-1', 'Copy']);
+
+    const updated = await updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+    expect(updated.data.rowNumber).toBe(2);
+    expect(sheet.rows[1]).toEqual(['row-1', 'Ada Lovelace']);
+    await expect(callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result')).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Duplicate managed row id detected for row-1.'
+    });
+  });
+
+  it('checks the neighbours after a delete on an expired cache, where the target is found by an id-column scan', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-28T12:00:00.000Z'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'a'],
+        ['row-2', 'b'],
+        ['row-3', 'c'],
+        ['row-4', 'd']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let shiftBeforeDelete = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (shiftBeforeDelete && String(input).includes(':batchUpdate') && !String(input).includes('/values:batchUpdate')) {
+        shiftBeforeDelete = false;
+        sheet.rows.splice(1, 0, ['manual-1', 'x'], ['manual-2', 'x'], ['manual-3', 'x']);
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 1 });
+    await listUsers(env);
+    vi.setSystemTime(new Date('2026-10-28T12:00:05.000Z'));
+
+    shiftBeforeDelete = true;
+    await expect(deleteUser(env, 'row-3')).rejects.toMatchObject({
+      name: 'ConflictError',
+      details: { rowId: 'row-3' }
+    });
+    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+
+    vi.useRealTimers();
+  });
+
+  it('does not hold up the next write while a delete rebuilds the cache', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    const gate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:C");
+    vi.stubGlobal('fetch', gate.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // A column added by hand means the delete cannot repair the cache in place and rebuilds it.
+    sheet.rows = sheet.rows.map((row, index) => [...row, index === 0 ? 'status' : 'active']);
+    gate.arm();
+    const deletion = deleteUser(env, 'row-1');
+    await gate.reached;
+
+    // The rebuild is still reading Google, and a write must not queue behind it.
+    await updateUser(env, 'row-3', { name: 'Cora Lee' });
+
+    gate.release();
+    await deletion;
+    expect((await listUsers(env)).data.map((row) => [row.id, row.values.name])).toEqual([
+      ['row-2', 'Bea'],
+      ['row-3', 'Cora Lee']
+    ]);
   });
 });
