@@ -2,44 +2,38 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { runSetup } from '../setup';
+import type { CommandResult, CommandRunner } from './process';
+import { parseSetupArgs } from './setup-cli';
 import { createDefaultSetupConfig } from './setup-config';
 
 const oldBootstrapToken = 'old-bootstrap-token';
 const spreadsheetId = '<SPREADSHEET_ID>';
 const bootstrapSuccessStdout = '__SHEETFLARE_BOOTSTRAP_RESULT__={"projects":[],"apiKeys":[],"skippedKeys":[],"revokedKeys":[]}\n';
 
-const boundary = vi.hoisted(() => {
-  const commands: Array<{ args: string[]; input: string | null }> = [];
-  const bearers: string[] = [];
-  const fetchUrls: string[] = [];
-  const bootstrap = {
-    code: 0,
-    stdout: '',
-    stderr: ''
-  };
-  return { commands, bearers, fetchUrls, bootstrap };
-});
+const clearedEnv = [
+  'ADMIN_BEARER_TOKEN',
+  'GOOGLE_DRIVE_WEBHOOK_SECRET',
+  'GOOGLE_CLIENT_EMAIL',
+  'GOOGLE_PRIVATE_KEY',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'GOOGLE_CREDENTIALS_JSON',
+  'SHEETFLARE_BASE_URL',
+  'SHEETFLARE_ADMIN_CREDENTIAL',
+  'SHEETFLARE_ADMIN_BEARER',
+  'SHEETFLARE_PRIVATE_READ_KEY',
+  'SHEETFLARE_MUTATION_KEY'
+];
 
-vi.mock('./process', async () => {
-  const actual = await vi.importActual<typeof import('./process')>('./process');
-  return {
-    ...actual,
-    runCommand: vi.fn(async (_command: string, args: string[], options?: { input?: string }) => {
-      boundary.commands.push({
-        args,
-        input: options?.input ?? null
-      });
-      if (args.includes('ops:bootstrap')) {
-        return {
-          code: boundary.bootstrap.code,
-          stdout: boundary.bootstrap.stdout,
-          stderr: boundary.bootstrap.stderr
-        };
-      }
-      return { code: 0, stdout: '', stderr: '' };
-    })
-  };
-});
+const boundary: {
+  commands: Array<{ args: string[]; input: string | null }>;
+  bearers: string[];
+  fetchUrls: string[];
+} = {
+  commands: [],
+  bearers: [],
+  fetchUrls: []
+};
 
 const activeWatch = {
   spreadsheetId,
@@ -57,6 +51,20 @@ const activeWatch = {
   lastReindexError: null,
   projectSlugs: ['demo']
 };
+
+function isolatedEnv(overrides: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!clearedEnv.includes(key)) {
+      env[key] = value;
+    }
+  }
+  return { ...env, ...overrides };
+}
+
+function commandResult(code: number, stdout = '', stderr = ''): CommandResult {
+  return { code, signal: null, stdout, stderr };
+}
 
 function responseFor(url: string) {
   if (url.endsWith('/watches/register') || url.endsWith('/watches')) {
@@ -90,98 +98,81 @@ function registerUrls() {
 }
 
 describe('setup Drive watch recovery after webhook secret replacement', () => {
-  const previousArgv = process.argv.slice();
-  const previousEnv = { ...process.env };
-  const previousStdinIsTTY = process.stdin.isTTY;
-  const previousStdoutIsTTY = process.stdout.isTTY;
-  let configDir: string | null = null;
+  const tempDirs: string[] = [];
 
   afterEach(async () => {
-    process.argv = previousArgv;
-    for (const key of Object.keys(process.env)) {
-      if (previousEnv[key] === undefined) {
-        delete process.env[key];
-      }
-    }
-    for (const [key, value] of Object.entries(previousEnv)) {
-      if (value !== undefined) {
-        process.env[key] = value;
-      }
-    }
-    Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: previousStdinIsTTY });
-    Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: previousStdoutIsTTY });
-    vi.unstubAllGlobals();
     vi.restoreAllMocks();
-    if (configDir) {
-      await rm(configDir, { recursive: true, force: true });
-      configDir = null;
-    }
+    await Promise.all(tempDirs.splice(0).map((path) => rm(path, { force: true, recursive: true })));
   });
 
-  async function runSetup(options: {
+  async function runSetupWithDeps(options: {
     args: string[];
     baseUrl?: string | null;
     bootstrap?: { code: number; stdout: string; stderr: string };
     fetch?: typeof fetch;
   }) {
-    configDir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-'));
+    const configDir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-'));
+    tempDirs.push(configDir);
     const configPath = join(configDir, 'sheetflare.setup.json');
     await writeFile(configPath, createDefaultSetupConfig(), 'utf8');
-
-    delete process.env.ADMIN_BEARER_TOKEN;
-    delete process.env.GOOGLE_DRIVE_WEBHOOK_SECRET;
-    delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
-    delete process.env.GOOGLE_CREDENTIALS_JSON;
-    delete process.env.SHEETFLARE_BASE_URL;
-    process.env.SHEETFLARE_ADMIN_CREDENTIAL = oldBootstrapToken;
-    process.env.GOOGLE_CLIENT_EMAIL = 'sheetflare@example.com';
-    process.env.GOOGLE_PRIVATE_KEY = 'test-private-key';
-    if (options.baseUrl) {
-      process.env.SHEETFLARE_BASE_URL = options.baseUrl;
-    }
-
-    process.argv = [process.execPath, 'setup.ts', ...options.args, '--config', configPath];
-    Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: false });
-    Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: false });
 
     boundary.commands.length = 0;
     boundary.bearers.length = 0;
     boundary.fetchUrls.length = 0;
-    boundary.bootstrap.code = options.bootstrap?.code ?? 0;
-    boundary.bootstrap.stdout = options.bootstrap?.stdout ?? bootstrapSuccessStdout;
-    boundary.bootstrap.stderr = options.bootstrap?.stderr ?? '';
+    const bootstrap = {
+      code: options.bootstrap?.code ?? 0,
+      stdout: options.bootstrap?.stdout ?? bootstrapSuccessStdout,
+      stderr: options.bootstrap?.stderr ?? ''
+    };
+
+    const overrides: Record<string, string> = {
+      SHEETFLARE_ADMIN_CREDENTIAL: oldBootstrapToken,
+      GOOGLE_CLIENT_EMAIL: 'sheetflare@example.com',
+      GOOGLE_PRIVATE_KEY: 'test-private-key'
+    };
+    if (options.baseUrl) {
+      overrides.SHEETFLARE_BASE_URL = options.baseUrl;
+    }
 
     const warnings: string[] = [];
-    const errors: string[] = [];
     vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
       warnings.push(args.map((arg) => String(arg)).join(' '));
     });
-    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
-      errors.push(args.map((arg) => String(arg)).join(' '));
-    });
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null) => {
-      throw new Error(`setup exited ${code ?? 0}`);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('runSetup must not call process.exit');
     });
 
-    vi.stubGlobal('fetch', options.fetch ?? vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const runCommand: CommandRunner = async (_command, args, commandOptions) => {
+      boundary.commands.push({ args, input: commandOptions?.input ?? null });
+      if (args.includes('ops:bootstrap')) {
+        return commandResult(bootstrap.code, bootstrap.stdout, bootstrap.stderr);
+      }
+      return commandResult(0);
+    };
+    const fetchImpl: typeof fetch = options.fetch ?? (async (input, init) => {
       rememberBearer(init);
       boundary.fetchUrls.push(String(input));
       return Response.json(responseFor(String(input)));
-    }));
+    });
 
-    vi.resetModules();
-    const setup = await import('../setup');
-    return { setup, warnings, errors, exitSpy };
+    const cliOptions = parseSetupArgs([...options.args, '--config', configPath]);
+    const env = isolatedEnv(overrides);
+    return {
+      run: () => runSetup(cliOptions, { runCommand, fetch: fetchImpl, prompter: null, env }),
+      warnings,
+      exitSpy
+    };
   }
 
   it('re-registers Drive watches with the applied credential when bootstrap throws after --apply-secrets', async () => {
-    const { setup, errors } = await runSetup({
+    const { run } = await runSetupWithDeps({
       args: ['--apply-secrets', '--bootstrap'],
       baseUrl: 'https://example.workers.dev',
       bootstrap: { code: 1, stdout: '', stderr: 'bootstrap failed' }
     });
 
-    await expect(setup.setupRun).rejects.toThrow('setup exited 1');
+    const failure = await run().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
 
     const appliedToken = appliedAdminToken();
     expect(appliedToken).toEqual(expect.any(String));
@@ -189,16 +180,17 @@ describe('setup Drive watch recovery after webhook secret replacement', () => {
     expect(registerUrls()).toHaveLength(1);
     expect(boundary.bearers.length).toBeGreaterThan(0);
     expect(boundary.bearers.every((bearer) => bearer === appliedToken)).toBe(true);
-    expect(errors.join('\n')).toContain('Bootstrap failed');
+    const message = failure instanceof Error ? failure.message : String(failure);
+    expect(message).toContain('Bootstrap failed');
   });
 
   it('registers Drive watches once when --apply-secrets and bootstrap succeed', async () => {
-    const { setup, exitSpy } = await runSetup({
+    const { run, exitSpy } = await runSetupWithDeps({
       args: ['--apply-secrets', '--bootstrap'],
       baseUrl: 'https://example.workers.dev'
     });
 
-    await expect(setup.setupRun).resolves.toBeUndefined();
+    await expect(run()).resolves.toBeUndefined();
     expect(exitSpy).not.toHaveBeenCalled();
     expect(registerUrls()).toHaveLength(1);
     const appliedToken = appliedAdminToken();
@@ -206,38 +198,42 @@ describe('setup Drive watch recovery after webhook secret replacement', () => {
   });
 
   it('warns with the recovery command when the API URL is unknown after the webhook secret is replaced', async () => {
-    const { setup, warnings, errors } = await runSetup({
+    const { run, warnings } = await runSetupWithDeps({
       args: ['--apply-secrets', '--bootstrap'],
       baseUrl: null
     });
 
-    await expect(setup.setupRun).rejects.toThrow('setup exited 1');
+    const failure = await run().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
     expect(registerUrls()).toHaveLength(0);
     expect(warnings.join('\n')).toContain('npm run ops:watch:drive');
-    expect(errors.join('\n')).toContain('SHEETFLARE_BASE_URL');
+    const message = failure instanceof Error ? failure.message : String(failure);
+    expect(message).toContain('SHEETFLARE_BASE_URL');
   });
 
   it('warns with the recovery command when re-registration fails and still reports the bootstrap error', async () => {
-    const { setup, warnings, errors } = await runSetup({
+    const { run, warnings } = await runSetupWithDeps({
       args: ['--apply-secrets', '--bootstrap'],
       baseUrl: 'https://example.workers.dev',
       bootstrap: { code: 1, stdout: '', stderr: 'bootstrap failed' },
-      fetch: vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetch: async (input, init) => {
         rememberBearer(init);
         boundary.fetchUrls.push(String(input));
         if (String(input).endsWith('/watches/register')) {
           throw new Error('register failed');
         }
         return Response.json(responseFor(String(input)));
-      })
+      }
     });
 
-    await expect(setup.setupRun).rejects.toThrow('setup exited 1');
+    const failure = await run().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
     expect(registerUrls()).toHaveLength(1);
     const appliedToken = appliedAdminToken();
     expect(boundary.bearers).toEqual([appliedToken]);
     expect(warnings.join('\n')).toContain('npm run ops:watch:drive');
-    expect(errors.join('\n')).toContain('Bootstrap failed');
-    expect(errors.join('\n')).not.toContain('register failed');
+    const message = failure instanceof Error ? failure.message : String(failure);
+    expect(message).toContain('Bootstrap failed');
+    expect(message).not.toContain('register failed');
   });
 });
