@@ -49,10 +49,11 @@ The load harness covers:
 - indexed list queries on a hot table
 - repeated point reads after a stale wait window
 - mixed create/update/delete cycles
-- rate-limit pressure on one principal
-- anonymous-read separation across many synthetic principals
+- rate-limit pressure on one principal (the admin credential, up to `SHEETFLARE_LOAD_RATE_LIMIT_SAME_PRINCIPAL_REQUESTS` requests, stopping at the first `429`)
 - reindex while reads continue
 - optional manual churn window for direct sheet edits during traffic
+
+The harness does not test rate-limit isolation between principals. The Worker keys limits by the `cf-connecting-ip` header that Cloudflare sets from the real client address (plus one shared bucket for the bootstrap token). It ignores `x-forwarded-for`, and API keys do not get their own bucket, so one load runner cannot simulate separate principals. Verify isolation by running the harness from distinct egress IPs.
 
 ## Recommended First Pilot Settings
 

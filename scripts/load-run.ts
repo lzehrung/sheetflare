@@ -3,6 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { assertPresent, getEnv, logStep, logSuccess, requestJson, ScriptError } from './lib/runtime';
 import { summarizeJson, writeReportArtifacts } from './lib/reporting';
 import { readLoadConfig } from './lib/load-config';
+import { assessRateLimitPressure } from './lib/load-rate-limit';
 
 type RowEnvelope = {
   id: string;
@@ -474,10 +475,9 @@ async function main() {
       } satisfies Omit<ScenarioReport, 'name'>;
     });
 
-    await runScenario('Rate limit pressure and principal separation', async () => {
+    await runScenario('Rate limit pressure on one principal', async () => {
       const adminPath = '/v1/admin/projects';
-      const samePrincipalAttempts: AttemptResult[] = [];
-      let first429At: number | null = null;
+      const attempts: AttemptResult[] = [];
 
       for (let index = 0; index < config.rateLimitSamePrincipalRequests; index += 1) {
         const attempt = await timedRequest<Record<string, unknown>>({
@@ -485,66 +485,19 @@ async function main() {
           path: adminPath,
           bearer: config.adminCredential
         });
-        samePrincipalAttempts.push(attempt);
+        attempts.push(attempt);
         if (attempt.status === 429) {
-          first429At = index + 1;
           break;
         }
       }
 
-      if (!config.publicProject || !config.publicTable) {
-        const combined = [...samePrincipalAttempts];
-        return {
-          status: 'skipped',
-          durationMs: Number(combined.reduce((sum, attempt) => sum + attempt.durationMs, 0).toFixed(2)),
-          ...summarizeAttempts(combined),
-          notes: [
-            first429At ? `samePrincipalFirst429At=${first429At}` : 'samePrincipalFirst429At=not-hit',
-            'public-read coverage not configured'
-          ],
-          samples: [
-            {
-              request: {
-                method: 'GET',
-                path: adminPath,
-                auth: 'admin'
-              },
-              response: {
-                status: samePrincipalAttempts[0]?.status ?? 0,
-                excerpt: summarizeJson(samePrincipalAttempts[0]?.body ?? null)
-              }
-            }
-          ]
-        } satisfies Omit<ScenarioReport, 'name'>;
-      }
-
-      const publicPath = `/v1/projects/${encodeURIComponent(config.publicProject)}/tables/${encodeURIComponent(config.publicTable)}/rows?limit=1`;
-      const distributedAttempts = await runConcurrent(
-        config.rateLimitPrincipalCount * config.rateLimitRequestsPerPrincipal,
-        Math.min(10, config.rateLimitPrincipalCount),
-        async (index) => {
-          const principalIndex = Math.floor(index / config.rateLimitRequestsPerPrincipal);
-          return timedRequest<ListRowsResponse>({
-            baseUrl: config.baseUrl,
-            path: publicPath,
-            expectedStatus: 200,
-            headers: {
-              'x-forwarded-for': `198.51.100.${principalIndex + 10}`
-            }
-          });
-        }
-      );
-
-      const combined = [...samePrincipalAttempts, ...distributedAttempts];
+      const assessment = assessRateLimitPressure(attempts);
 
       return {
-        status: distributedAttempts.every((attempt) => attempt.ok) ? 'passed' : 'failed',
-        durationMs: Number(combined.reduce((sum, attempt) => sum + attempt.durationMs, 0).toFixed(2)),
-        ...summarizeAttempts(combined),
-        notes: [
-          first429At ? `samePrincipalFirst429At=${first429At}` : 'samePrincipalFirst429At=not-hit',
-          `distributedPrincipals=${config.rateLimitPrincipalCount}`
-        ],
+        status: assessment.status,
+        durationMs: Number(attempts.reduce((sum, attempt) => sum + attempt.durationMs, 0).toFixed(2)),
+        ...summarizeAttempts(attempts),
+        notes: assessment.notes,
         samples: [
           {
             request: {
@@ -553,19 +506,8 @@ async function main() {
               auth: 'admin'
             },
             response: {
-              status: samePrincipalAttempts[0]?.status ?? 0,
-              excerpt: summarizeJson(samePrincipalAttempts[0]?.body ?? null)
-            }
-          },
-          {
-            request: {
-              method: 'GET',
-              path: publicPath,
-              auth: 'anonymous'
-            },
-            response: {
-              status: distributedAttempts[0]?.status ?? 0,
-              excerpt: summarizeJson(distributedAttempts[0]?.body ?? null)
+              status: attempts[0]?.status ?? 0,
+              excerpt: summarizeJson(attempts[0]?.body ?? null)
             }
           }
         ]
