@@ -77,6 +77,26 @@ describe('findUnpersistedValues', () => {
       { field: 'count', expected: 7, actual: '8' }
     ]);
   });
+
+  it('accepts a configured number that Sheets reads back with grouping or a currency symbol', () => {
+    expect(findUnpersistedValues({ amount: '1,234' }, { amount: 1234 })).toEqual([]);
+    expect(findUnpersistedValues({ amount: '$1,234.00' }, { amount: 1234 })).toEqual([]);
+    expect(findUnpersistedValues({ amount: '1\u00A0234' }, { amount: 1234 })).toEqual([]);
+    expect(findUnpersistedValues({ amount: '1\u202F234' }, { amount: 1234 })).toEqual([]);
+    expect(findUnpersistedValues({ amount: '1234' }, { amount: 1234 })).toEqual([]);
+  });
+
+  it('still flags a configured number whose read-back is another number, a percentage, or empty', () => {
+    expect(findUnpersistedValues({ amount: '1,235' }, { amount: 1234 })).toHaveLength(1);
+    expect(findUnpersistedValues({ amount: '12.34%' }, { amount: 1234 })).toHaveLength(1);
+    expect(findUnpersistedValues({ amount: '' }, { amount: 0 })).toHaveLength(1);
+    expect(findUnpersistedValues({ amount: '$' }, { amount: 0 })).toHaveLength(1);
+  });
+
+  it('compares a configured string with grouping exactly, not as a number', () => {
+    expect(findUnpersistedValues({ code: '1,234' }, { code: '1,234' })).toEqual([]);
+    expect(findUnpersistedValues({ code: '1234' }, { code: '1,234' })).toHaveLength(1);
+  });
 });
 
 describe('assertUpdatedValuesPersisted', () => {
@@ -95,6 +115,11 @@ describe('assertUpdatedValuesPersisted', () => {
 
   it('passes silently when the update persisted', () => {
     expect(() => assertUpdatedValuesPersisted({ name: 'x' }, { name: 'x' }, 'after the update')).not.toThrow();
+  });
+
+  it('says numbers are compared after removing grouping and currency symbols when a numeric value does not persist', () => {
+    expect(() => assertUpdatedValuesPersisted({ amount: '12.34%' }, { amount: 1234 }, 'after the update'))
+      .toThrow(/removing grouping and currency symbols.*plain number formatting/s);
   });
 });
 
