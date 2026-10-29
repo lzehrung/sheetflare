@@ -256,6 +256,75 @@ describe('scope is checked before the table is resolved', () => {
     expect(response.status).toBe(403);
     expect(probesOf(env).projectRequests).toEqual(['project.table.resolve']);
   });
+
+  it('denies a key scoped to another project the same way for a private table, a missing table, and a missing project', async () => {
+    const authorization = apiKeys.otherProject.authorization;
+    const existing = await read(rowsPath, authorization);
+    const missingTable = await read(missingTableRowsPath, authorization);
+    const missingProject = await read('/v1/projects/absent/tables/users/rows', authorization);
+
+    expect(existing.status).toBe(403);
+    const expectedError = await readError(existing);
+    expect(expectedError).toEqual({
+      code: 'FORBIDDEN',
+      message: 'This API key is scoped to a different project.',
+      details: null
+    });
+    for (const response of [missingTable, missingProject]) {
+      expect(response.status).toBe(403);
+      expect(await readError(response)).toEqual(expectedError);
+    }
+  });
+
+  it('lets a key scoped to another project read an existing public table', async () => {
+    const response = await read(
+      rowsPath,
+      apiKeys.otherProject.authorization,
+      createEnv({ defaultAuthMode: 'public-read' })
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it('uses the private-table denial when a key scoped to another project asks for a missing public table', async () => {
+    const authorization = apiKeys.otherProject.authorization;
+    const privateTable = await read(rowsPath, authorization);
+    const publicMissing = await read(
+      missingTableRowsPath,
+      authorization,
+      createEnv({ defaultAuthMode: 'public-read' })
+    );
+
+    // A failed resolve does not say whether the project is public-read, so this denial matches a private table.
+    expect(publicMissing.status).toBe(403);
+    expect(await readError(publicMissing)).toEqual(await readError(privateTable));
+  });
+
+  it('preserves an internal lookup failure for a key scoped to another project', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const response = await read(
+        rowsPath,
+        apiKeys.otherProject.authorization,
+        createEnv({
+          hooks: {
+            project: ({ body }) =>
+              body.type === 'project.table.resolve' ? new Response('project lookup failed', { status: 500 }) : undefined
+          }
+        })
+      );
+
+      expect(response.status).toBe(500);
+      expect(await readError(response)).toEqual({
+        code: 'INTERNAL_ERROR',
+        message: 'Internal server error.',
+        details: null
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });
 
 describe('Retry-After on rate limit responses', () => {
