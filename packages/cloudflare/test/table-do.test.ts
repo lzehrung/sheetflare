@@ -5423,4 +5423,73 @@ describe('TableDO', () => {
     expect(secondPage.data.map((row) => row.id)).toEqual(['row-b']);
     vi.useRealTimers();
   });
+
+  it('keeps an external change recorded during a sync pending after that sync completes', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    const snapshotRead = createSignal();
+    const releaseSnapshot = createSignal();
+    let gateNextSnapshot = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (gateNextSnapshot && decodeRangeFromUrl(String(input)) === "'Users'!A1:B") {
+        gateNextSnapshot = false;
+        const snapshot = await baseFetch(input, init);
+        snapshotRead.resolve();
+        await releaseSnapshot.promise;
+        return snapshot;
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    gateNextSnapshot = true;
+    const reindex = callUsersTable(env, {
+      type: 'table.reindex',
+      ...usersTable,
+      requestContext: {
+        requestId: 'req-auto',
+        route: 'control.spreadsheet-watch.alarm',
+        principal: 'system:drive-watch',
+        syncSource: 'external-change'
+      }
+    }, 'table.reindex.result');
+    await snapshotRead.promise;
+
+    sheet.rows = [
+      ['_id', 'name'],
+      ['row-1', 'Ada Lovelace']
+    ];
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: '2026-10-28T12:00:00.000Z',
+      debounceUntil: null
+    }, 'table.external-change.record.result');
+    releaseSnapshot.resolve();
+    await reindex;
+
+    const status = await getUsersCacheStatus(env);
+    expect(status).toMatchObject({
+      stale: true,
+      staleReason: 'external-change',
+      externalChange: {
+        pending: true,
+        lastChangedAt: '2026-10-28T12:00:00.000Z'
+      }
+    });
+    expect(status.externalChange.lastAutoReindexAt).not.toBeNull();
+
+    const rows = await listUsers(env);
+    expect(rows.data.map((row) => row.values.name)).toEqual(['Ada Lovelace']);
+    expect((await getUsersCacheStatus(env)).externalChange.pending).toBe(false);
+  });
 });

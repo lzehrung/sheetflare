@@ -97,7 +97,10 @@ const dataGenerationMetaKey = 'data.generation';
 // (a sync that changed data, a mutation or repair applied to the cache, a cache clear).
 // Pagination cursors carry it, so a resync that changes nothing keeps cursors valid.
 const contentRevisionMetaKey = 'cache.contentRevision';
-const monotonicCounterMetaKeys = [dataGenerationMetaKey, contentRevisionMetaKey];
+// externalChangeGeneration advances on every recorded external change (Drive notification or an
+// unconfirmed write). A sync clears the pending change only if no newer one arrived after it began.
+const externalChangeGenerationMetaKey = 'externalChange.generation';
+const monotonicCounterMetaKeys = [dataGenerationMetaKey, contentRevisionMetaKey, externalChangeGenerationMetaKey];
 const readConfigSignatureMetaKey = 'config.readSignature';
 
 type ResolvedTableConfig = GoogleSheetTableConfig & {
@@ -811,6 +814,7 @@ export class TableDO {
       lastChangedAt: changedAt,
       debounceUntil
     });
+    this.incrementCounter(externalChangeGenerationMetaKey);
     this.incrementCounter(dataGenerationMetaKey);
 
     return { ok: true as const };
@@ -915,6 +919,7 @@ export class TableDO {
   private async performSync(config: ResolvedTableConfig, requestContext: TableRequestContext | null): Promise<TableCacheStatus> {
     const startedAt = new Date().toISOString();
     const syncStartedAtMs = Date.now();
+    const observedExternalChangeGeneration = this.getCounter(externalChangeGenerationMetaKey);
     this.setSyncMeta({
       ...this.getSyncMeta(),
       status: 'syncing',
@@ -947,7 +952,7 @@ export class TableDO {
       this.setMeta('schema', JSON.stringify(schema));
       this.setMeta('config.signature', configSignature);
       this.setMeta('validation.summary', JSON.stringify(validation));
-      this.completeExternalChangeSync(completedAt, requestContext?.syncSource === 'external-change');
+      this.completeExternalChangeSync(completedAt, requestContext?.syncSource === 'external-change', observedExternalChangeGeneration);
       this.setSyncMeta({
         status: 'ready',
         rowCount: rows.length,
@@ -1314,12 +1319,14 @@ export class TableDO {
     this.setMeta('externalChange.state', JSON.stringify(state));
   }
 
-  private completeExternalChangeSync(completedAt: string, automatic: boolean) {
+  private completeExternalChangeSync(completedAt: string, automatic: boolean, observedGeneration: number) {
     const state = this.getExternalChangeState();
+    // A change recorded after this sync read its snapshot is not reflected in it; keep it pending.
+    const laterChangePending = this.getCounter(externalChangeGenerationMetaKey) !== observedGeneration && state.pending;
     this.setExternalChangeState({
-      pending: false,
+      pending: laterChangePending,
       lastChangedAt: state.lastChangedAt,
-      debounceUntil: null,
+      debounceUntil: laterChangePending ? state.debounceUntil : null,
       lastAutoReindexAt: automatic ? completedAt : state.lastAutoReindexAt
     });
   }
