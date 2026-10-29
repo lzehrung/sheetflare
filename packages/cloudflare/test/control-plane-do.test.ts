@@ -1641,7 +1641,7 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     }).result.data).toEqual([
       expect.objectContaining({
         spreadsheetId: 'sheet-1',
-        lastWatchError: 'Google Sheets authentication or permission check failed. Rate limit exceeded for creating file subscriptions.'
+        lastWatchError: 'Google Drive rate limit exceeded for creating file subscriptions.'
       })
     ]);
     expect(
@@ -1914,8 +1914,12 @@ describe('ControlPlaneDO Drive reindex', () => {
     return env.TABLE_DO.get(env.TABLE_DO.idFromName(`table:${projectSlug}:${tableSlug}`));
   }
 
-  async function createWatchedTables(env: CloudflareEnv, tables: Array<{ projectSlug: string; tableSlug: string }>) {
-    for (const { projectSlug, tableSlug } of tables) {
+  async function createWatchedTables(
+    env: CloudflareEnv,
+    tables: Array<{ projectSlug: string; tableSlug: string; sheetTabName?: string }>,
+    expirationMs = Date.parse('2026-05-06T10:00:00.000Z')
+  ) {
+    for (const { projectSlug, tableSlug, sheetTabName = 'Users' } of tables) {
       const project = env.PROJECT_DO.get(env.PROJECT_DO.idFromName(`project:${projectSlug}`));
       await doRpc<ProjectDoResponse>(project, {
         type: 'project.create',
@@ -1925,7 +1929,7 @@ describe('ControlPlaneDO Drive reindex', () => {
       await doRpc<ProjectDoResponse>(project, {
         type: 'project.table.create',
         projectSlug,
-        input: { tableSlug, sheetTabName: 'Users', cacheTtlSeconds: 3600 }
+        input: { tableSlug, sheetTabName, cacheTtlSeconds: 3600 }
       });
     }
 
@@ -1934,7 +1938,7 @@ describe('ControlPlaneDO Drive reindex', () => {
       webhookUrl,
       webhookToken: 'secret-token',
       debounceSeconds: 30,
-      expirationMs: Date.parse('2026-05-06T10:00:00.000Z')
+      expirationMs
     });
   }
 
@@ -1972,6 +1976,216 @@ describe('ControlPlaneDO Drive reindex', () => {
       'table.row.get.result'
     ).data.values.status;
   }
+
+  function readLogEvents(spy: { mock: { calls: unknown[][] } }, event: string) {
+    return spy.mock.calls
+      .map(([line]) => String(line))
+      .filter((line) => line.includes(`"event":"${event}"`))
+      .map((line) => JSON.parse(line));
+  }
+
+  it('keeps reindexing later tables after one fails and backs off its retries up to a cap', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'v1']
+      ]
+    };
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    let brokenTabReadable = true;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = decodeURIComponent(String(input));
+      if (url.includes('?fields=sheets.properties')) {
+        return Response.json({
+          sheets: [
+            { properties: { title: 'Broken', sheetId: 2, sheetType: 'GRID' } },
+            { properties: { title: 'Users', sheetId: 1, sheetType: 'GRID' } }
+          ]
+        });
+      }
+
+      if (url.includes("/values/'Broken'")) {
+        return brokenTabReadable
+          ? Response.json({ values: [['_id', 'status'], ['row-1', 'b1']] })
+          : Response.json({
+            error: { code: 403, message: 'Project 123456789012 cannot read Broken', status: 'PERMISSION_DENIED' }
+          }, { status: 403 });
+      }
+
+      return fallbackFetch(input, init);
+    });
+    const { env, controlPlaneNamespace } = createTestEnv();
+    await createWatchedTables(env, [
+      { projectSlug: 'a-proj', tableSlug: 'broken', sheetTabName: 'Broken' },
+      { projectSlug: 'z-proj', tableSlug: 'healthy' }
+    ]);
+
+    brokenTabReadable = false;
+    sheet.rows = [
+      ['_id', 'status'],
+      ['row-1', 'v2']
+    ];
+    await notifyChange(env, '2', '2026-04-29T10:00:00.000Z');
+    vi.setSystemTime(new Date('2026-04-29T10:00:30.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    // Reading the cache status does not sync, so this shows the alarm itself reindexed the later table.
+    expect(expectRpcResult(
+      await doRpc<TableDoResponse>(getTable(env, 'z-proj', 'healthy'), {
+        type: 'table.cache.get',
+        projectSlug: 'z-proj',
+        tableSlug: 'healthy'
+      }),
+      'table.cache.get.result'
+    ).data).toMatchObject({
+      staleReason: 'fresh',
+      externalChange: { pending: false, lastAutoReindexAt: '2026-04-29T10:00:30.000Z' }
+    });
+    expect(await getRowStatus(env, 'z-proj', 'healthy')).toBe('v2');
+    expect(await getWatch(env)).toMatchObject({
+      pendingChangedAt: '2026-04-29T10:00:00.000Z',
+      debounceUntil: '2026-04-29T10:01:00.000Z',
+      lastReindexError: 'a-proj/broken: Google Sheets authentication or permission check failed.'
+    });
+    expect(readLogEvents(errorSpy, 'drive.reindex.failed')).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        projectSlug: 'a-proj',
+        tableSlug: 'broken',
+        attempt: 1,
+        nextAttemptAt: '2026-04-29T10:01:00.000Z'
+      })
+    ]);
+
+    const retryDelaysSeconds: number[] = [];
+    for (let retry = 0; retry < 8; retry += 1) {
+      const dueAt = (await getWatch(env))?.debounceUntil ?? '';
+      vi.setSystemTime(new Date(dueAt));
+      await controlPlaneNamespace.triggerAlarm('control-plane');
+      retryDelaysSeconds.push((Date.parse((await getWatch(env))?.debounceUntil ?? '') - Date.parse(dueAt)) / 1000);
+    }
+
+    expect(retryDelaysSeconds).toEqual([60, 120, 240, 480, 960, 1920, 3600, 3600]);
+    expect(controlPlaneNamespace.getAlarm('control-plane')).toBe(Date.parse((await getWatch(env))?.debounceUntil ?? ''));
+
+    brokenTabReadable = true;
+    vi.setSystemTime(new Date((await getWatch(env))?.debounceUntil ?? ''));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect(await getWatch(env)).toMatchObject({ pendingChangedAt: null, debounceUntil: null, lastReindexError: null });
+    expect(await getRowStatus(env, 'a-proj', 'broken')).toBe('b1');
+
+    brokenTabReadable = false;
+    const changedAt = new Date().toISOString();
+    await notifyChange(env, '3', changedAt);
+    vi.setSystemTime(Date.parse(changedAt) + 30_000);
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect(Date.parse((await getWatch(env))?.debounceUntil ?? '') - Date.now()).toBe(30_000);
+  });
+
+  it('stores a generic reindex error for unexpected failures and keeps the detail in the log', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', createSheetsAndDriveFetch({ rows: [['_id', 'status'], ['row-1', 'v1']] }));
+    const { env, controlPlaneNamespace } = createTestEnv();
+    await createWatchedTables(env, [{ projectSlug: 'demo', tableSlug: 'users' }]);
+    const tableNamespace = env.TABLE_DO;
+    // The table binding fails the way a reset Durable Object does: the RPC throws instead of answering.
+    env.TABLE_DO = {
+      idFromName: (name: string) => tableNamespace.idFromName(name),
+      get: (id: DurableObjectId) => {
+        const stub = tableNamespace.get(id);
+        return {
+          async fetch(input: RequestInfo | URL, init?: RequestInit) {
+            if (String(init?.body ?? '').includes('"type":"table.reindex"')) {
+              throw new Error('Network connection lost to 10.1.2.3:443.');
+            }
+
+            return stub.fetch(input, init);
+          }
+        };
+      }
+    } as never;
+
+    await notifyChange(env, '2', '2026-04-29T10:00:00.000Z');
+    vi.setSystemTime(new Date('2026-04-29T10:00:30.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect((await getWatch(env))?.lastReindexError).toBe(
+      'demo/users: Reindex failed unexpectedly. See the drive.reindex.failed log event for details.'
+    );
+    expect(readLogEvents(errorSpy, 'drive.reindex.failed')).toEqual([
+      expect.objectContaining({
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        errorMessage: 'Network connection lost to 10.1.2.3:443.'
+      })
+    ]);
+  });
+
+  it('stores only the contract message when a watch renewal fails and logs drive.watch.renew.failed', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fallbackFetch = createSheetsAndDriveFetch({ rows: [['_id', 'status'], ['row-1', 'v1']] });
+    let renewalRejected = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (renewalRejected && String(input).includes('/drive/v3/files/sheet-1/watch')) {
+        return Response.json({
+          error: { code: 403, message: 'Drive API is disabled in project 123456789012.', status: 'PERMISSION_DENIED' }
+        }, { status: 403 });
+      }
+
+      return fallbackFetch(input, init);
+    });
+    const { env, controlPlaneNamespace } = createTestEnv();
+    await createWatchedTables(env, [{ projectSlug: 'demo', tableSlug: 'users' }], Date.parse('2026-04-29T10:10:00.000Z'));
+
+    renewalRejected = true;
+    vi.setSystemTime(new Date('2026-04-29T10:05:01.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect((await getWatch(env))?.lastWatchError).toBe('Google Sheets authentication or permission check failed.');
+    expect(readLogEvents(errorSpy, 'drive.watch.renew.failed')).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        channelId: 'channel-sheet-1',
+        errorCode: 'BAD_GATEWAY'
+      })
+    ]);
+  });
+
+  it('logs notifications for unknown channels or resources as drive.notification.rejected', async () => {
+    vi.stubGlobal('fetch', createSheetsAndDriveFetch({ rows: [['_id', 'status'], ['row-1', 'v1']] }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { env } = createTestEnv();
+    await createWatchedTables(env, [{ projectSlug: 'demo', tableSlug: 'users' }]);
+    const notify = async (channelId: string, resourceId: string) => expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(getControlPlane(env), {
+        type: 'control.spreadsheet-watch.notify',
+        channelId,
+        resourceId,
+        resourceState: 'update',
+        messageNumber: '2',
+        changedAt: '2026-04-29T10:00:00.000Z',
+        channelExpiration: null
+      }),
+      'control.spreadsheet-watch.notify.result'
+    );
+
+    expect(await notify('channel-unknown', 'resource-sheet-1')).toMatchObject({ accepted: false });
+    expect(await notify('channel-sheet-1', 'resource-other')).toMatchObject({ accepted: false });
+    expect(readLogEvents(warnSpy, 'drive.notification.rejected')).toEqual([
+      expect.objectContaining({ channelId: 'channel-unknown', resourceId: 'resource-sheet-1', reason: 'unknown-channel' }),
+      expect.objectContaining({ channelId: 'channel-sheet-1', resourceId: 'resource-other', reason: 'resource-mismatch' })
+    ]);
+  });
 
   it('keeps a notification that arrives during an alarm reindex pending and re-arms the alarm for it', async () => {
     vi.useFakeTimers();

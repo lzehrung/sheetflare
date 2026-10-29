@@ -18,6 +18,7 @@ import type {
 } from '@sheetflare/contracts';
 import { controlPlaneDoRequestSchema } from '@sheetflare/contracts';
 import { GoogleSheetsService } from '@sheetflare/google-sheets';
+import { z } from 'zod';
 import type { CloudflareEnv } from '../types';
 import { doRpc, durableObjectErrorResponse, parseDurableObjectRpcRequest } from '../rpc';
 import { resolveGoogleCredential } from '../google-credentials';
@@ -60,6 +61,7 @@ type SpreadsheetWatchRow = {
   last_reindex_started_at: string | null;
   last_reindex_completed_at: string | null;
   last_reindex_error: string | null;
+  reindex_failure_count: number;
   updated_at: string;
 };
 
@@ -102,6 +104,21 @@ const watchRenewQuotaRetryGraceMs = 15 * 60 * 1000;
 const watchRetryAdviceGraceMs = 15 * 60 * 1000;
 const watchStopRetryBaseMs = 60 * 1000;
 const watchStopRetryMaxMs = 60 * 60 * 1000;
+const reindexRetryMinBaseMs = 30 * 1000;
+const reindexRetryMaxMs = 60 * 60 * 1000;
+
+// Stored watch and reindex errors are shown through the admin API, so they hold contract messages only. Upstream text
+// and unexpected exception messages are kept in the matching log event.
+const unexpectedReindexErrorMessage = 'Reindex failed unexpectedly. See the drive.reindex.failed log event for details.';
+const unexpectedWatchErrorMessage = 'Watch renewal failed unexpectedly. See the drive.watch.renew.failed log event for details.';
+const driveWatchQuotaErrorMessage = 'Google Drive rate limit exceeded for creating file subscriptions.';
+
+// GoogleSheetsService marks Drive's per-file watch quota rejection in the error details.
+const driveWatchQuotaErrorDetailsSchema = z.union([
+  z.object({ driveSubscriptionQuotaExceeded: z.literal(true) }),
+  // Details from GoogleSheetsService versions that relayed Google's message instead of classifying the error.
+  z.object({ message: z.string().includes('Rate limit exceeded for creating file subscriptions.') })
+]);
 
 export class ControlPlaneDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
@@ -165,6 +182,7 @@ export class ControlPlaneDO {
         last_reindex_started_at TEXT,
         last_reindex_completed_at TEXT,
         last_reindex_error TEXT,
+        reindex_failure_count INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL
       )
     `);
@@ -205,6 +223,7 @@ export class ControlPlaneDO {
     this.ensureSpreadsheetWatchColumn('expiration_duration_ms', 'INTEGER');
     this.ensureSpreadsheetWatchColumn('last_message_number', 'TEXT');
     this.ensureSpreadsheetWatchColumn('last_watch_error', 'TEXT');
+    this.ensureSpreadsheetWatchColumn('reindex_failure_count', 'INTEGER NOT NULL DEFAULT 0');
   }
 
   private ensureSpreadsheetWatchColumn(columnName: string, definition: string) {
@@ -693,6 +712,16 @@ export class ControlPlaneDO {
     const nextMessageNumber = normalizeMessageNumber(messageNumber);
 
     if (!watch || watch.resource_id !== resourceId) {
+      // Expected for channels that were replaced or stopped and still deliver until they expire; a steady stream for a
+      // current channel points at a watch the control plane lost track of.
+      console.warn(JSON.stringify({
+        event: 'drive.notification.rejected',
+        channelId,
+        resourceId,
+        resourceState,
+        messageNumber,
+        reason: watch ? 'resource-mismatch' : 'unknown-channel'
+      }));
       return {
         accepted: false,
         spreadsheetId: null,
@@ -1041,12 +1070,12 @@ export class ControlPlaneDO {
   private async renewSpreadsheetWatch(watch: SpreadsheetWatchRow) {
     const webhookToken = this.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim();
     if (!watch.webhook_url?.trim()) {
-      this.recordWatchError(watch.spreadsheet_id, 'Spreadsheet watch is missing its stored webhook URL.');
+      this.recordWatchRenewalFailure(watch, 'Spreadsheet watch is missing its stored webhook URL.', null);
       return;
     }
 
     if (!webhookToken) {
-      this.recordWatchError(watch.spreadsheet_id, 'GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.');
+      this.recordWatchRenewalFailure(watch, 'GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.', null);
       return;
     }
 
@@ -1086,7 +1115,7 @@ export class ControlPlaneDO {
         watch.spreadsheet_id
       );
     } catch (error) {
-      this.recordWatchError(watch.spreadsheet_id, describeWatchError(error));
+      this.recordWatchRenewalFailure(watch, describeWatchError(error), error);
       return;
     }
 
@@ -1122,25 +1151,37 @@ export class ControlPlaneDO {
       watch.spreadsheet_id
     );
 
-    try {
-      for (const projectSlug of this.getProjectSlugsForSpreadsheet(watch.spreadsheet_id)) {
-        const tables = await this.listProjectTables(projectSlug);
-        for (const table of tables) {
+    // Each table is reindexed on its own, so one failing table neither stops the tables after it nor hides their
+    // failures from the log.
+    const failures: Array<{ projectSlug: string; tableSlug: string | null; error: unknown }> = [];
+    for (const projectSlug of this.getProjectSlugsForSpreadsheet(watch.spreadsheet_id)) {
+      const tables = await this.listProjectTables(projectSlug).catch((error: unknown) => {
+        failures.push({ projectSlug, tableSlug: null, error });
+        return [];
+      });
+      for (const table of tables) {
+        try {
           await doRpc<TableDoResponse>(getTableStub(this.env, projectSlug, table.tableSlug), {
             type: 'table.reindex',
             projectSlug,
             tableSlug: table.tableSlug,
             requestContext: this.buildSystemRequestContext('control.spreadsheet-watch.alarm', 'external-change')
           });
+        } catch (error) {
+          failures.push({ projectSlug, tableSlug: table.tableSlug, error });
         }
       }
+    }
 
+    const [firstFailure] = failures;
+    if (!firstFailure) {
       const completedAt = new Date().toISOString();
       this.ctx.storage.sql.exec(
         `
         UPDATE spreadsheet_watches
         SET last_reindex_completed_at = ?,
             last_reindex_error = NULL,
+            reindex_failure_count = 0,
             updated_at = ?
         WHERE spreadsheet_id = ?
         `,
@@ -1161,21 +1202,57 @@ export class ControlPlaneDO {
         watch.spreadsheet_id,
         watch.pending_changed_at
       );
-    } catch (error) {
-      const retryAt = new Date(Date.now() + Math.max(watch.debounce_seconds, 30) * 1000).toISOString();
-      this.ctx.storage.sql.exec(
-        `
-        UPDATE spreadsheet_watches
-        SET debounce_until = ?,
-            last_reindex_error = ?,
-            updated_at = ?
-        WHERE spreadsheet_id = ?
-        `,
-        retryAt,
-        error instanceof Error ? error.message : String(error),
-        new Date().toISOString(),
-        watch.spreadsheet_id
-      );
+      return;
+    }
+
+    const current = this.getSpreadsheetWatch(watch.spreadsheet_id);
+    if (!current) {
+      return;
+    }
+
+    // Consecutive failures back off exponentially from the debounce, so a broken table is not re-read every few
+    // seconds forever. A notification recorded during the reindex keeps its own, earlier debounce.
+    const attempt = current.reindex_failure_count + 1;
+    const retryDelayMs = getBackoffDelayMs(
+      attempt,
+      Math.max(watch.debounce_seconds * 1000, reindexRetryMinBaseMs),
+      reindexRetryMaxMs
+    );
+    const nextAttemptAt = current.pending_changed_at === watch.pending_changed_at
+      ? new Date(Date.now() + retryDelayMs).toISOString()
+      : current.debounce_until;
+    const failedTarget = firstFailure.tableSlug === null
+      ? firstFailure.projectSlug
+      : `${firstFailure.projectSlug}/${firstFailure.tableSlug}`;
+    const failureMessage = firstFailure.error instanceof AppError
+      ? firstFailure.error.message
+      : unexpectedReindexErrorMessage;
+    this.ctx.storage.sql.exec(
+      `
+      UPDATE spreadsheet_watches
+      SET debounce_until = ?,
+          reindex_failure_count = ?,
+          last_reindex_error = ?,
+          updated_at = ?
+      WHERE spreadsheet_id = ?
+      `,
+      nextAttemptAt,
+      attempt,
+      `${failedTarget}: ${failureMessage}`,
+      new Date().toISOString(),
+      watch.spreadsheet_id
+    );
+
+    for (const failure of failures) {
+      console.error(JSON.stringify({
+        event: 'drive.reindex.failed',
+        spreadsheetId: watch.spreadsheet_id,
+        projectSlug: failure.projectSlug,
+        tableSlug: failure.tableSlug,
+        attempt,
+        nextAttemptAt,
+        ...describeErrorForLog(failure.error)
+      }));
     }
   }
 
@@ -1289,7 +1366,7 @@ export class ControlPlaneDO {
       return renewalDueAtMs;
     }
 
-    if (isDriveWatchSubscriptionQuotaMessage(watch.last_watch_error)) {
+    if (watch.last_watch_error === driveWatchQuotaErrorMessage) {
       return Math.max(renewalDueAtMs, expirationAtMs + watchRenewQuotaRetryGraceMs);
     }
 
@@ -1362,8 +1439,7 @@ export class ControlPlaneDO {
     return Math.min(left, right);
   }
 
-  private recordWatchError(spreadsheetId: string, message: string) {
-    const now = new Date().toISOString();
+  private recordWatchRenewalFailure(watch: SpreadsheetWatchRow, message: string, error: unknown) {
     this.ctx.storage.sql.exec(
       `
       UPDATE spreadsheet_watches
@@ -1371,9 +1447,17 @@ export class ControlPlaneDO {
       WHERE spreadsheet_id = ?
       `,
       message,
-      now,
-      spreadsheetId
+      new Date().toISOString(),
+      watch.spreadsheet_id
     );
+    console.error(JSON.stringify({
+      event: 'drive.watch.renew.failed',
+      spreadsheetId: watch.spreadsheet_id,
+      channelId: watch.channel_id,
+      expirationAt: watch.expiration_at,
+      lastWatchError: message,
+      ...(error === null ? {} : describeErrorForLog(error))
+    }));
   }
 
   private recordSpreadsheetWatchTombstone(watch: Pick<SpreadsheetWatchRow, 'spreadsheet_id' | 'expiration_at'>) {
@@ -1536,39 +1620,15 @@ function isNonRetriableWatchConfigurationError(lastWatchError: string | null) {
 }
 
 function isDriveWatchSubscriptionQuotaError(error: unknown) {
-  if (!(error instanceof AppError) || error.code !== 'BAD_GATEWAY') {
-    return false;
-  }
-
-  const detailsMessage =
-    typeof error.details === 'object'
-    && error.details !== null
-    && 'message' in error.details
-    && typeof error.details.message === 'string'
-      ? error.details.message
-      : '';
-
-  return isDriveWatchSubscriptionQuotaMessage(detailsMessage);
+  return error instanceof AppError && driveWatchQuotaErrorDetailsSchema.safeParse(error.details).success;
 }
 
 function describeWatchError(error: unknown) {
-  if (!(error instanceof AppError)) {
-    return error instanceof Error ? error.message : String(error);
+  if (isDriveWatchSubscriptionQuotaError(error)) {
+    return driveWatchQuotaErrorMessage;
   }
 
-  const detailsMessage =
-    typeof error.details === 'object'
-    && error.details !== null
-    && 'message' in error.details
-    && typeof error.details.message === 'string'
-      ? error.details.message
-      : null;
-
-  return detailsMessage ? `${error.message} ${detailsMessage}` : error.message;
-}
-
-function isDriveWatchSubscriptionQuotaMessage(message: string | null) {
-  return message?.includes('Rate limit exceeded for creating file subscriptions.') ?? false;
+  return error instanceof AppError ? error.message : unexpectedWatchErrorMessage;
 }
 
 function getActualWatchDurationMs(expirationAt: string | null, fallbackDurationMs: number) {
