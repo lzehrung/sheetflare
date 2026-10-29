@@ -88,6 +88,10 @@ Severity: **P1** likely wrong behavior or significant risk; **P2** real but boun
 - [x] **P2 · logic** Key rotation revoked the authenticating admin key before the others, so later revocations failed with 401; it is now revoked last. *(Copilot review)*
 - [x] **P2 · logic** An inherited `SHEETFLARE_BOOTSTRAP_ROTATE_KEYS=true` could rotate keys without `--rotate-keys`; setup now sets the child flag explicitly. *(Copilot review)*
 - [x] **P2 · tests** Smoke read-back compared raw configured values, failing on normalized fields and arrays; it now applies the table's field rules and Sheets serialization. *(Copilot review)*
+- [x] **P2 · logic** ProjectDO lifecycle operations interleaved while awaiting the control plane: a losing same-slug create could revoke the winner's new keys, an unregistered write could outlive its reservation, and a table request could restore a deleted project's registry entry. Create and delete now run through a per-project queue, and an unregistered write is taken back. *(Copilot review; proven: interleaved real-DO tests)*
+- [x] **P3 · logic** RateLimitDO windows persisted before the cleanup alarm existed never scheduled cleanup. *(Copilot review)*
+- [x] **P2 · logic** `--apply-secrets` kept using the superseded bootstrap token from `SHEETFLARE_ADMIN_CREDENTIAL` for watch registration, smoke, and verify. *(Copilot review)*
+- [x] **P3 · docs** The local admin server credential is delegated to every local process that can reach `127.0.0.1:4173`; Fetch Metadata only blocks cross-origin pages. Documented as the trust boundary. *(Copilot review)*
 - [ ] **P2 · tests** `apps/api/tsconfig.json` type-checks only `src`, so test files are never type-checked (`test/support/harness.ts` already carries a hidden type error).
 - [ ] **P2 · logic** A sync in flight while a write commits can promote the older snapshot, briefly serving pre-write data.
 - [ ] **P2 · logic** `id` filters have the same numeric-operand mismatch between indexed and scan paths that `rowNumber` had.

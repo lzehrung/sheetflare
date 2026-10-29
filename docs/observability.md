@@ -80,7 +80,7 @@ Emitted as a `warn` by the route layer when a Workers Cache purge is rejected. C
 
 ### Failed project reservation release
 
-Emitted by `ProjectDO` when a project create fails after reserving its spreadsheet and credential ref, and the release of that reservation also fails. The reservation expires after 5 minutes; until then, other projects cannot claim the spreadsheet under a different credential ref.
+Emitted by `ProjectDO` when a project create or update fails after reserving its spreadsheet and credential ref, and cleaning up also fails. Two cases: the release of the reservation fails after the local write failed, or the undo of a registration whose control-plane answer never arrived fails. A leftover reservation expires after 5 minutes; until then, other projects cannot claim the spreadsheet under a different credential ref. A leftover registry entry stays until the project slug is deleted.
 
 - `event: "project.reservation.release.failed"`
 - `projectSlug`
@@ -232,7 +232,7 @@ Alert on these conditions before broad production use:
     Alert on any occurrence. A partial row can remain in the sheet until an operator removes it.
 
 16. `project.reservation.release.failed`
-    Alert on any occurrence. The spreadsheet stays claimed for up to 5 minutes; retry the create, or delete the project slug to clear the claim.
+    Alert on any occurrence. The spreadsheet stays claimed for up to 5 minutes, and a leftover registry entry stays until the slug is deleted; retry the create, or delete the project slug to clear both.
 
 ## Executable Health Check
 
