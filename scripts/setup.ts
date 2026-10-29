@@ -30,6 +30,7 @@ import {
   writeSetupLocalState
 } from './lib/setup-state';
 import {
+  replaceSupersededAdminCredential,
   resolvePreferredAdminCredential,
   resolveSetupRuntimeState,
   mergeSetupRuntimeState
@@ -360,7 +361,12 @@ async function main() {
           debug: options.debug
         }
       });
-      adminBearerToken = setupSecrets.adminBearerToken;
+      const adoptedCredentials = replaceSupersededAdminCredential(
+        { adminApiKey, adminBearerToken },
+        setupSecrets.adminBearerToken
+      );
+      adminBearerToken = adoptedCredentials.adminBearerToken;
+      adminApiKey = adoptedCredentials.adminApiKey;
 
       logStep('Saving API secrets to Cloudflare');
       await applyApiSecrets({
@@ -594,7 +600,7 @@ async function main() {
   }
 }
 
-void main().catch((error: unknown) => {
+export const setupRun = main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 });

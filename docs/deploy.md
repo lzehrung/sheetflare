@@ -262,7 +262,9 @@ npm run dev:admin
 
 Use a scoped admin API key for routine work; use the bootstrap token only as break-glass. The startup log states whether a server-side credential is in use, never its value. Restart the server after changing the variable.
 
-The proxy attaches a credential only to requests that carry the admin UI's `x-sheetflare-admin-request` marker and come from `http://127.0.0.1:4173`. Requests from other browser origins, including other localhost ports, reach the Worker unauthenticated. Local processes that can reach port `4173` act with the server credential, the same trust boundary as the environment variable itself.
+The proxy forwards an explicit caller credential, such as one entered in the browser, when the request carries the admin UI marker `x-sheetflare-admin-request`. `SHEETFLARE_ADMIN_CREDENTIAL` is delegated to every local process able to reach `127.0.0.1:4173`: that process can send the marker together with `Sec-Fetch-Site: same-origin` and receive the server credential. The marker and Fetch Metadata checks only block cross-origin web pages. They do not show that a request came from a browser. On a shared or untrusted machine, leave the server credential unset and enter a credential in the browser instead.
+
+Requests from other browser origins, including other localhost ports, reach the Worker unauthenticated.
 
 Sheetflare never writes credentials to browser storage, setup state, or the URL. The credential field supports password managers. Any local process can bind `127.0.0.1:4173` while Sheetflare is stopped, so fill a saved credential only on a page you opened after starting `npm run dev:admin` yourself.
 

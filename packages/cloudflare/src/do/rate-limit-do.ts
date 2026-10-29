@@ -134,6 +134,7 @@ export class RateLimitDO {
     }
 
     if (existing.count >= limit) {
+      await this.scheduleCleanupAlarm(existing.reset_at_ms);
       return {
         allowed: false,
         remaining: 0,
@@ -149,6 +150,7 @@ export class RateLimitDO {
       `,
       bucketKey
     );
+    await this.scheduleCleanupAlarm(existing.reset_at_ms);
 
     return {
       allowed: true,
