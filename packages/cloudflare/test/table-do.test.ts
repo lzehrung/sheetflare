@@ -6280,4 +6280,150 @@ describe('TableDO', () => {
       ['row-3', 'Cora Lee']
     ]);
   });
+
+  it('rebuilds the cache instead of shifting its row numbers again when a sync promotes the post-delete sheet while the delete verifies', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    // Holds the delete's verification read: the deleted row's old position and the one below it.
+    const verification = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A2:A3");
+    vi.stubGlobal('fetch', verification.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    verification.arm();
+    const deletion = deleteUser(env, 'row-1');
+    await verification.reached;
+
+    // Google has removed the row and the delete has not touched the cache yet, so no write has
+    // reached the cache. A sync reads the sheet as it is now and promotes that snapshot.
+    await callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result');
+    expect((await listUsers(env, { sort: 'rowNumber:asc' })).data.map((row) => [row.id, row.rowNumber])).toEqual([
+      ['row-2', 2],
+      ['row-3', 3]
+    ]);
+
+    verification.release();
+    await expect(deletion).resolves.toMatchObject({ ok: true, deletedId: 'row-1' });
+
+    // The promoted snapshot already holds the new row numbers. Shifting them once more would put
+    // row-3 on row 2 and still call the cache fresh.
+    expect((await listUsers(env, { sort: 'rowNumber:asc' })).data.map((row) => [row.id, row.rowNumber])).toEqual([
+      ['row-2', 2],
+      ['row-3', 3]
+    ]);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', rowCount: 2 });
+  });
+
+  it('rebuilds the cache instead of shifting a row number that a point read repaired from the post-delete sheet', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    const verification = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A2:A3");
+    vi.stubGlobal('fetch', verification.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // A row typed in by hand is not cached yet, so a point read has to ask Google for it.
+    sheet.rows.push(['row-4', 'Dee']);
+    verification.arm();
+    const deletion = deleteUser(env, 'row-1');
+    await verification.reached;
+
+    // That read sees the sheet after the delete, where row-4 sits on row 4, and caches it there.
+    const found = await callUsersTable(env, { type: 'table.row.get', ...usersTable, rowId: 'row-4' }, 'table.row.get.result');
+    expect(found.data.rowNumber).toBe(4);
+
+    verification.release();
+    await deletion;
+
+    expect((await listUsers(env, { sort: 'rowNumber:asc' })).data.map((row) => [row.id, row.rowNumber])).toEqual([
+      ['row-2', 2],
+      ['row-3', 3],
+      ['row-4', 4]
+    ]);
+  });
+
+  it('keeps the updated row and the cached row numbers right when a sync promotes the post-update sheet while the update verifies', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea']
+      ],
+      requestedRanges: []
+    };
+    // Holds the update's read-back of the row it wrote.
+    const verification = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A2:B2");
+    vi.stubGlobal('fetch', verification.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    verification.arm();
+    const update = updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+    await verification.reached;
+
+    // Google already holds the new name, so the sync promotes a snapshot that includes the update.
+    await callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result');
+    expect((await listUsers(env)).data.map((row) => row.values.name)).toEqual(['Ada Lovelace', 'Bea']);
+
+    verification.release();
+    await update;
+
+    // An update rewrites one cached row in place, so a snapshot promoted meanwhile is not applied twice.
+    expect((await listUsers(env, { sort: 'rowNumber:asc' })).data.map((row) => [row.id, row.rowNumber, row.values.name])).toEqual([
+      ['row-1', 2, 'Ada Lovelace'],
+      ['row-2', 3, 'Bea']
+    ]);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', rowCount: 2 });
+  });
+
+  it('keeps the created row and the cached row numbers right when a sync promotes the post-create sheet while the create verifies', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    // Holds the create's read-back of the row it appended on row 3.
+    const verification = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A3:B3");
+    vi.stubGlobal('fetch', verification.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    verification.arm();
+    const creation = createUser(env, { name: 'Grace' });
+    await verification.reached;
+
+    // Google already holds the new row, so the sync promotes a snapshot that includes the create.
+    await callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result');
+    expect((await listUsers(env)).data.map((row) => row.values.name)).toEqual(['Ada', 'Grace']);
+
+    verification.release();
+    const created = await creation;
+
+    // A create adds one cached row at the row it landed on, so a snapshot promoted meanwhile is not applied twice.
+    expect((await listUsers(env, { sort: 'rowNumber:asc' })).data.map((row) => [row.id, row.rowNumber, row.values.name])).toEqual([
+      ['row-1', 2, 'Ada'],
+      [created.data.id, 3, 'Grace']
+    ]);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', rowCount: 2 });
+  });
 });

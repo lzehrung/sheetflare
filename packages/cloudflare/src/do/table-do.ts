@@ -109,7 +109,9 @@ const dataGenerationMetaKey = 'data.generation';
 // Pagination cursors carry it, so a resync that changes nothing keeps cursors valid. A sync
 // compares it before and after its snapshot read: a change in between means a write reached the
 // cache that the snapshot may not include, so the sync keeps the cached rows instead of promoting
-// the snapshot and leaves the cache stale (see performSync).
+// the snapshot and leaves the cache stale (see performSync). A delete compares it around its own
+// Google call too: a change in between means the cache may already hold the delete, so it rebuilds
+// instead of shifting row numbers again (see removeRow).
 const contentRevisionMetaKey = 'cache.contentRevision';
 // externalChangeGeneration advances on every recorded external change (Drive notification or an
 // unconfirmed write). A sync clears the pending change only if no newer one arrived after it began.
@@ -789,7 +791,8 @@ export class TableDO {
   }
 
   // Deletes the row from Google and repairs the cache. Returns true when the cache could not be
-  // repaired in place (it was stale or the sheet layout changed) and has to be rebuilt from Google.
+  // repaired in place and has to be rebuilt from Google: it was stale, the sheet layout changed, or
+  // its rows changed while the delete was in flight.
   private async removeRow(config: ResolvedTableConfig, rowId: string, requestContext?: TableRequestContext | null): Promise<boolean> {
     const cacheState = await this.ensurePointOperationReady(config, requestContext);
     const cachedHeaders = this.getMeta('headers');
@@ -802,6 +805,14 @@ export class TableDO {
     }
 
     const existingRow = lookup.row;
+
+    // Lowering the cached row numbers below the deleted row by one is right only while those rows
+    // still hold the numbers they had before the delete. A sync can promote a snapshot that Google
+    // answered after removing the row but before this delete reaches the cache, and a point read can
+    // repair a cached row from the post-delete sheet the same way. Lowering those numbers again
+    // would put two rows on one number and still report the cache as fresh, so a content revision
+    // that moved while the delete was in flight means the cache is rebuilt instead.
+    const contentRevisionBeforeDelete = this.getCounter(contentRevisionMetaKey);
 
     let deleteCommitted = false;
     try {
@@ -816,9 +827,10 @@ export class TableDO {
       throw error;
     }
 
+    const cacheChangedDuringDelete = this.getCounter(contentRevisionMetaKey) !== contentRevisionBeforeDelete;
     this.deleteRowIndex(rowId);
     this.deleteCachedRow(rowId);
-    if (cacheState.staleReason === 'fresh' && cachedHeaders === JSON.stringify(headers)) {
+    if (cacheState.staleReason === 'fresh' && cachedHeaders === JSON.stringify(headers) && !cacheChangedDuringDelete) {
       this.shiftCachedRowNumbersAfterDelete(existingRow.rowNumber);
       this.invalidateSchemaMeta();
       this.markCacheFreshAfterMutation(config, headers);
