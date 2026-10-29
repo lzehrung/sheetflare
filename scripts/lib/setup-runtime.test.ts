@@ -2,8 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   mergeSetupRuntimeState,
   resolvePreferredAdminCredential,
-  resolveSetupRuntimeState,
-  summarizeSetupSecrets
+  resolveSetupRuntimeState
 } from './setup-runtime';
 
 afterEach(() => {
@@ -86,51 +85,6 @@ describe('mergeSetupRuntimeState', () => {
       adminApiKey: 'sfk_admin.secret',
       privateReadKey: 'sfk_read.secret',
       mutationKey: 'sfk_mutation.secret'
-    });
-  });
-});
-
-describe('summarizeSetupSecrets', () => {
-  it('omits every credential when secret display is disabled', () => {
-    expect(summarizeSetupSecrets({
-      showSecrets: false,
-      localStatePath: 'E:/repo/.sheetflare.setup.local.json',
-      adminBearerToken: 'bearer.secret',
-      adminApiKey: 'sfk_admin.secret',
-      privateReadKey: 'sfk_read.secret',
-      mutationKey: 'sfk_mutation.secret'
-    })).toEqual({
-      localStatePath: 'E:/repo/.sheetflare.setup.local.json'
-    });
-  });
-
-  it('shows full values only when explicitly requested', () => {
-    expect(summarizeSetupSecrets({
-      showSecrets: true,
-      localStatePath: 'E:/repo/.sheetflare.setup.local.json',
-      adminBearerToken: 'bearer.secret',
-      adminApiKey: 'sfk_admin.secret',
-      privateReadKey: 'sfk_read.secret',
-      mutationKey: 'sfk_mutation.secret'
-    })).toEqual({
-      adminBearerToken: 'bearer.secret',
-      adminApiKey: 'sfk_admin.secret',
-      privateReadKey: 'sfk_read.secret',
-      mutationKey: 'sfk_mutation.secret',
-      localStatePath: 'E:/repo/.sheetflare.setup.local.json'
-    });
-  });
-
-  it('reports no local state path when the current run did not persist local state', () => {
-    expect(summarizeSetupSecrets({
-      showSecrets: false,
-      localStatePath: null,
-      adminBearerToken: 'bearer.secret',
-      adminApiKey: 'sfk_admin.secret',
-      privateReadKey: 'sfk_read.secret',
-      mutationKey: 'sfk_mutation.secret'
-    })).toEqual({
-      localStatePath: null
     });
   });
 });

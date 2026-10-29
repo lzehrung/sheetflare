@@ -1,12 +1,19 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setupConfigUsesDefaultGoogleCredential } from './lib/setup-config';
-import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
+import { actionsRequireWranglerAuth, assertRotateKeysApplicable, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
 import { confirmSheetShared, createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, recordPrereqResult, type SetupPrereqResult } from './lib/setup-prereqs';
-import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput, redactBootstrapResultMarker } from './lib/setup-bootstrap';
+import {
+  createBootstrapCommandOptions,
+  createBootstrapEnv,
+  findCreatedKeyIfPresent,
+  parseBootstrapOutput,
+  redactBootstrapResultMarker,
+  type SetupBootstrapOutput
+} from './lib/setup-bootstrap';
 import { deployApiWorker, getApiWranglerConfigPath } from './lib/setup-deploy';
-import { listDriveWatches, registerDriveWatches } from './lib/setup-drive-watches';
+import { listDriveWatches, planDriveWatchRegistration, registerDriveWatches } from './lib/setup-drive-watches';
 import {
   applyApiSecrets,
   collectSetupSecrets,
@@ -25,10 +32,9 @@ import {
 import {
   resolvePreferredAdminCredential,
   resolveSetupRuntimeState,
-  mergeSetupRuntimeState,
-  summarizeSetupSecrets,
-  type SetupSecretsSummary
+  mergeSetupRuntimeState
 } from './lib/setup-runtime';
+import { collectMintedCredentials, formatCredentialHandoff } from './lib/setup-credentials';
 import { getSetupDoctorFailureMessage, runSetupDoctor } from './lib/setup-doctor';
 import { checkGcloudAuthPrereq, isPlaceholderGoogleClientEmail } from './lib/setup-google';
 import { formatBeginnerSetupNextSteps, formatSheetShareInstruction } from './lib/setup-next-steps';
@@ -38,7 +44,8 @@ import { ScriptError, getEnv, logSetupStep as logStep, logSetupSuccess as logSuc
 type SetupExecutionSummary = {
   configPath: string;
   apiUrl: string | null;
-} & SetupSecretsSummary;
+  localStatePath: string | null;
+};
 
 async function readConfigFile(path: string) {
   const text = await readFile(path, 'utf8');
@@ -258,6 +265,8 @@ async function main() {
   let configInput: unknown;
   let promptActions: SetupPromptActions | null = null;
   let beginnerSetupStarted = false;
+  let generatedAdminBearerToken: string | null = null;
+  let bootstrapOutput: SetupBootstrapOutput | null = null;
 
   try {
     try {
@@ -311,6 +320,7 @@ async function main() {
     logSuccess(`Setup choices look valid for project ${config.privateProject.slug} with ${tableCount} table${tableCount === 1 ? '' : 's'}.`);
 
     const actions = resolveSetupActions(options, promptActions);
+    assertRotateKeysApplicable(options, actions);
 
     if (!actions.applySecretsNow && !actions.deployNow && !actions.bootstrapNow && !actions.smokeNow && !actions.verifyNow) {
       return;
@@ -361,6 +371,7 @@ async function main() {
         adminBearerToken: setupSecrets.adminBearerToken
       });
       logSuccess('API secrets saved');
+      generatedAdminBearerToken = setupSecrets.adminBearerTokenGenerated ? setupSecrets.adminBearerToken : null;
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
@@ -433,11 +444,19 @@ async function main() {
       }
 
       logStep('Creating projects and API keys');
-      const bootstrapOutput = await runBootstrap(createBootstrapEnv(config, apiUrl, adminBearerToken));
+      bootstrapOutput = await runBootstrap(createBootstrapEnv(config, apiUrl, adminBearerToken, { rotateKeys: options.rotateKeys }));
       if (config.smoke.enabled) {
-        adminApiKey = findCreatedKey(bootstrapOutput, config.smoke.adminKeyName);
-        privateReadKey = findCreatedKey(bootstrapOutput, config.smoke.privateReadKeyName);
-        mutationKey = findCreatedKey(bootstrapOutput, config.smoke.mutationKeyName);
+        adminApiKey = findCreatedKeyIfPresent(bootstrapOutput, config.smoke.adminKeyName) ?? adminApiKey;
+        privateReadKey = findCreatedKeyIfPresent(bootstrapOutput, config.smoke.privateReadKeyName) ?? privateReadKey;
+        mutationKey = findCreatedKeyIfPresent(bootstrapOutput, config.smoke.mutationKeyName) ?? mutationKey;
+      }
+      if (bootstrapOutput.skippedKeys.length > 0) {
+        console.warn(
+          `Warning: Left existing API keys in place: ${bootstrapOutput.skippedKeys.map((key) => key.name).join(', ')}. Their secrets cannot be shown again. Supply them through SHEETFLARE_ADMIN_CREDENTIAL, SHEETFLARE_PRIVATE_READ_KEY, and SHEETFLARE_MUTATION_KEY, or replace them with: npm run setup -- --bootstrap --rotate-keys`
+        );
+      }
+      if (bootstrapOutput.revokedKeys.length > 0) {
+        logSuccess(`Revoked ${bootstrapOutput.revokedKeys.length} replaced API key${bootstrapOutput.revokedKeys.length === 1 ? '' : 's'}`);
       }
       logSuccess('Projects and API keys are ready');
 
@@ -453,10 +472,18 @@ async function main() {
       adminApiKey,
       adminBearerToken
     });
+    const driveWatchPlan = planDriveWatchRegistration({
+      actions,
+      apiUrl,
+      adminCredential: setupAdminCredential
+    });
+    if (driveWatchPlan.kind === 'warn') {
+      console.warn(`Warning: ${driveWatchPlan.message}`);
+    }
     await registerDriveWatchesIfPossible({
       apiUrl,
       adminCredential: setupAdminCredential,
-      shouldRegister: actions.deployNow || actions.bootstrapNow
+      shouldRegister: driveWatchPlan.kind === 'register'
     });
 
     if (actions.smokeNow) {
@@ -512,14 +539,7 @@ async function main() {
     printExecutionSummary({
       configPath: resolvedConfigPath,
       apiUrl,
-      ...summarizeSetupSecrets({
-        showSecrets: options.showSecrets,
-        localStatePath: localStateWritten ? localStatePath : null,
-        adminBearerToken,
-        adminApiKey,
-        privateReadKey,
-        mutationKey
-      })
+      localStatePath: localStateWritten ? localStatePath : null
     });
 
     if (actions.verifyNow) {
@@ -562,6 +582,9 @@ async function main() {
     }
   } finally {
     prompter?.close?.();
+    for (const line of formatCredentialHandoff(collectMintedCredentials({ generatedAdminBearerToken, bootstrapOutput }))) {
+      console.log(line);
+    }
   }
 }
 

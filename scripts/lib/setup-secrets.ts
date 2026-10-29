@@ -25,6 +25,10 @@ export type SetupSecrets = {
   googlePrivateKey: string;
   driveWebhookSecret: string;
   adminBearerToken: string;
+  /** True when setup minted the value rather than reading it from the environment. */
+  driveWebhookSecretGenerated: boolean;
+  /** True when setup minted the value; the operator has no other copy and must be handed it once. */
+  adminBearerTokenGenerated: boolean;
 };
 type GoogleProvisioningOptions = {
   enabled: boolean;
@@ -155,14 +159,18 @@ export async function collectSetupSecrets(options: {
     }
   }
 
-  const adminBearerToken = readEnvValue('ADMIN_BEARER_TOKEN') ?? generateSecretToken(32);
-  const driveWebhookSecret = readEnvValue('GOOGLE_DRIVE_WEBHOOK_SECRET') ?? generateSecretToken(32);
+  const suppliedAdminBearerToken = readEnvValue('ADMIN_BEARER_TOKEN');
+  const suppliedDriveWebhookSecret = readEnvValue('GOOGLE_DRIVE_WEBHOOK_SECRET');
+  const adminBearerToken = suppliedAdminBearerToken ?? generateSecretToken(32);
+  const driveWebhookSecret = suppliedDriveWebhookSecret ?? generateSecretToken(32);
 
   return {
     googleClientEmail,
     googlePrivateKey,
     driveWebhookSecret,
-    adminBearerToken
+    adminBearerToken,
+    driveWebhookSecretGenerated: suppliedDriveWebhookSecret === null,
+    adminBearerTokenGenerated: suppliedAdminBearerToken === null
   };
 }
 
