@@ -1361,3 +1361,52 @@ describe('GoogleSheetsService upstream error sanitization', () => {
     });
   });
 });
+
+describe('GoogleSheetsService.readTableSnapshot', () => {
+  it('rejects a snapshot whose header row differs from the separately read layout', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = decodeURIComponent(String(input));
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({ access_token: 'token', expires_in: 3600 });
+        }
+
+        if (url.includes("/values/'Users'!1:1")) {
+          return Response.json({ values: [['_id', 'name']] });
+        }
+
+        if (url.includes("/values/'Users'!A1:B")) {
+          return Response.json({ values: [['_id', 'email'], ['row-1', 'ada@example.com']] });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    await expect(service.readTableSnapshot({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      readOnlyFields: [],
+      fieldRules: {},
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    })).rejects.toMatchObject({
+      name: ServiceUnavailableError.name,
+      message: 'The sheet header row changed while the table snapshot was being read. Retry the request.'
+    });
+  });
+});

@@ -476,6 +476,17 @@ export class GoogleSheetsService {
       config.spreadsheetId,
       `${escapeSheetName(config.sheetTabName)}!${buildBoundedTableRange(config.headerRow, layout.entries.at(-1)?.columnNumber ?? 1)}`
     );
+    // The data range starts at the header row, so values[0] is the header as of the data read.
+    // A column inserted, removed, or renamed between the two reads would map cells to the wrong
+    // fields; reject the snapshot instead of caching it.
+    const snapshotEntries = extractHeaderEntries(values[0]).map((entry) => `${entry.columnNumber}:${entry.name}`);
+    const layoutEntries = layout.entries.map((entry) => `${entry.columnNumber}:${entry.name}`);
+    if (snapshotEntries.join('\n') !== layoutEntries.join('\n')) {
+      throw new ServiceUnavailableError('The sheet header row changed while the table snapshot was being read. Retry the request.', {
+        headerRow: config.headerRow
+      });
+    }
+
     const dataIndex = Math.max(config.dataStartRow - config.headerRow, 1);
 
     return {

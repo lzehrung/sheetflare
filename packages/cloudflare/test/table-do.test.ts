@@ -5540,4 +5540,44 @@ describe('TableDO', () => {
     expect((await configBList).data.map((row) => row.id)).toEqual(['row-1']);
     expect(snapshotReads).toBe(2);
   });
+
+  it('rejects a sync whose data read returns a different header row than the layout read', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let serveStaleHeaderRow = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (serveStaleHeaderRow && decodeRangeFromUrl(String(input)) === "'Users'!1:1") {
+        return Response.json({ values: [['_id', 'name']] });
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+    const before = await getUsersCacheStatus(env);
+
+    sheet.rows = [
+      ['_id', 'email', 'name'],
+      ['row-1', 'ada@example.com', 'Ada']
+    ];
+    serveStaleHeaderRow = true;
+
+    await expect(callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result')).rejects.toMatchObject({
+      name: 'ServiceUnavailableError',
+      message: 'The sheet header row changed while the table snapshot was being read. Retry the request.'
+    });
+    expect(await getUsersCacheStatus(env)).toMatchObject({
+      status: 'error',
+      rowCount: 1,
+      lastSyncCompletedAt: before.lastSyncCompletedAt
+    });
+  });
 });
