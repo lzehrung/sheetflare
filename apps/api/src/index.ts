@@ -1157,12 +1157,6 @@ function keyCrossesProjectBoundary(auth: AuthContext, projectSlug: string) {
   return auth.kind === 'api-key' && Boolean(auth.record.projectSlug) && auth.record.projectSlug !== projectSlug;
 }
 
-function assertCredentialProjectBoundary(auth: AuthContext, projectSlug: string) {
-  if (keyCrossesProjectBoundary(auth, projectSlug)) {
-    throw new ForbiddenError(wrongProjectMessage);
-  }
-}
-
 function assertApiKeyCanDelegateScopes(auth: AuthContext, requestedScopes: readonly ApiScope[]) {
   if (auth.kind !== 'api-key') {
     return;
