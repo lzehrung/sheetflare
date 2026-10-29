@@ -53,7 +53,7 @@ The load harness covers:
 - reindex while reads continue
 - optional manual churn window for direct sheet edits during traffic
 
-The harness does not test rate-limit isolation between principals. The Worker keys limits by the `cf-connecting-ip` header that Cloudflare sets from the real client address (plus one shared bucket for the bootstrap token). It ignores `x-forwarded-for`, and API keys do not get their own bucket, so one load runner cannot simulate separate principals. Verify isolation by running the harness from distinct egress IPs.
+The harness does not test rate-limit isolation between principals. Every request first counts against a client bucket keyed by the `cf-connecting-ip` header that Cloudflare sets from the real client address (`x-forwarded-for` is ignored); requests that present the bootstrap token use one shared `bootstrap-admin` bucket instead. A request with a valid API key then also counts against that key's own `api-key:<id>` bucket, with the same `RATE_LIMIT_MAX_REQUESTS` per `RATE_LIMIT_WINDOW_SECONDS` and route family. The first `429` therefore comes from whichever bucket runs out first, and the client bucket also counts the runner's other traffic. One load runner shares one client bucket, so it cannot show that separate clients are isolated: run the harness from distinct egress IPs for that.
 
 ## Recommended First Pilot Settings
 
