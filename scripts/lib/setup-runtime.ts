@@ -55,3 +55,24 @@ export function mergeSetupRuntimeState(
 export function resolvePreferredAdminCredential(state: Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'>) {
   return resolveValue(state.adminApiKey, state.adminBearerToken);
 }
+
+// Runtime resolution copies SHEETFLARE_ADMIN_CREDENTIAL into both fields. After --apply-secrets
+// replaces the bootstrap token, any field still holding that superseded token must follow it;
+// otherwise watch registration, smoke, and verify keep sending the old token.
+export function replaceSupersededAdminCredential(
+  credentials: Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'>,
+  appliedAdminBearerToken: string
+): Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'> {
+  const supersededToken = credentials.adminBearerToken === appliedAdminBearerToken
+    ? null
+    : credentials.adminBearerToken;
+  let adminApiKey = credentials.adminApiKey;
+  if (supersededToken !== null && adminApiKey === supersededToken) {
+    adminApiKey = appliedAdminBearerToken;
+  }
+
+  return {
+    adminApiKey,
+    adminBearerToken: appliedAdminBearerToken
+  };
+}

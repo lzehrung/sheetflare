@@ -220,4 +220,76 @@ describe('RateLimitDO', () => {
     expect(namespace.getStoredTableNames(name)).toEqual(['rate_limit_windows']);
     expect(namespace.getAlarm(name)).toBe(300_000);
   });
+
+  it('schedules cleanup for a persisted window that has no alarm after an upgrade', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const namespace = createDurableObjectNamespace({}, RateLimitDO);
+    const windowSql = `
+      CREATE TABLE rate_limit_windows (
+        bucket_key TEXT PRIMARY KEY,
+        count INTEGER NOT NULL,
+        reset_at_ms INTEGER NOT NULL
+      )
+    `;
+
+    const allowedName = 'data:client:upgrade-allowed';
+    const allowedStub = namespace.get(namespace.idFromName(allowedName));
+    namespace.runSql(allowedName, windowSql);
+    namespace.runSql(
+      allowedName,
+      `INSERT INTO rate_limit_windows (bucket_key, count, reset_at_ms) VALUES (?, ?, ?)`,
+      'data:GET:upgrade:0',
+      1,
+      60_000
+    );
+    expect(namespace.getAlarm(allowedName)).toBeNull();
+
+    const allowed = expectRpcResult(
+      await doRpc<RateLimitDoResponse>(allowedStub, {
+        type: 'rate-limit.check',
+        key: 'data:GET:upgrade',
+        limit: 2,
+        windowSeconds: 60,
+        nowMs: 1_000
+      }),
+      'rate-limit.check.result'
+    );
+    expect(allowed).toEqual({ allowed: true, remaining: 0, resetAtMs: 60_000 });
+    expect(namespace.getAlarm(allowedName)).toBe(60_000);
+
+    const deniedName = 'data:client:upgrade-denied';
+    const deniedStub = namespace.get(namespace.idFromName(deniedName));
+    namespace.runSql(deniedName, windowSql);
+    namespace.runSql(
+      deniedName,
+      `INSERT INTO rate_limit_windows (bucket_key, count, reset_at_ms) VALUES (?, ?, ?)`,
+      'data:GET:upgrade:0',
+      2,
+      60_000
+    );
+    expect(namespace.getAlarm(deniedName)).toBeNull();
+
+    const denied = expectRpcResult(
+      await doRpc<RateLimitDoResponse>(deniedStub, {
+        type: 'rate-limit.check',
+        key: 'data:GET:upgrade',
+        limit: 2,
+        windowSeconds: 60,
+        nowMs: 1_000
+      }),
+      'rate-limit.check.result'
+    );
+    expect(denied).toEqual({ allowed: false, remaining: 0, resetAtMs: 60_000 });
+    expect(namespace.getAlarm(deniedName)).toBe(60_000);
+
+    vi.setSystemTime(60_000);
+    await namespace.triggerAlarm(allowedName);
+    await namespace.triggerAlarm(deniedName);
+
+    expect(namespace.getStoredTableNames(allowedName)).toEqual([]);
+    expect(namespace.getStoredTableNames(deniedName)).toEqual([]);
+    expect(namespace.getAlarm(allowedName)).toBeNull();
+    expect(namespace.getAlarm(deniedName)).toBeNull();
+  });
 });
