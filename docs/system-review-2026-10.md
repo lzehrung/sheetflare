@@ -109,6 +109,7 @@ Severity: **P1** likely wrong behavior or significant risk; **P2** real but boun
 - [x] **P2 · logic** Setup subprocesses inherited the host `process.env` instead of the injected setup environment, so an injected `CLOUDFLARE_API_TOKEN` was ignored. *(Copilot review on #20)*
 - [x] **P2 · logic** `--apply-secrets` and webhook rotation: Drive watches are re-registered even when a later step fails, and an operator-selected `sfk_` API key is never replaced by the bootstrap token. *(Copilot review on #19)*
 - [ ] **P2 · tests** `packages/cloudflare/test` is not type-checked (its `tsconfig.json` includes only `src`), and existing test files already carry type errors.
+- [x] **P2 · logic** A delete whose rebuild path ran (revision moved, expired cache, or layout change) left lowered row numbers inconsistent while the cache reported fresh; it now marks an undebounced external change before releasing the write queue, so reads and the next write join one rebuild. *(Copilot review on #20; proven: gated real-DO tests)*
 - [x] **P3 · security** Add Dependabot or Renovate to keep SHA-pinned GitHub Actions current. *(fixed: `.github/dependabot.yml`)*
 - [ ] **Validation** Verify generation-keyed caching, `cf.cacheKey` format, and purge behavior against real Workers Cache in staging (blocked: GitHub staging secrets unset, Wrangler login expired).
 
