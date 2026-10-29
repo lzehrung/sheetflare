@@ -15,15 +15,24 @@ function isPrimitive(value: unknown) {
 }
 
 const CURRENCY_SYMBOL = /^[$€£¥]|[$€£¥]$/;
+const GROUP_SEPARATOR = /[, \u00A0\u202F]/g;
+// Plain digits, or digits grouped in threes by a separator, with an optional `.` fraction. Rejects
+// decimal-comma text such as `12,34`, which stripping every comma would misread as 1234.
+const FORMATTED_NUMBER = /^[-+]?(?:\d{1,3}(?:[, \u00A0\u202F]\d{3})+|\d+)(?:\.\d+)?$/;
 
 /**
- * Sheets reads numbers back in display format (`1,234`, `$1,234.00`). Strips digit grouping and one
- * leading or trailing currency symbol, then parses strictly. Empty text is NaN because `Number('')` is 0,
- * which would let a blank cell match a configured 0.
+ * Sheets reads numbers back in display format (`1,234`, `$1,234.00`). Accepts thousands grouping
+ * and one leading or trailing currency symbol (after an optional sign), then parses. Anything
+ * else, including empty text, decimal commas, and exponent forms, is NaN.
  */
 function parseFormattedNumber(text: string): number {
-  const stripped = text.replace(/[, \u00A0\u202F]/g, '').replace(CURRENCY_SYMBOL, '');
-  return stripped === '' ? Number.NaN : Number(stripped);
+  const trimmed = text.trim();
+  const sign = trimmed.startsWith('-') || trimmed.startsWith('+') ? trimmed.slice(0, 1) : '';
+  const candidate = sign + trimmed.slice(sign.length).replace(CURRENCY_SYMBOL, '');
+  if (!FORMATTED_NUMBER.test(candidate)) {
+    return Number.NaN;
+  }
+  return Number(candidate.replace(GROUP_SEPARATOR, ''));
 }
 
 /**

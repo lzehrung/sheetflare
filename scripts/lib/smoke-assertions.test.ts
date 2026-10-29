@@ -93,6 +93,14 @@ describe('findUnpersistedValues', () => {
     expect(findUnpersistedValues({ amount: '$' }, { amount: 0 })).toHaveLength(1);
   });
 
+  it('does not read decimal-comma or misgrouped text as a grouped number', () => {
+    expect(findUnpersistedValues({ amount: '12,34' }, { amount: 1234 })).toHaveLength(1);
+    expect(findUnpersistedValues({ amount: '1,23,4' }, { amount: 1234 })).toHaveLength(1);
+    expect(findUnpersistedValues({ amount: '1 2 3 4' }, { amount: 1234 })).toHaveLength(1);
+    expect(findUnpersistedValues({ amount: '1234,5' }, { amount: 12345 })).toHaveLength(1);
+    expect(findUnpersistedValues({ amount: '-$1,234,567.50' }, { amount: -1234567.5 })).toEqual([]);
+  });
+
   it('compares a configured string with grouping exactly, not as a number', () => {
     expect(findUnpersistedValues({ code: '1,234' }, { code: '1,234' })).toEqual([]);
     expect(findUnpersistedValues({ code: '1234' }, { code: '1,234' })).toHaveLength(1);
