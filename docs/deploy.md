@@ -119,7 +119,7 @@ Wrangler-based CI needs:
 
 Scope the token to the target Cloudflare account and grant `Workers Scripts Write` for `wrangler deploy` and `wrangler secret put`. `CLOUDFLARE_ACCOUNT_ID` is an identifier rather than secret material, but it may remain a repository secret for workflow simplicity.
 
-This repository's staging Worker deployment also uses `SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY` and `SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN`. The `Deploy Staging` workflow checks all four secrets right after installing dependencies, before it validates or deploys anything, and names each missing one in its failure; see [contributor-staging.md](../contributor-staging.md) for where the values come from.
+This repository's staging Worker deployment also uses `SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY` and `SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN`. The `Deploy Staging` workflow checks all four secrets right after installing dependencies, before it validates or deploys anything, and names each missing one in its failure; see [contributor-staging.md](../contributor-staging.md) for where the values come from. Each Deploy Staging run writes both values to the Worker, so update the matching GitHub secret whenever setup mints a new token or key ([keep them in sync](../contributor-staging.md#keep-the-github-secrets-and-the-worker-in-sync)).
 
 ## Pre-Deploy Checklist
 

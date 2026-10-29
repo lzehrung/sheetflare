@@ -340,11 +340,6 @@ body {
   font-size: 0.85rem;
 }
 
-.badgeDanger {
-  color: var(--danger);
-  background: var(--danger-soft);
-}
-
 .tableForm {
   padding-bottom: 20px;
 }
@@ -372,11 +367,6 @@ body {
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 16px;
-}
-
-.healthBadge {
-  background: var(--success-soft);
-  color: var(--success);
 }
 
 .inlineBadges {
@@ -502,6 +492,16 @@ body {
 .badgeMuted {
   color: var(--muted);
   background: var(--muted-soft);
+}
+
+.badgeDanger {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.healthBadge {
+  background: var(--success-soft);
+  color: var(--success);
 }
 
 .facts {
