@@ -47,6 +47,8 @@ type SheetState = {
   requestedRanges: string[];
 };
 
+type FetchHandler = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
 function decodeRangeFromUrl(url: string) {
   const valuesMarker = '/values/';
   const start = url.indexOf(valuesMarker);
@@ -365,6 +367,35 @@ function createSignal() {
   });
 
   return { promise, resolve };
+}
+
+// Holds the next snapshot read back after Google has answered it, so a test can change the sheet
+// or the table while the sync that issued the read is still in flight. The held snapshot predates
+// everything the test does before calling release().
+function createSnapshotGate(baseFetch: FetchHandler, snapshotRange: string) {
+  const reached = createSignal();
+  const released = createSignal();
+  let armed = false;
+  const gatedFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (armed && decodeRangeFromUrl(String(input)) === snapshotRange) {
+      armed = false;
+      const snapshot = await baseFetch(input, init);
+      reached.resolve();
+      await released.promise;
+      return snapshot;
+    }
+
+    return baseFetch(input, init);
+  };
+
+  return {
+    fetch: gatedFetch,
+    arm: () => {
+      armed = true;
+    },
+    reached: reached.promise,
+    release: released.resolve
+  };
 }
 
 describe('TableDO', () => {
@@ -5578,6 +5609,76 @@ describe('TableDO', () => {
 
     expect((await configBList).data.map((row) => row.id)).toEqual(['row-1']);
     expect(snapshotReads).toBe(2);
+  });
+
+  it('keeps writes committed during a sync from being lost when that sync promotes its older snapshot', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const gate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:B");
+    vi.stubGlobal('fetch', gate.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    gate.arm();
+    const reindex = callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result');
+    await gate.reached;
+    await updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+    const created = await createUser(env, { name: 'Grace' });
+    expect((await listUsers(env)).data.map((row) => row.values.name)).toEqual(['Ada Lovelace', 'Grace']);
+
+    gate.release();
+    await reindex;
+
+    // The promoted snapshot predates both writes, so the cache must not claim to be fresh.
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: true, staleReason: 'external-change' });
+    expect((await listUsers(env)).data.map((row) => [row.id, row.values.name])).toEqual([
+      ['row-1', 'Ada Lovelace'],
+      [created.data.id, 'Grace']
+    ]);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh' });
+  });
+
+  it('does not hand a read that arrives after a write the snapshot of a sync that began before that write', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const gate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:B");
+    vi.stubGlobal('fetch', gate.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    gate.arm();
+    const reindex = callUsersTable(env, { type: 'table.reindex', ...usersTable }, 'table.reindex.result');
+    await gate.reached;
+    await updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+    // A pending change makes the next read sync, and it arrives while the older sync is in flight.
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: '2026-10-28T12:00:00.000Z',
+      debounceUntil: null
+    }, 'table.external-change.record.result');
+    const lateRead = listUsers(env);
+    // Let the read reach the in-flight sync before releasing it (see the config-change test above).
+    for (let turn = 0; turn < 10; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    gate.release();
+    await reindex;
+
+    expect((await lateRead).data.map((row) => row.values.name)).toEqual(['Ada Lovelace']);
   });
 
   it('rejects a sync whose data read returns a different header row than the layout read', async () => {

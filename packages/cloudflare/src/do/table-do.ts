@@ -81,6 +81,14 @@ type CacheState = TableCacheStatus & {
   staleReason: CacheStaleReason;
 };
 
+type ActiveSync = {
+  configSignature: string;
+  // The content revision when the sync began. A different value later means a write was applied
+  // to the cache that the sync's snapshot may not include.
+  contentRevision: number;
+  promise: Promise<TableCacheStatus>;
+};
+
 const emptyExternalChangeState: TableExternalChange = {
   pending: false,
   lastChangedAt: null,
@@ -96,7 +104,9 @@ const emptyExternalChangeState: TableExternalChange = {
 const dataGenerationMetaKey = 'data.generation';
 // contentRevision advances only when cached rows or their indexed values may have changed
 // (a sync that changed data, a mutation or repair applied to the cache, a cache clear).
-// Pagination cursors carry it, so a resync that changes nothing keeps cursors valid.
+// Pagination cursors carry it, so a resync that changes nothing keeps cursors valid. A sync
+// compares it before and after its snapshot read: a change in between means a write reached the
+// cache that the snapshot may not include, so the sync leaves the cache stale (see performSync).
 const contentRevisionMetaKey = 'cache.contentRevision';
 // externalChangeGeneration advances on every recorded external change (Drive notification or an
 // unconfirmed write). A sync clears the pending change only if no newer one arrived after it began.
@@ -263,7 +273,7 @@ function getProjectStub(env: CloudflareEnv, projectSlug: string) {
 
 export class TableDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
-  private activeSync: { configSignature: string; promise: Promise<TableCacheStatus> } | null = null;
+  private activeSync: ActiveSync | null = null;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -937,7 +947,10 @@ export class TableDO {
     const configSignature = buildCacheConfigSignature(config);
     let active = this.activeSync;
     while (active) {
-      if (active.configSignature === configSignature) {
+      // A sync can satisfy this request only if it is for the same config and no write has been
+      // applied to the cache since it began: its snapshot may predate that write, and a request
+      // that arrives after a committed write must not be answered with data from before it.
+      if (active.configSignature === configSignature && active.contentRevision === this.getCounter(contentRevisionMetaKey)) {
         const cache = await active.promise;
         if (!options.force || !cache.stale) {
           const status = this.computeCacheStatus(config);
@@ -947,8 +960,8 @@ export class TableDO {
         break;
       }
 
-      // A sync for another table config is in flight. Its outcome says nothing about this config,
-      // so wait for it to finish (syncs share the staging tables) and then evaluate this config.
+      // Otherwise the in-flight sync says nothing about this request, so wait for it to finish
+      // (syncs share the staging tables) and then evaluate this request again.
       await active.promise.catch(() => undefined);
       active = this.activeSync === active ? null : this.activeSync;
     }
@@ -962,7 +975,11 @@ export class TableDO {
       };
     }
 
-    const sync = { configSignature, promise: this.performSync(config, options.requestContext) };
+    const sync: ActiveSync = {
+      configSignature,
+      contentRevision: this.getCounter(contentRevisionMetaKey),
+      promise: this.performSync(config, options.requestContext)
+    };
     this.activeSync = sync;
 
     try {
@@ -983,6 +1000,7 @@ export class TableDO {
     const startedAt = new Date().toISOString();
     const syncStartedAtMs = Date.now();
     const observedExternalChangeGeneration = this.getCounter(externalChangeGenerationMetaKey);
+    const observedContentRevision = this.getCounter(contentRevisionMetaKey);
     this.setSyncMeta({
       ...this.getSyncMeta(),
       status: 'syncing',
@@ -993,6 +1011,9 @@ export class TableDO {
     try {
       const sheets = this.getSheetsClient(config);
       const snapshot = await sheets.readTableSnapshot(config);
+      // Everything below runs without yielding, so no write can reach the cache between this check
+      // and the promotion. A write applied since the sync began may be missing from the snapshot.
+      const supersededByWrite = this.getCounter(contentRevisionMetaKey) !== observedContentRevision;
       const headers = snapshot.headers;
       const rows = snapshot.rows;
       assertUniqueManagedRowIds(rows, config.idColumn);
@@ -1016,6 +1037,11 @@ export class TableDO {
       this.setMeta('config.signature', configSignature);
       this.setMeta('validation.summary', JSON.stringify(validation));
       this.completeExternalChangeSync(completedAt, requestContext?.syncSource === 'external-change', observedExternalChangeGeneration);
+      if (supersededByWrite) {
+        // Promoting the snapshot replaced that write with older rows, so do not report the cache
+        // as fresh: the next read resyncs instead of serving them.
+        this.recordPendingExternalChange(completedAt, null);
+      }
       this.setSyncMeta({
         status: 'ready',
         rowCount: rows.length,
@@ -1034,6 +1060,7 @@ export class TableDO {
         rowCount: rows.length,
         validationStatus: validation.status,
         validationIssueCount: validation.issueCount,
+        supersededByWrite,
         durationMs: Date.now() - syncStartedAtMs,
         requestId: requestContext?.requestId ?? null,
         route: requestContext?.route ?? null,
