@@ -229,7 +229,28 @@ async function registerDriveWatchesIfPossible(options: {
   }
 }
 
+async function recoverDriveWatches(options: {
+  actions: { applySecretsNow: boolean; deployNow: boolean; bootstrapNow: boolean };
+  apiUrl: string | null;
+  adminCredential: string | null;
+}) {
+  try {
+    const plan = planDriveWatchRegistration(options);
+    if (plan.kind === 'warn') {
+      console.warn(`Warning: ${plan.message}`);
+    }
 
+    await registerDriveWatchesIfPossible({
+      apiUrl: options.apiUrl,
+      adminCredential: options.adminCredential,
+      shouldRegister: plan.kind === 'register'
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Warning: Failed to register Google Drive spreadsheet watches automatically: ${message}`);
+    console.warn('Setup will continue. To retry watch registration later, run: npm run ops:watch:drive');
+  }
+}
 
 async function main() {
   const options = parseSetupArgs(process.argv.slice(2));
@@ -268,6 +289,16 @@ async function main() {
   let beginnerSetupStarted = false;
   let generatedAdminBearerToken: string | null = null;
   let bootstrapOutput: SetupBootstrapOutput | null = null;
+  let apiUrl: string | null = null;
+  let adminBearerToken: string | null = null;
+  let adminApiKey: string | null = null;
+  let webhookSecretApplied = false;
+  let driveWatchRecoveryHandled = false;
+  let driveWatchActions: {
+    applySecretsNow: boolean;
+    deployNow: boolean;
+    bootstrapNow: boolean;
+  } | null = null;
 
   try {
     try {
@@ -321,6 +352,11 @@ async function main() {
     logSuccess(`Setup choices look valid for project ${config.privateProject.slug} with ${tableCount} table${tableCount === 1 ? '' : 's'}.`);
 
     const actions = resolveSetupActions(options, promptActions);
+    driveWatchActions = {
+      applySecretsNow: actions.applySecretsNow,
+      deployNow: actions.deployNow,
+      bootstrapNow: actions.bootstrapNow
+    };
     assertRotateKeysApplicable(options, actions);
 
     if (!actions.applySecretsNow && !actions.deployNow && !actions.bootstrapNow && !actions.smokeNow && !actions.verifyNow) {
@@ -340,9 +376,9 @@ async function main() {
     }
 
     const resolvedRuntimeState = resolveSetupRuntimeState(localState);
-    let apiUrl: string | null = resolvedRuntimeState.apiUrl;
-    let adminBearerToken: string | null = resolvedRuntimeState.adminBearerToken;
-    let adminApiKey: string | null = resolvedRuntimeState.adminApiKey;
+    apiUrl = resolvedRuntimeState.apiUrl;
+    adminBearerToken = resolvedRuntimeState.adminBearerToken;
+    adminApiKey = resolvedRuntimeState.adminApiKey;
     let privateReadKey: string | null = resolvedRuntimeState.privateReadKey;
     let mutationKey: string | null = resolvedRuntimeState.mutationKey;
 
@@ -376,6 +412,7 @@ async function main() {
         driveWebhookSecret: setupSecrets.driveWebhookSecret,
         adminBearerToken: setupSecrets.adminBearerToken
       });
+      webhookSecretApplied = true;
       logSuccess('API secrets saved');
       generatedAdminBearerToken = setupSecrets.adminBearerTokenGenerated ? setupSecrets.adminBearerToken : null;
 
@@ -480,23 +517,15 @@ async function main() {
       localStateWritten = true;
     }
 
-    const setupAdminCredential = resolvePreferredAdminCredential({
-      adminApiKey,
-      adminBearerToken
-    });
-    const driveWatchPlan = planDriveWatchRegistration({
+    await recoverDriveWatches({
       actions,
       apiUrl,
-      adminCredential: setupAdminCredential
+      adminCredential: resolvePreferredAdminCredential({
+        adminApiKey,
+        adminBearerToken
+      })
     });
-    if (driveWatchPlan.kind === 'warn') {
-      console.warn(`Warning: ${driveWatchPlan.message}`);
-    }
-    await registerDriveWatchesIfPossible({
-      apiUrl,
-      adminCredential: setupAdminCredential,
-      shouldRegister: driveWatchPlan.kind === 'register'
-    });
+    driveWatchRecoveryHandled = true;
 
     if (actions.smokeNow) {
       if (!config.smoke.enabled) {
@@ -593,6 +622,18 @@ async function main() {
       }
     }
   } finally {
+    // wrangler secret put deploys the webhook secret immediately. A later failure must still
+    // re-register once; the happy path above sets driveWatchRecoveryHandled so this does not repeat.
+    if (webhookSecretApplied && !driveWatchRecoveryHandled && driveWatchActions) {
+      await recoverDriveWatches({
+        actions: driveWatchActions,
+        apiUrl,
+        adminCredential: resolvePreferredAdminCredential({
+          adminApiKey,
+          adminBearerToken
+        })
+      });
+    }
     prompter?.close?.();
     for (const line of formatCredentialHandoff(collectMintedCredentials({ generatedAdminBearerToken, bootstrapOutput }))) {
       console.log(line);

@@ -250,4 +250,26 @@ describe('planDriveWatchRegistration', () => {
   it('does nothing for runs that neither apply secrets nor deploy nor bootstrap', () => {
     expect(planDriveWatchRegistration({ actions: noActions, ...known })).toEqual({ kind: 'skip' });
   });
+
+  it('stays quiet when bootstrap has no API URL and secrets were not applied', () => {
+    expect(planDriveWatchRegistration({
+      actions: { ...noActions, bootstrapNow: true },
+      apiUrl: null,
+      adminCredential: 'sfk_admin.secret'
+    })).toEqual({ kind: 'skip' });
+  });
+
+  it('warns with the recovery command when secrets were applied with bootstrap but the API URL is unknown', () => {
+    const plan = planDriveWatchRegistration({
+      actions: { applySecretsNow: true, deployNow: false, bootstrapNow: true },
+      apiUrl: null,
+      adminCredential: 'sfk_admin.secret'
+    });
+
+    expect(plan.kind).toBe('warn');
+    if (plan.kind === 'warn') {
+      expect(plan.message).toContain('SHEETFLARE_BASE_URL');
+      expect(plan.message).toContain('npm run ops:watch:drive');
+    }
+  });
 });
