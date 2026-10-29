@@ -26,7 +26,7 @@ type BootstrapProject = {
   tables?: BootstrapTable[] | undefined;
 };
 
-type BootstrapApiKey = {
+export type BootstrapApiKey = {
   name: string;
   projectSlug?: string | null | undefined;
   scopes: string[];

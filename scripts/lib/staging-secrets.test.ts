@@ -18,7 +18,7 @@ describe('findMissingStagingSecrets', () => {
   });
 
   it.each(requiredStagingSecrets)('names %s when it is the only secret missing', (name) => {
-    const { [name]: _omitted, ...env } = completeEnv;
+    const env = Object.fromEntries(Object.entries(completeEnv).filter(([key]) => key !== name));
 
     expect(findMissingStagingSecrets(env)).toEqual([name]);
   });
