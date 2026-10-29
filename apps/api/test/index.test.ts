@@ -132,52 +132,24 @@ describe('CachedTableReads', () => {
     });
   });
 
-  it('caps Workers Cache max-age to the external-change debounce window', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-04-26T00:00:00.000Z'));
+  it.each([
+    { name: 'inside the debounce window', debounceUntil: '2026-04-26T00:00:08.000Z' },
+    { name: 'after the debounce deadline passed without a reindex', debounceUntil: '2020-01-01T00:00:00.000Z' }
+  ])('never stores Workers Cache entries while an external change is pending $name', async ({ debounceUntil }) => {
+    const { entrypoint } = createCachedTableReadsHarness(createEnv({
+      tableCacheTtlSeconds: 60,
+      tableExternalChangeDebounceUntil: debounceUntil
+    }));
 
-    try {
-      const { entrypoint } = createCachedTableReadsHarness(createEnv({
-        tableCacheTtlSeconds: 60,
-        tableExternalChangeDebounceUntil: '2026-04-26T00:00:08.000Z'
-      }));
+    const response = await entrypoint.fetch(
+      new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10')
+    );
 
-      const response = await entrypoint.fetch(
-        new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10')
-      );
-
-      expect(response.status).toBe(200);
-      expectSuccessfulCachedReadHeaders(response, {
-        edgeCacheControl: 'public, max-age=8, stale-if-error=0',
-        tags: ['project:demo', 'table:demo:users']
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('sets Workers Cache no-store when less than one debounce second remains', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-04-26T00:00:07.250Z'));
-
-    try {
-      const { entrypoint } = createCachedTableReadsHarness(createEnv({
-        tableCacheTtlSeconds: 60,
-        tableExternalChangeDebounceUntil: '2026-04-26T00:00:08.000Z'
-      }));
-
-      const response = await entrypoint.fetch(
-        new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10')
-      );
-
-      expect(response.status).toBe(200);
-      expectSuccessfulCachedReadHeaders(response, {
-        edgeCacheControl: 'no-store',
-        tags: ['project:demo', 'table:demo:users']
-      });
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(response.status).toBe(200);
+    expectSuccessfulCachedReadHeaders(response, {
+      edgeCacheControl: 'no-store',
+      tags: ['project:demo', 'table:demo:users']
+    });
   });
 
   it('sets Workers Cache no-store when cache status is stale or not ready', async () => {

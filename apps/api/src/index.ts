@@ -1765,30 +1765,14 @@ async function getCachedTableReadCacheStatus(
   return response.result.data;
 }
 
-function getExternalChangeDebounceSeconds(cacheStatus: GetTableCacheStatusResult['data']) {
-  if (!cacheStatus.externalChange.pending || !cacheStatus.externalChange.debounceUntil) {
-    return null;
-  }
-
-  const debounceUntilMs = Date.parse(cacheStatus.externalChange.debounceUntil);
-  if (!Number.isFinite(debounceUntilMs)) {
-    return null;
-  }
-
-  return Math.max(0, Math.floor((debounceUntilMs - Date.now()) / 1000));
-}
-
 function getCachedTableReadEdgeTtlSeconds(cacheStatus: GetTableCacheStatusResult['data']) {
+  // TableDO reports a pending external change as stale (`external-change`), so this also keeps entries out of the
+  // edge cache from the Drive notification until the change has been reindexed.
   if (cacheStatus.cacheTtlSeconds <= 0 || cacheStatus.status !== 'ready' || cacheStatus.stale) {
     return 0;
   }
 
-  const debounceSeconds = getExternalChangeDebounceSeconds(cacheStatus);
-  if (debounceSeconds === null) {
-    return cacheStatus.cacheTtlSeconds;
-  }
-
-  return Math.min(cacheStatus.cacheTtlSeconds, debounceSeconds);
+  return cacheStatus.cacheTtlSeconds;
 }
 
 function getCachedTableReadTags(operation: CachedTableReadOperation) {

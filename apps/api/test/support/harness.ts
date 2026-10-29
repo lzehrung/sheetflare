@@ -705,7 +705,11 @@ export function createEnv(options?: {
         return Response.json(response);
       }
 
-      const stale = options?.tableCacheStale ?? false;
+      // TableDO.getStaleReason reports a pending external change as stale with reason `external-change`, so a
+      // cache that is fresh while a change is pending cannot exist.
+      const externalChangePending = options?.tableExternalChangeDebounceUntil !== undefined;
+      const stale = externalChangePending || (options?.tableCacheStale ?? false);
+      const defaultStaleReason = stale ? 'ttl-expired' : 'fresh';
       return Response.json({
         type: 'table.cache.get.result',
         result: {
@@ -713,7 +717,7 @@ export function createEnv(options?: {
             status: options?.tableCacheStatus ?? 'ready',
             cacheTtlSeconds: options?.tableCacheTtlSeconds ?? 15,
             stale,
-            staleReason: options?.tableCacheStaleReason ?? (stale ? 'ttl-expired' : 'fresh'),
+            staleReason: externalChangePending ? 'external-change' : (options?.tableCacheStaleReason ?? defaultStaleReason),
             rowCount: 2,
             lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
             lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
