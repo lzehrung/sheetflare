@@ -294,6 +294,8 @@ function getProjectStub(env: CloudflareEnv, projectSlug: string) {
 
 export class TableDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
+  // The sync in flight. Syncs share the staging tables, so one runs at a time: syncCache starts a sync only after it
+  // has joined or waited out whatever is in flight, and a request that needs another one looks again first.
   private activeSync: ActiveSync | null = null;
   // Counts syncs that dropped their snapshot because a write reached the cache while they read it. A request that
   // waited on one has not been answered from a verified cache: see syncUntilPromoted.
@@ -1018,10 +1020,10 @@ export class TableDO {
   // Syncs, and syncs again while the sync it waited on was superseded and the cache still cannot answer. A superseded
   // sync drops its snapshot and leaves the cache marked for the next read, so a request let go then would be answered
   // from rows the mark says cannot be trusted, such as the row numbers a delete could not lower (see removeRow), while
-  // the rebuild that delete started is still reading Google. It waits for the sync that follows instead, which is the
-  // one already running when there is one (see syncCache). A sync that fails ends the wait with its error. A sync that
-  // promotes its snapshot ends it too, even if a change recorded while it read is still pending: that snapshot was
-  // read from Google, and the next request resyncs.
+  // the rebuild that delete started is still reading Google. It waits for the sync that follows instead: the one already
+  // running when there is one, otherwise one that a single waiter starts and the others join (see syncCache). A sync
+  // that fails ends the wait with its error. A sync that promotes its snapshot ends it too, even if a change recorded
+  // while it read is still pending: that snapshot was read from Google, and the next request resyncs.
   private async syncUntilPromoted(config: ResolvedTableConfig, options: { force: boolean; requestContext: TableRequestContext | null }) {
     let supersededBefore: number;
     do {
@@ -1032,6 +1034,11 @@ export class TableDO {
 
   private async syncCache(config: ResolvedTableConfig, options: { force: boolean; requestContext: TableRequestContext | null }) {
     const configSignature = buildCacheConfigSignature(config);
+    // Set once a forced request has taken a stale result from a sync it joined. It is then owed a sync that began after
+    // that one, and the next sync it finds in flight is that sync, whoever started it, so it takes that sync's result
+    // whatever it is. One call is owed at most one such sync, so a replacement that is stale as well (a change was
+    // recorded while it read, or the TTL is 0) cannot chain one more sync per waiter.
+    let owedSync = false;
     let active = this.activeSync;
     while (active) {
       // A sync can satisfy this request only if it is for the same config and no write has been
@@ -1039,17 +1046,21 @@ export class TableDO {
       // that arrives after a committed write must not be answered with data from before it.
       if (active.configSignature === configSignature && active.contentRevision === this.getCounter(contentRevisionMetaKey)) {
         const cache = await active.promise;
-        if (!options.force || !cache.stale) {
+        if (!options.force || !cache.stale || owedSync) {
           const status = this.computeCacheStatus(config);
           return { ok: true as const, rowCount: status.rowCount, cache: status };
         }
 
-        break;
+        owedSync = true;
+      } else {
+        // Otherwise the in-flight sync says nothing about this request, so wait for it to finish
+        // (syncs share the staging tables) and then evaluate this request again.
+        await active.promise.catch(() => undefined);
       }
 
-      // Otherwise the in-flight sync says nothing about this request, so wait for it to finish
-      // (syncs share the staging tables) and then evaluate this request again.
-      await active.promise.catch(() => undefined);
+      // Look at what is in flight now before starting anything. Forced requests that joined the same sync take its
+      // stale result together, and the first of them to get here starts the replacement: the rest find it and join
+      // it instead of each reading the whole sheet again, so Google reads do not scale with the number of waiters.
       active = this.activeSync === active ? null : this.activeSync;
     }
 

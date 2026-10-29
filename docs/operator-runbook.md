@@ -344,6 +344,8 @@ Expected result:
 
 If a row write lands while the reindex is reading the sheet, the result shows `cache.staleReason: "external-change"` instead. The cache keeps the rows that write produced and drops the reindex's older snapshot (see [Superseded table sync](./observability.md#superseded-table-sync)), so nothing was refreshed. Run the reindex again once writes pause.
 
+A reindex that arrives while another sync is reading the sheet joins that sync instead of starting its own. When a write supersedes that sync, only the request that started it reports `external-change`: the reindexes that joined it share one new sync, so they do not multiply the Google reads.
+
 ## Interpreting Common Failures
 
 ### Duplicate managed row IDs
