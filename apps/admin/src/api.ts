@@ -57,25 +57,21 @@ export class AdminResponseShapeError extends Error {
   }
 }
 
-// The Worker answers 401 for both a rejected credential and a valid credential that lacks the needed scope or
-// project boundary; only the message differs. These are the Worker's scope-denial messages (apps/api assert* helpers).
-const insufficientScopeMessagePattern =
-  /^(This operation requires a global admin key|This key (cannot|can only)|API keys can only delegate)/;
-
+// Missing or invalid credentials are 401. A valid key that lacks the required scope is 403 FORBIDDEN.
 export function classifyAuthFailure(error: unknown): AdminAuthFailure | null {
   if (!(error instanceof AdminApiError)) {
     return null;
   }
 
-  if (error.status === 403) {
+  if (error.status === 403 && error.code === 'FORBIDDEN') {
     return 'insufficient-scope';
   }
 
-  if (error.status !== 401) {
-    return null;
+  if (error.status === 401) {
+    return 'invalid-credential';
   }
 
-  return insufficientScopeMessagePattern.test(error.message) ? 'insufficient-scope' : 'invalid-credential';
+  return null;
 }
 
 function summarizeBody(text: string) {

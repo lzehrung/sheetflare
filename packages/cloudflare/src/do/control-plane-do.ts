@@ -114,12 +114,10 @@ const unexpectedReindexErrorMessage = 'Reindex failed unexpectedly. See the driv
 const unexpectedWatchErrorMessage = 'Watch renewal failed unexpectedly. See the drive.watch.renew.failed log event for details.';
 const driveWatchQuotaErrorMessage = 'Google Drive rate limit exceeded for creating file subscriptions.';
 
-// GoogleSheetsService marks Drive's per-file watch quota rejection in the error details.
-const driveWatchQuotaErrorDetailsSchema = z.union([
-  z.object({ driveSubscriptionQuotaExceeded: z.literal(true) }),
-  // Details from GoogleSheetsService versions that relayed Google's message instead of classifying the error.
-  z.object({ message: z.string().includes('Rate limit exceeded for creating file subscriptions.') })
-]);
+// GoogleSheetsService sets this flag and omits Google's message. Detection uses only the flag.
+const driveWatchQuotaErrorDetailsSchema = z.object({
+  driveSubscriptionQuotaExceeded: z.literal(true)
+});
 
 export class ControlPlaneDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();

@@ -1091,7 +1091,7 @@ export function App() {
         return;
       }
 
-      // The Worker answers 401 `Unauthorized` both for a key that is not scoped to this project and for a bad key.
+      // 401 is a rejected credential. 403 FORBIDDEN is a key that cannot access this project. Both stay on the slug prompt.
       const message = classifyAuthFailure(error) === null
         ? describeError(error)
         : `${error instanceof Error ? error.message : 'Unauthorized'} This key is not authorized for project ${projectSlug}: check the slug, and that the key is scoped to it with the admin:projects scope.`;
