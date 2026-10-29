@@ -83,7 +83,7 @@ function responseFor(url: string) {
   if (url.endsWith('/watches/register') || url.endsWith('/watches')) {
     return {
       data: url.endsWith('/watches/register')
-        ? [{ spreadsheetId, channelId: 'channel-1' }]
+        ? [{ spreadsheetId, channelId: 'channel-1', lastWatchError: null }]
         : [activeWatch]
     };
   }
