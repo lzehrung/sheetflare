@@ -56,16 +56,30 @@ export function resolvePreferredAdminCredential(state: Pick<ResolvedSetupRuntime
   return resolveValue(state.adminApiKey, state.adminBearerToken);
 }
 
+/**
+ * Scoped API keys are minted as `sfk_<uuid>.<64 hex>` and the gateway accepts no other shape (apps/api parseApiKey).
+ * No shared parser is exported from @sheetflare/contracts, so the setup runtime mirrors that shape here.
+ */
+const apiKeyCredentialPattern = /^sfk_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[0-9a-f]{64}$/;
+
 // Runtime resolution copies SHEETFLARE_ADMIN_CREDENTIAL into both fields. After --apply-secrets
-// replaces the bootstrap token, any field still holding that superseded token must follow it;
+// replaces the bootstrap token, any field still holding the superseded bootstrap token must follow it;
 // otherwise watch registration, smoke, and verify keep sending the old token.
+// A scoped API key is never a bootstrap token, so it is never superseded and adminApiKey keeps it.
 export function replaceSupersededAdminCredential(
   credentials: Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'>,
   appliedAdminBearerToken: string
 ): Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'> {
-  const supersededToken = credentials.adminBearerToken === appliedAdminBearerToken
-    ? null
-    : credentials.adminBearerToken;
+  const previousBootstrapToken = credentials.adminBearerToken;
+  let supersededToken: string | null = null;
+  if (
+    previousBootstrapToken !== null
+    && previousBootstrapToken !== appliedAdminBearerToken
+    && !apiKeyCredentialPattern.test(previousBootstrapToken.trim())
+  ) {
+    supersededToken = previousBootstrapToken;
+  }
+
   let adminApiKey = credentials.adminApiKey;
   if (supersededToken !== null && adminApiKey === supersededToken) {
     adminApiKey = appliedAdminBearerToken;

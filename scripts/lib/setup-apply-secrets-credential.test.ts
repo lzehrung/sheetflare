@@ -109,7 +109,9 @@ describe('setup --apply-secrets credential selection', () => {
     }
   });
 
-  it('uses the applied bootstrap token for watch registration, smoke, and verify when SHEETFLARE_ADMIN_CREDENTIAL is the superseded token', async () => {
+  const scopedApiKey = `sfk_11111111-1111-4111-8111-111111111111.${'ab'.repeat(32)}`;
+
+  async function runSetupWithAdminCredential(adminCredential: string) {
     configDir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-'));
     const configPath = join(configDir, 'sheetflare.setup.json');
     await writeFile(configPath, createDefaultSetupConfig(), 'utf8');
@@ -118,7 +120,7 @@ describe('setup --apply-secrets credential selection', () => {
     delete process.env.GOOGLE_DRIVE_WEBHOOK_SECRET;
     delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
     delete process.env.GOOGLE_CREDENTIALS_JSON;
-    process.env.SHEETFLARE_ADMIN_CREDENTIAL = oldBootstrapToken;
+    process.env.SHEETFLARE_ADMIN_CREDENTIAL = adminCredential;
     process.env.SHEETFLARE_BASE_URL = 'https://example.workers.dev';
     process.env.SHEETFLARE_PRIVATE_READ_KEY = 'sfk_read.secret';
     process.env.SHEETFLARE_MUTATION_KEY = 'sfk_mutation.secret';
@@ -142,6 +144,9 @@ describe('setup --apply-secrets credential selection', () => {
       throw new Error(`setup exited ${code ?? 0}`);
     });
 
+    // Exception to static imports: setup.ts runs its command on import, so each case needs a fresh module
+    // evaluation. vi.resetModules() plus a dynamic import is the only way to re-run it per case.
+    vi.resetModules();
     const setup = await import('../setup');
     await setup.setupRun;
 
@@ -151,10 +156,26 @@ describe('setup --apply-secrets credential selection', () => {
       ?.trim() ?? null;
     const smokeCredential = boundary.commands.find((command) => command.args.includes('smoke'))?.envCredential ?? null;
 
+    return { appliedToken, smokeCredential, bearers: [...boundary.bearers] };
+  }
+
+  it('uses the applied bootstrap token for watch registration, smoke, and verify when SHEETFLARE_ADMIN_CREDENTIAL is the superseded token', async () => {
+    const { appliedToken, smokeCredential, bearers } = await runSetupWithAdminCredential(oldBootstrapToken);
+
     expect(appliedToken).toEqual(expect.any(String));
     expect(appliedToken).not.toBe(oldBootstrapToken);
-    expect(boundary.bearers.length).toBeGreaterThan(0);
-    expect(boundary.bearers.every((bearer) => bearer === appliedToken)).toBe(true);
+    expect(bearers.length).toBeGreaterThan(0);
+    expect(bearers.every((bearer) => bearer === appliedToken)).toBe(true);
     expect(smokeCredential).toBe(appliedToken);
+  });
+
+  it('keeps the operator-selected API key for watch registration, smoke, and verify when SHEETFLARE_ADMIN_CREDENTIAL is an API key', async () => {
+    const { appliedToken, smokeCredential, bearers } = await runSetupWithAdminCredential(scopedApiKey);
+
+    expect(appliedToken).toEqual(expect.any(String));
+    expect(appliedToken).not.toBe(scopedApiKey);
+    expect(bearers.length).toBeGreaterThan(0);
+    expect(bearers.every((bearer) => bearer === scopedApiKey)).toBe(true);
+    expect(smokeCredential).toBe(scopedApiKey);
   });
 });

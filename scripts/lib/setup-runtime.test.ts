@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   mergeSetupRuntimeState,
+  replaceSupersededAdminCredential,
   resolvePreferredAdminCredential,
   resolveSetupRuntimeState
 } from './setup-runtime';
@@ -85,6 +86,31 @@ describe('mergeSetupRuntimeState', () => {
       adminApiKey: 'sfk_admin.secret',
       privateReadKey: 'sfk_read.secret',
       mutationKey: 'sfk_mutation.secret'
+    });
+  });
+});
+
+describe('replaceSupersededAdminCredential', () => {
+  const apiKey = 'sfk_11111111-1111-4111-8111-111111111111.' + 'ab'.repeat(32);
+  const appliedToken = 'new-bootstrap-token';
+
+  it('never replaces a scoped API key when it is also the runtime bootstrap bearer', () => {
+    expect(replaceSupersededAdminCredential({
+      adminApiKey: apiKey,
+      adminBearerToken: apiKey
+    }, appliedToken)).toEqual({
+      adminApiKey: apiKey,
+      adminBearerToken: appliedToken
+    });
+  });
+
+  it('replaces adminApiKey when it holds the superseded bootstrap token', () => {
+    expect(replaceSupersededAdminCredential({
+      adminApiKey: 'old-bootstrap-token',
+      adminBearerToken: 'old-bootstrap-token'
+    }, appliedToken)).toEqual({
+      adminApiKey: appliedToken,
+      adminBearerToken: appliedToken
     });
   });
 });
