@@ -397,12 +397,6 @@ async function main() {
           debug: options.debug
         }
       });
-      const adoptedCredentials = replaceSupersededAdminCredential(
-        { adminApiKey, adminBearerToken },
-        setupSecrets.adminBearerToken
-      );
-      adminBearerToken = adoptedCredentials.adminBearerToken;
-      adminApiKey = adoptedCredentials.adminApiKey;
 
       logStep('Saving API secrets to Cloudflare');
       await applyApiSecrets({
@@ -410,9 +404,21 @@ async function main() {
         debug: options.debug,
         googlePrivateKey: setupSecrets.googlePrivateKey,
         driveWebhookSecret: setupSecrets.driveWebhookSecret,
-        adminBearerToken: setupSecrets.adminBearerToken
+        adminBearerToken: setupSecrets.adminBearerToken,
+        onApplied: (secretName) => {
+          if (secretName === 'GOOGLE_DRIVE_WEBHOOK_SECRET') {
+            webhookSecretApplied = true;
+          }
+        }
       });
-      webhookSecretApplied = true;
+      // Adopt the new admin credential only once ADMIN_BEARER_TOKEN has landed. If that put fails, the
+      // Worker still accepts the previous credential, which the finally block uses for watch re-registration.
+      const adoptedCredentials = replaceSupersededAdminCredential(
+        { adminApiKey, adminBearerToken },
+        setupSecrets.adminBearerToken
+      );
+      adminBearerToken = adoptedCredentials.adminBearerToken;
+      adminApiKey = adoptedCredentials.adminApiKey;
       logSuccess('API secrets saved');
       generatedAdminBearerToken = setupSecrets.adminBearerTokenGenerated ? setupSecrets.adminBearerToken : null;
 
