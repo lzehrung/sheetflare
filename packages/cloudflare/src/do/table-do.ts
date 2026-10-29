@@ -144,6 +144,14 @@ function requiresResyncBeforeServing(externalChange: TableExternalChange) {
   return externalChange.pending && externalChange.debounceUntil === null;
 }
 
+// A fresh cache, or one that only has a debounced external change pending, can answer reads and unique checks.
+function canServeQueries(cacheState: CacheState) {
+  return (
+    cacheState.staleReason === 'fresh' ||
+    (cacheState.staleReason === 'external-change' && canServeExternalChangeCache(cacheState.externalChange))
+  );
+}
+
 function assertWritableFields(
   values: Partial<RowRecord>,
   readOnlyFields: readonly string[]
@@ -287,6 +295,9 @@ function getProjectStub(env: CloudflareEnv, projectSlug: string) {
 export class TableDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
   private activeSync: ActiveSync | null = null;
+  // Counts syncs that dropped their snapshot because a write reached the cache while they read it. A request that
+  // waited on one has not been answered from a verified cache: see syncUntilPromoted.
+  private supersededSyncCount = 0;
   // Row writes address Google rows by index and check uniqueness against the cache, so two that
   // interleave can shift each other's target rows (a delete moves every row below it) or both pass
   // a unique check. They run one at a time; reads and syncs are never queued behind them.
@@ -953,14 +964,11 @@ export class TableDO {
 
   private async ensureQueryCacheReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
     const cacheState = this.getCacheState(config);
-    if (
-      cacheState.staleReason === 'fresh' ||
-      (cacheState.staleReason === 'external-change' && canServeExternalChangeCache(cacheState.externalChange))
-    ) {
+    if (canServeQueries(cacheState)) {
       return cacheState;
     }
 
-    await this.syncCache(config, {
+    await this.syncUntilPromoted(config, {
       force: cacheState.staleReason === 'never-synced' || cacheState.staleReason === 'error',
       requestContext: requestContext ?? null
     });
@@ -977,10 +985,13 @@ export class TableDO {
       return cacheState;
     }
 
-    await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
+    await this.syncUntilPromoted(config, { force: true, requestContext: requestContext ?? null });
     return this.getCacheState(config);
   }
 
+  // Point operations use the cache as a row-number hint that Google verifies, and read its state only to decide how
+  // strictly to verify. A sync that was superseded leaves it stale, which already means "verify strictly", so unlike
+  // the helpers above this one does not sync again (see syncUntilPromoted).
   private async ensurePointOperationReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
     const cacheState = this.getCacheState(config);
     if (cacheState.staleReason === 'fresh' || cacheState.staleReason === 'ttl-expired') {
@@ -993,7 +1004,7 @@ export class TableDO {
 
   private async ensureMutationValidationReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
     if (this.getCacheState(config).staleReason === 'external-change') {
-      await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
+      await this.syncUntilPromoted(config, { force: true, requestContext: requestContext ?? null });
       return this.getCacheState(config);
     }
 
@@ -1002,6 +1013,21 @@ export class TableDO {
     }
 
     return this.ensurePointOperationReady(config, requestContext);
+  }
+
+  // Syncs, and syncs again while the sync it waited on was superseded and the cache still cannot answer. A superseded
+  // sync drops its snapshot and leaves the cache marked for the next read, so a request let go then would be answered
+  // from rows the mark says cannot be trusted, such as the row numbers a delete could not lower (see removeRow), while
+  // the rebuild that delete started is still reading Google. It waits for the sync that follows instead, which is the
+  // one already running when there is one (see syncCache). A sync that fails ends the wait with its error. A sync that
+  // promotes its snapshot ends it too, even if a change recorded while it read is still pending: that snapshot was
+  // read from Google, and the next request resyncs.
+  private async syncUntilPromoted(config: ResolvedTableConfig, options: { force: boolean; requestContext: TableRequestContext | null }) {
+    let supersededBefore: number;
+    do {
+      supersededBefore = this.supersededSyncCount;
+      await this.syncCache(config, options);
+    } while (this.supersededSyncCount !== supersededBefore && !canServeQueries(this.getCacheState(config)));
   }
 
   private async syncCache(config: ResolvedTableConfig, options: { force: boolean; requestContext: TableRequestContext | null }) {
@@ -1168,12 +1194,14 @@ export class TableDO {
   // A write reached the cache while this sync was reading its snapshot, so the snapshot may be older
   // than the cached rows. Promoting it would drop that write from the cache while a request that
   // already checked the cache (a create's unique check, for one) is still working from it. Keep the
-  // cached rows, which hold the write, and report the cache as stale so the next read resyncs.
+  // cached rows, which hold the write, and report the cache as stale so the next read resyncs. Requests
+  // that waited on this sync are not answered from the stale cache: see syncUntilPromoted.
   private discardSupersededSnapshot(
     config: ResolvedTableConfig,
     requestContext: TableRequestContext | null,
     syncStartedAtMs: number
   ): TableCacheStatus {
+    this.supersededSyncCount += 1;
     this.setSyncMeta({
       ...this.getSyncMeta(),
       status: 'ready',
@@ -1201,9 +1229,9 @@ export class TableDO {
     return (await this.lookupRowById(config, rowId, options))?.row ?? null;
   }
 
-  // Finds a row by managed ID and repairs its cached copy, unless the cache is waiting for a rebuild. The
-  // result also carries the managed IDs beside the row, which a delete uses to confirm afterwards that it
-  // removed this row.
+  // Finds a row by managed ID and repairs its cached copy, unless the cache changed or was marked for a rebuild
+  // while the lookup waited on Google. The result also carries the managed IDs beside the row, which a delete
+  // uses to confirm afterwards that it removed this row.
   private async lookupRowById(
     config: ResolvedTableConfig,
     rowId: string,
@@ -1211,11 +1239,17 @@ export class TableDO {
   ): Promise<RowLookupResult | null> {
     const cached = this.getCachedRow(rowId);
     const rowNumberHint = cached?.rowNumber ?? this.lookupRowNumber(rowId);
+    const contentRevisionBeforeRead = this.getCounter(contentRevisionMetaKey);
     const result = await this.getSheetsClient(config).findRowById(config, rowId, rowNumberHint, options);
-    // A delete can mark the cache for a rebuild while this lookup waits on Google. The rebuild replaces every
-    // cached row, and repairing one now would move the content revision under it, so the rebuild would be
-    // superseded and dropped. The caller still gets the row Google just returned.
-    const repairsCache = !requiresResyncBeforeServing(this.getExternalChangeState());
+    // Two things can leave this lookup behind the cache. The cached copy was read before the lookup waited on Google,
+    // and Google's answer is only as new as its read, so a write, sync or delete that reaches the cache meanwhile (the
+    // content revision moves) leaves both behind it: repairing then could put a row back on a number it has left, since
+    // a delete lowers the numbers below it, while the cache reports fresh. And a cache marked for a resync meanwhile (a
+    // delete that could not lower the row numbers, a write whose answer was lost) is about to be replaced: repairing a
+    // row would move the content revision under that resync, which would then drop its snapshot. Either way the cache
+    // is left alone and the caller still gets the row Google returned.
+    const repairsCache = this.getCounter(contentRevisionMetaKey) === contentRevisionBeforeRead
+      && !requiresResyncBeforeServing(this.getExternalChangeState());
     if (!result) {
       if (repairsCache && (cached || rowNumberHint !== null)) {
         this.deleteRowIndex(rowId);
