@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { once } from 'node:events';
+import type { EventEmitter } from 'node:events';
+
+type TerminableProcess = Pick<EventEmitter, 'once' | 'removeListener'>;
 
 type ProcessTermination = {
   code: number | null;
@@ -101,7 +103,7 @@ export async function waitForProcessExit(child: ChildProcess) {
   return { code, signal };
 }
 
-function waitForChildTermination(child: ChildProcess): Promise<ProcessTermination> {
+function waitForChildTermination(child: TerminableProcess): Promise<ProcessTermination> {
   return new Promise((resolve) => {
     let settled = false;
 
@@ -133,16 +135,25 @@ function waitForChildTermination(child: ChildProcess): Promise<ProcessTerminatio
   });
 }
 
-export async function killProcessTree(pid: number) {
+export type KillProcessTreeOptions = {
+  platform?: NodeJS.Platform;
+  /** Process spawner for taskkill; defaults to child_process.spawn. Injectable so tests need no real taskkill. */
+  spawnProcess?: (command: string, args: readonly string[], options: { stdio: 'ignore' }) => TerminableProcess;
+};
+
+export async function killProcessTree(pid: number, options: KillProcessTreeOptions = {}) {
   if (Number.isNaN(pid)) {
     return;
   }
 
-  if (process.platform === 'win32') {
-    const taskkill = spawn(getCommandName('taskkill'), ['/PID', String(pid), '/T', '/F'], {
-      stdio: 'ignore'
-    });
-    await once(taskkill, 'exit');
+  const platform = options.platform ?? process.platform;
+  const spawnProcess = options.spawnProcess ?? spawn;
+
+  if (platform === 'win32') {
+    // taskkill ships only as taskkill.exe; a .cmd name fails to spawn. A failed spawn emits `error`
+    // with no `exit`, so settle on whichever arrives first rather than hanging cleanup.
+    const taskkill = spawnProcess('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    await waitForChildTermination(taskkill);
     return;
   }
 

@@ -55,34 +55,3 @@ export function mergeSetupRuntimeState(
 export function resolvePreferredAdminCredential(state: Pick<ResolvedSetupRuntimeState, 'adminApiKey' | 'adminBearerToken'>) {
   return resolveValue(state.adminApiKey, state.adminBearerToken);
 }
-
-export type SetupSecretsSummary = {
-  localStatePath: string | null;
-  adminBearerToken?: string | null;
-  adminApiKey?: string | null;
-  privateReadKey?: string | null;
-  mutationKey?: string | null;
-};
-
-export function summarizeSetupSecrets(options: {
-  showSecrets: boolean;
-  localStatePath: string | null;
-  adminBearerToken: string | null;
-  adminApiKey: string | null;
-  privateReadKey: string | null;
-  mutationKey: string | null;
-}): SetupSecretsSummary {
-  if (options.showSecrets) {
-    return {
-      adminBearerToken: options.adminBearerToken,
-      adminApiKey: options.adminApiKey,
-      privateReadKey: options.privateReadKey,
-      mutationKey: options.mutationKey,
-      localStatePath: options.localStatePath
-    };
-  }
-
-  return {
-    localStatePath: options.localStatePath
-  };
-}

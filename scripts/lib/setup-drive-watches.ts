@@ -19,6 +19,46 @@ function defaultSleep(delayMs: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, delayMs));
 }
 
+export type DriveWatchRegistrationPlan =
+  | { kind: 'register' }
+  | { kind: 'warn'; message: string }
+  | { kind: 'skip' };
+
+/**
+ * Decides whether a setup run must (re)register Drive watches.
+ *
+ * Deploy and bootstrap register watches. Applying secrets without them is also a trigger because
+ * it can replace GOOGLE_DRIVE_WEBHOOK_SECRET, and existing Drive channels keep the old token, so
+ * the Worker rejects their notifications until watches are registered again.
+ */
+export function planDriveWatchRegistration(options: {
+  actions: { applySecretsNow: boolean; deployNow: boolean; bootstrapNow: boolean };
+  apiUrl: string | null;
+  adminCredential: string | null;
+}): DriveWatchRegistrationPlan {
+  const { actions, apiUrl, adminCredential } = options;
+  if (actions.deployNow || actions.bootstrapNow) {
+    return apiUrl && adminCredential ? { kind: 'register' } : { kind: 'skip' };
+  }
+
+  if (!actions.applySecretsNow) {
+    return { kind: 'skip' };
+  }
+
+  if (apiUrl && adminCredential) {
+    return { kind: 'register' };
+  }
+
+  const missing = [
+    ...(apiUrl ? [] : ['SHEETFLARE_BASE_URL (the deployed API URL)']),
+    ...(adminCredential ? [] : ['SHEETFLARE_ADMIN_CREDENTIAL (an admin API key or the bootstrap token)'])
+  ].join(' and ');
+  return {
+    kind: 'warn',
+    message: `Applying secrets may have replaced the Drive webhook secret. Existing Google Drive watches still carry the old token, so the Worker rejects their notifications and automatic reindexing stops until watches are registered again. Setup could not do that because ${missing} is not set. Set it, then run: npm run ops:watch:drive`
+  };
+}
+
 export async function registerDriveWatches(options: {
   baseUrl: string;
   adminCredential: string;

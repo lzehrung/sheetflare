@@ -4,6 +4,7 @@ import {
   createBootstrapConfigFromSetup,
   createBootstrapEnv,
   findCreatedKey,
+  findCreatedKeyIfPresent,
   parseBootstrapOutput,
   redactBootstrapResultMarker
 } from './setup-bootstrap';
@@ -149,5 +150,28 @@ describe('bootstrap output parsing', () => {
       echoStdout: false,
       echoStderr: false
     });
+  });
+
+  it('does not request key rotation unless asked', () => {
+    expect(createBootstrapEnv(baseConfig, 'https://example.com', 'sfk_admin.secret')).not.toHaveProperty('SHEETFLARE_BOOTSTRAP_ROTATE_KEYS');
+    expect(createBootstrapEnv(baseConfig, 'https://example.com', 'sfk_admin.secret', { rotateKeys: true })).toMatchObject({
+      SHEETFLARE_BOOTSTRAP_ROTATE_KEYS: 'true'
+    });
+  });
+
+  it('parses keys the bootstrap skipped or revoked, and treats missing ones as absent rather than created', () => {
+    const output = parseBootstrapOutput(`__SHEETFLARE_BOOTSTRAP_RESULT__={"projects":[],"apiKeys":[],"skippedKeys":[{"name":"demo-read","id":"key-1"}],"revokedKeys":[{"name":"demo-write","id":"key-2"}]}\n`);
+
+    expect(output.skippedKeys).toEqual([{ name: 'demo-read', id: 'key-1' }]);
+    expect(output.revokedKeys).toEqual([{ name: 'demo-write', id: 'key-2' }]);
+    expect(findCreatedKeyIfPresent(output, 'demo-read')).toBeNull();
+    expect(() => findCreatedKey(output, 'demo-read')).toThrow('expected API key demo-read');
+  });
+
+  it('defaults skipped and revoked keys to empty for older bootstrap output', () => {
+    const output = parseBootstrapOutput(`__SHEETFLARE_BOOTSTRAP_RESULT__={"projects":[],"apiKeys":[]}\n`);
+
+    expect(output.skippedKeys).toEqual([]);
+    expect(output.revokedKeys).toEqual([]);
   });
 });

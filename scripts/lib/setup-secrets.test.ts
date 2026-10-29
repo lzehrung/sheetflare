@@ -41,7 +41,9 @@ describe('setup secret command builders', () => {
       googleClientEmail: 'service-account@example.com',
       googlePrivateKey: '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n',
       driveWebhookSecret: 'drive-webhook-secret',
-      adminBearerToken: 'bootstrap-secret'
+      adminBearerToken: 'bootstrap-secret',
+      driveWebhookSecretGenerated: false,
+      adminBearerTokenGenerated: false
     });
   });
 
@@ -61,6 +63,11 @@ describe('setup secret command builders', () => {
 
     expect(result.googleClientEmail).toBe('service-account@example.com');
     expect(result.googlePrivateKey).toContain('BEGIN PRIVATE KEY');
+    // Neither value was supplied, so setup minted both and must hand the bootstrap token to the operator.
+    expect(result.adminBearerTokenGenerated).toBe(true);
+    expect(result.driveWebhookSecretGenerated).toBe(true);
+    expect(result.adminBearerToken.length).toBeGreaterThanOrEqual(32);
+    expect(result.driveWebhookSecret.length).toBeGreaterThanOrEqual(32);
   });
 
   it('detects valid GOOGLE_APPLICATION_CREDENTIALS before offering beginner provisioning', async () => {

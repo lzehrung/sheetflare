@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseSetupArgs, renderSetupHelp, resolveSetupActions } from './setup-cli';
+import { assertRotateKeysApplicable, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './setup-cli';
 
 describe('parseSetupArgs', () => {
   it('parses combined setup action flags', () => {
@@ -25,7 +25,7 @@ describe('parseSetupArgs', () => {
         bootstrap: false,
         smoke: true,
         verify: true,
-        showSecrets: false,
+        rotateKeys: false,
         advanced: false,
         debug: false,
         provisionGoogle: true,
@@ -44,6 +44,18 @@ describe('parseSetupArgs', () => {
     expect(parseSetupArgs(['--debug'])).toMatchObject({
       debug: true
     });
+  });
+
+  it('parses key rotation', () => {
+    expect(parseSetupArgs(['--bootstrap', '--rotate-keys'])).toMatchObject({
+      bootstrap: true,
+      rotateKeys: true
+    });
+    expect(parseSetupArgs(['--bootstrap']).rotateKeys).toBe(false);
+  });
+
+  it('no longer accepts --show-secrets because minted credentials are always handed over once', () => {
+    expect(() => parseSetupArgs(['--show-secrets'])).toThrow('Unknown setup argument: --show-secrets');
   });
 
   it('parses an explicit setup profile', () => {
@@ -88,8 +100,11 @@ describe('renderSetupHelp', () => {
     expect(help).toContain('npm run setup -- --deploy --bootstrap --smoke --verify');
     expect(help).toContain('npm run doctor');
     expect(help).toContain('--advanced');
+    expect(help).toContain('--rotate-keys');
     expect(help).toContain('--google-project <id>');
     expect(help).toContain('--google-service-account <name>');
+    expect(help).toContain('shown once');
+    expect(help).not.toContain('--show-secrets');
   });
 });
 
@@ -148,5 +163,27 @@ describe('resolveSetupActions', () => {
     expect(resolveSetupActions(options, null)).toMatchObject({
       verifyNow: true
     });
+  });
+});
+
+describe('assertRotateKeysApplicable', () => {
+  it('accepts --rotate-keys when bootstrap will run', () => {
+    const options = parseSetupArgs(['--bootstrap', '--rotate-keys']);
+
+    expect(() => assertRotateKeysApplicable(options, resolveSetupActions(options, null))).not.toThrow();
+  });
+
+  it('rejects --rotate-keys when bootstrap will not run, instead of silently doing nothing', () => {
+    const options = parseSetupArgs(['--smoke', '--rotate-keys']);
+
+    expect(() => assertRotateKeysApplicable(options, resolveSetupActions(options, null))).toThrow(
+      '--rotate-keys only applies when setup bootstraps keys. Add --bootstrap.'
+    );
+  });
+
+  it('ignores runs that did not ask for rotation', () => {
+    const options = parseSetupArgs(['--smoke']);
+
+    expect(() => assertRotateKeysApplicable(options, resolveSetupActions(options, null))).not.toThrow();
   });
 });

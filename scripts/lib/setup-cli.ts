@@ -12,7 +12,7 @@ export type SetupCliOptions = {
   bootstrap: boolean;
   smoke: boolean;
   verify: boolean;
-  showSecrets: boolean;
+  rotateKeys: boolean;
   advanced: boolean;
   debug: boolean;
   provisionGoogle: boolean;
@@ -31,7 +31,7 @@ export function createDefaultSetupCliOptions(): SetupCliOptions {
     bootstrap: false,
     smoke: false,
     verify: false,
-    showSecrets: false,
+    rotateKeys: false,
     advanced: false,
     debug: false,
     provisionGoogle: false,
@@ -100,8 +100,8 @@ export function parseSetupArgs(argv: string[]): SetupCliOptions {
       continue;
     }
 
-    if (argument === '--show-secrets') {
-      options.showSecrets = true;
+    if (argument === '--rotate-keys') {
+      options.rotateKeys = true;
       continue;
     }
 
@@ -156,6 +156,11 @@ applies secrets, deploys, bootstraps projects and keys, smoke-tests, and
 verifies the deployment. Add action flags to rerun one step from an existing
 configuration.
 
+Credentials setup mints (the bootstrap admin token and API keys) are printed
+once in a block labelled SAVE THESE CREDENTIALS NOW. They are shown once and
+never written to setup state. Rerunning --bootstrap leaves existing keys alone
+and cannot show them again; use --rotate-keys to replace them.
+
 Common flows:
   npm run setup
   npm run setup -- --advanced
@@ -176,7 +181,7 @@ Options:
   --bootstrap                        Bootstrap projects, tables, and API keys.
   --smoke                            Run smoke validation after setup/bootstrap.
   --verify                           Run setup verification/doctor checks.
-  --show-secrets                     Show generated secrets in the final summary.
+  --rotate-keys                      With --bootstrap, replace existing bootstrap API keys: issue new ones, then revoke the old.
   --advanced                         Ask for all setup config fields instead of beginner defaults.
   --debug                            Show underlying setup command output.
   --provision-google                 Provision Google service-account resources with gcloud.
@@ -210,4 +215,10 @@ export function resolveSetupActions(
 
 export function actionsRequireWranglerAuth(actions: SetupPromptActions) {
   return actions.applySecretsNow || actions.deployNow;
+}
+
+export function assertRotateKeysApplicable(options: SetupCliOptions, actions: SetupPromptActions) {
+  if (options.rotateKeys && !actions.bootstrapNow) {
+    throw new ScriptError('--rotate-keys only applies when setup bootstraps keys. Add --bootstrap.');
+  }
 }

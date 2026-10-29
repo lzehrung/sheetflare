@@ -31,9 +31,13 @@ export function getFirstEnv(...names: string[]) {
   return null;
 }
 
-export function shouldShowSecrets() {
-  const raw = process.env.SHEETFLARE_SHOW_SECRETS?.trim().toLowerCase();
+export function isEnvFlagEnabled(name: string) {
+  const raw = process.env[name]?.trim().toLowerCase();
   return raw === '1' || raw === 'true' || raw === 'yes';
+}
+
+export function shouldShowSecrets() {
+  return isEnvFlagEnabled('SHEETFLARE_SHOW_SECRETS');
 }
 
 export function redactSecret(value: string) {
