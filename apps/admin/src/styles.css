@@ -2,11 +2,19 @@
   color-scheme: light;
   --bg: #f5efe6;
   --ink: #1e2a2f;
-  --muted: #5d6d73;
+  --muted: #4a5a60;
   --panel: rgba(255, 251, 247, 0.86);
   --border: rgba(30, 42, 47, 0.12);
-  --accent: #d85f38;
-  --accent-soft: rgba(216, 95, 56, 0.14);
+  --accent: #9e3711;
+  --accent-soft: rgba(158, 55, 17, 0.14);
+  --on-accent: #fff7f2;
+  --danger: #a33a2b;
+  --error: #9f2f16;
+  --success: #195b32;
+  --success-soft: rgba(25, 91, 50, 0.12);
+  --warning-ink: #7b3018;
+  --warning-soft: rgba(158, 55, 17, 0.08);
+  --muted-soft: rgba(74, 90, 96, 0.12);
   --shadow: 0 30px 60px rgba(62, 46, 32, 0.12);
 }
 
@@ -167,7 +175,7 @@ body {
   padding: 0.85rem 1.15rem;
   font: inherit;
   font-weight: 700;
-  color: #fff7f2;
+  color: var(--on-accent);
   background: var(--accent);
   cursor: pointer;
 }
@@ -184,8 +192,8 @@ body {
 }
 
 .actions button.dangerButton {
-  color: #fff7f2;
-  background: #a33a2b;
+  color: var(--on-accent);
+  background: var(--danger);
   border: 1px solid rgba(96, 23, 16, 0.2);
 }
 
@@ -334,8 +342,8 @@ body {
 }
 
 .healthBadge {
-  background: rgba(25, 91, 50, 0.12);
-  color: #195b32;
+  background: var(--success-soft);
+  color: var(--success);
 }
 
 .inlineBadges {
@@ -352,8 +360,8 @@ body {
 }
 
 .warningNotice {
-  background: rgba(216, 95, 56, 0.08);
-  color: #7b3018;
+  background: var(--warning-soft);
+  color: var(--warning-ink);
 }
 
 .warningTitle {
@@ -424,7 +432,7 @@ body {
 
 .success {
   margin: 0;
-  color: #195b32;
+  color: var(--success);
 }
 
 .success code {
@@ -460,7 +468,7 @@ body {
 
 .badgeMuted {
   color: var(--muted);
-  background: rgba(93, 109, 115, 0.12);
+  background: var(--muted-soft);
 }
 
 .facts {
@@ -504,7 +512,7 @@ body {
 }
 
 .error {
-  color: #9f2f16;
+  color: var(--error);
 }
 
 @media (max-width: 640px) {
