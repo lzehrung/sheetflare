@@ -11,8 +11,6 @@ export type LoadConfig = SmokeConfig & {
   mutationConcurrency: number;
   staleWaitMs: number;
   rateLimitSamePrincipalRequests: number;
-  rateLimitPrincipalCount: number;
-  rateLimitRequestsPerPrincipal: number;
   reindexReadRequests: number;
   reindexReadConcurrency: number;
   manualChurnPauseMs: number;
@@ -70,8 +68,6 @@ export function readLoadConfig(env: NodeJS.ProcessEnv = process.env): LoadConfig
     mutationConcurrency: readPositiveInteger(env, 'SHEETFLARE_LOAD_MUTATION_CONCURRENCY', 2),
     staleWaitMs: readNonNegativeInteger(env, 'SHEETFLARE_LOAD_STALE_WAIT_MS', 16_000),
     rateLimitSamePrincipalRequests: readPositiveInteger(env, 'SHEETFLARE_LOAD_RATE_LIMIT_SAME_PRINCIPAL_REQUESTS', 400),
-    rateLimitPrincipalCount: readPositiveInteger(env, 'SHEETFLARE_LOAD_RATE_LIMIT_PRINCIPAL_COUNT', 25),
-    rateLimitRequestsPerPrincipal: readPositiveInteger(env, 'SHEETFLARE_LOAD_RATE_LIMIT_REQUESTS_PER_PRINCIPAL', 3),
     reindexReadRequests: readPositiveInteger(env, 'SHEETFLARE_LOAD_REINDEX_READ_REQUESTS', 40),
     reindexReadConcurrency: readPositiveInteger(env, 'SHEETFLARE_LOAD_REINDEX_READ_CONCURRENCY', 4),
     manualChurnPauseMs: readNonNegativeInteger(env, 'SHEETFLARE_LOAD_MANUAL_CHURN_PAUSE_MS', 0),

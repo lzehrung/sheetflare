@@ -1,5 +1,6 @@
 import type { ApiKeyPrincipal } from '@sheetflare/contracts';
-import { allScopes, type CreateKeyDraft } from '../admin-drafts';
+import { allScopes, scopeDescriptions, type CreateKeyDraft } from '../admin-drafts';
+import type { AdminAuthFailure } from '../api';
 import { ApiKeySections } from './api-key-sections';
 
 type LoadState =
@@ -12,7 +13,7 @@ type GlobalKeysState =
   | { status: 'idle'; message: string }
   | { status: 'loading' }
   | { status: 'ready'; data: ApiKeyPrincipal[] }
-  | { status: 'error'; message: string; unauthorized: boolean };
+  | { status: 'error'; message: string; authFailure: AdminAuthFailure | null };
 
 type ApiKeyPanelProps = {
   selectedProjectSlug: string | null;
@@ -25,7 +26,8 @@ type ApiKeyPanelProps = {
   projectKeysState: LoadState;
   globalKeysState: GlobalKeysState;
   busy: boolean;
-  onRevoke: (apiKeyId: string) => void;
+  globalKeysAvailable: boolean;
+  onRevoke: (apiKey: ApiKeyPrincipal) => void;
   onRefreshProjectKeys: () => void;
   onRefreshGlobalKeys: () => void;
 };
@@ -36,7 +38,7 @@ function renderFieldError(message: string | undefined) {
 
 function renderGlobalKeysState(
   globalKeysState: GlobalKeysState,
-  onRevoke: (apiKeyId: string) => void,
+  onRevoke: (apiKey: ApiKeyPrincipal) => void,
   busy: boolean
 ) {
   if (globalKeysState.status === 'idle') {
@@ -48,7 +50,7 @@ function renderGlobalKeysState(
   }
 
   if (globalKeysState.status === 'error') {
-    if (globalKeysState.unauthorized) {
+    if (globalKeysState.authFailure !== null) {
       return <p className="muted">Global key listing requires a global admin credential.</p>;
     }
 
@@ -58,7 +60,7 @@ function renderGlobalKeysState(
   return (
     <ApiKeySections
       keys={globalKeysState.data}
-      onRevoke={(apiKeyId) => onRevoke(apiKeyId)}
+      onRevoke={onRevoke}
       busy={busy}
       emptyMessage="No global admin keys yet."
     />
@@ -76,6 +78,7 @@ export function ApiKeyPanel({
   projectKeysState,
   globalKeysState,
   busy,
+  globalKeysAvailable,
   onRevoke,
   onRefreshProjectKeys,
   onRefreshGlobalKeys
@@ -88,7 +91,7 @@ export function ApiKeyPanel({
           <button type="button" className="secondaryButton" onClick={onRefreshProjectKeys} disabled={!selectedProjectSlug || busy}>
             Refresh scoped keys
           </button>
-          <button type="button" className="secondaryButton" onClick={onRefreshGlobalKeys} disabled={busy}>
+          <button type="button" className="secondaryButton" onClick={onRefreshGlobalKeys} disabled={busy || !globalKeysAvailable}>
             Refresh global keys
           </button>
         </div>
@@ -114,25 +117,40 @@ export function ApiKeyPanel({
         <span>Scope this key to the selected project</span>
       </label>
       {renderFieldError(fieldErrors.projectScoped)}
-      <div className="scopeGrid">
-        {allScopes.map((scope) => (
-          <label key={scope} className="toggle">
-            <input
-              type="checkbox"
-              checked={draft.scopes.includes(scope)}
-              onChange={(event) => {
-                onChange({
-                  ...draft,
-                  scopes: event.target.checked
-                    ? [...draft.scopes, scope]
-                    : draft.scopes.filter((entry) => entry !== scope)
-                });
-              }}
-            />
-            <span>{scope}</span>
-          </label>
-        ))}
-      </div>
+      <fieldset className="scopeFieldset">
+        <legend>Scopes</legend>
+        <p className="muted compact">Grant only what this key needs. Destructive scopes are off by default.</p>
+        <div className="scopeGrid">
+          {allScopes.map((scope) => {
+            const { description, destructive } = scopeDescriptions[scope];
+            const descriptionId = `scope-description-${scope.replace(':', '-')}`;
+            return (
+              <div key={scope} className="scopeOption">
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={draft.scopes.includes(scope)}
+                    aria-describedby={descriptionId}
+                    onChange={(event) => {
+                      onChange({
+                        ...draft,
+                        scopes: event.target.checked
+                          ? [...draft.scopes, scope]
+                          : draft.scopes.filter((entry) => entry !== scope)
+                      });
+                    }}
+                  />
+                  <span>{scope}</span>
+                  {destructive ? <span className="badge badgeDanger">Destructive</span> : null}
+                </label>
+                <p id={descriptionId} className="muted compact scopeDescription">
+                  {description}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      </fieldset>
       {renderFieldError(fieldErrors.scopes)}
       <div className="actions">
         <button type="button" onClick={onSubmit} disabled={submitDisabled}>
@@ -154,7 +172,7 @@ export function ApiKeyPanel({
         {projectKeysState.status === 'ready' && projectKeysState.data.length > 0 ? (
           <ApiKeySections
             keys={projectKeysState.data}
-            onRevoke={(apiKeyId) => onRevoke(apiKeyId)}
+            onRevoke={onRevoke}
             busy={busy}
             emptyMessage="No scoped keys yet for this project."
           />

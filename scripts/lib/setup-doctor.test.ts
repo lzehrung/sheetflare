@@ -392,6 +392,111 @@ describe('runSetupDoctor', () => {
     );
   });
 
+  it('sends the admin credential with the readiness request', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      checks: {
+        defaultGoogleCredential: 'configured',
+        namedGoogleCredentials: 'missing',
+        googleDriveWebhookSecret: 'configured',
+        bootstrapAdmin: 'configured',
+        adminUi: 'enabled'
+      }
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await runSetupDoctor({
+      config: baseConfig,
+      runtimeState: {
+        googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+        namedGoogleCredentials: 'missing',
+        apiUrl: 'https://sheetflare-api.example.workers.dev',
+        adminBearerToken: 'bootstrap.secret',
+        adminApiKey: 'sfk_admin.secret',
+        privateReadKey: null,
+        mutationKey: null
+      }
+    }, {
+      listDriveWatches: vi.fn(async () => []),
+      listDriveWatchRetryAdvice: vi.fn(async () => [])
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/ready'),
+      expect.objectContaining({
+        headers: expect.objectContaining({ authorization: 'Bearer sfk_admin.secret' })
+      })
+    );
+  });
+
+  it('warns that readiness details are unavailable instead of crashing when /ready omits checks', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, service: 'sheetflare-api' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })));
+
+    const results = await runSetupDoctor({
+      config: baseConfig,
+      runtimeState: {
+        googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+        namedGoogleCredentials: 'missing',
+        apiUrl: 'https://sheetflare-api.example.workers.dev',
+        adminBearerToken: null,
+        adminApiKey: null,
+        privateReadKey: null,
+        mutationKey: null
+      }
+    }, {
+      listDriveWatches: vi.fn(async () => []),
+      listDriveWatchRetryAdvice: vi.fn(async () => [])
+    });
+
+    expect(results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'API readiness',
+          status: 'warning',
+          summary: expect.stringContaining('did not include readiness details'),
+          remediation: expect.stringMatching(/SHEETFLARE_ADMIN_CREDENTIAL.*admin:projects/)
+        })
+      ])
+    );
+  });
+
+  it('explains the global scope requirement when /ready returns 403 for the admin credential', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: false }), {
+      status: 403,
+      headers: { 'content-type': 'application/json' }
+    })));
+
+    const results = await runSetupDoctor({
+      config: baseConfig,
+      runtimeState: {
+        googleClientEmail: 'sheetflare-prod@sheetflare-prod.iam.gserviceaccount.com',
+        namedGoogleCredentials: 'missing',
+        apiUrl: 'https://sheetflare-api.example.workers.dev',
+        adminBearerToken: null,
+        adminApiKey: 'sfk_project.secret',
+        privateReadKey: null,
+        mutationKey: null
+      }
+    }, {
+      listDriveWatches: vi.fn(async () => []),
+      listDriveWatchRetryAdvice: vi.fn(async () => [])
+    });
+
+    expect(results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'API readiness',
+          status: 'warning',
+          summary: expect.stringContaining('lacks global scope'),
+          remediation: expect.stringMatching(/SHEETFLARE_ADMIN_CREDENTIAL.*admin:projects/)
+        })
+      ])
+    );
+  });
+
   it('warns with cooldown guidance instead of immediate retry when retry advice recommends waiting', async () => {
     const results = await runSetupDoctor({
       config: baseConfig,

@@ -1,5 +1,5 @@
-import { ServiceUnavailableError, TooManyRequestsError } from '@sheetflare/contracts';
-import { describe, expect, it } from 'vitest';
+import { BadGatewayError, ServiceUnavailableError, TooManyRequestsError, toErrorResponse } from '@sheetflare/contracts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GoogleSheetsService, parseSheetCellValue, serializeSheetCell, type GoogleSheetTableConfig } from '../src';
 
 const testPrivateKey = [
@@ -1221,5 +1221,192 @@ describe('GoogleSheetsService.writeRow', () => {
 
     expect(requestedUrls.filter((url) => url.includes("/values/'Users'!1:1"))).toHaveLength(1);
     expect(requestedUrls).toContain("https://sheets.googleapis.com/v4/spreadsheets/sheet-1/values/'Users'!A5:D5");
+  });
+});
+
+describe('GoogleSheetsService upstream error sanitization', () => {
+  const config = {
+    projectSlug: 'demo',
+    tableSlug: 'users',
+    spreadsheetId: 'sheet-1',
+    sheetTabName: 'Users',
+    idColumn: '_id',
+    indexedFields: ['_id'],
+    readOnlyFields: [],
+    fieldRules: {},
+    headerRow: 1,
+    dataStartRow: 2,
+    readEnabled: true,
+    createEnabled: true,
+    updateEnabled: true,
+    deleteEnabled: true,
+    cacheTtlSeconds: 15,
+    createdAt: '2026-04-26T00:00:00.000Z',
+    updatedAt: '2026-04-26T00:00:00.000Z'
+  } satisfies GoogleSheetTableConfig;
+  const sentinel = 'SENSITIVE_UPSTREAM_TEXT project 123456789012 https://console.developers.google.com/apis?project=123456789012';
+
+  function createService(respond: () => Response | Promise<Response>) {
+    return new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      delay: async () => {},
+      fetch: async (input) => {
+        if (String(input).includes('oauth2.googleapis.com/token')) {
+          return Response.json({ access_token: 'token', expires_in: 3600 });
+        }
+
+        return respond();
+      }
+    });
+  }
+
+  async function captureError(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      return error;
+    }
+
+    throw new Error('Expected the Google Sheets call to fail.');
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('keeps only whitelisted structured fields from Google error bodies and logs the raw text internally', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const service = createService(() => Response.json({
+      error: {
+        code: 403,
+        message: sentinel,
+        status: 'PERMISSION_DENIED',
+        errors: [{ domain: 'global', reason: 'forbidden', message: sentinel }]
+      }
+    }, { status: 403 }));
+
+    const error = await captureError(service.readHeaders(config));
+
+    expect(error).toBeInstanceOf(BadGatewayError);
+    expect(toErrorResponse(error).body.error).toEqual({
+      code: 'BAD_GATEWAY',
+      message: 'Google Sheets authentication or permission check failed.',
+      details: { status: 403, googleStatus: 'PERMISSION_DENIED', reason: 'forbidden' }
+    });
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('SENSITIVE_UPSTREAM_TEXT'));
+  });
+
+  it('drops non-JSON upstream bodies and malformed status or reason values from error details', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const htmlService = createService(() => new Response(`<html>${sentinel}</html>`, { status: 500 }));
+    const htmlError = await captureError(htmlService.readHeaders(config));
+
+    expect(htmlError).toBeInstanceOf(ServiceUnavailableError);
+    expect(toErrorResponse(htmlError).body.error.details).toEqual({ status: 500 });
+
+    const malformedService = createService(() => Response.json({
+      error: {
+        message: sentinel,
+        status: `PERMISSION_DENIED ${sentinel}`,
+        errors: [{ reason: `<b>${sentinel}</b>` }]
+      }
+    }, { status: 404 }));
+    const malformedError = await captureError(malformedService.readHeaders(config));
+
+    expect(toErrorResponse(malformedError).body.error).toEqual({
+      code: 'NOT_FOUND',
+      message: 'Google Sheets resource was not found.',
+      details: { status: 404 }
+    });
+  });
+
+  it('does not expose transport error text', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const service = createService(() => {
+      throw new Error('connect ECONNREFUSED 10.1.2.3:443 sheets.googleapis.com');
+    });
+
+    const error = await captureError(service.readHeaders(config));
+
+    expect(error).toBeInstanceOf(ServiceUnavailableError);
+    expect(toErrorResponse(error).body.error).toEqual({
+      code: 'SERVICE_UNAVAILABLE',
+      message: 'Google Sheets network request failed during read values for range \'Users\'!1:1.',
+      details: null
+    });
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('ECONNREFUSED'));
+  });
+
+  it('flags the Drive file subscription quota with a structured marker instead of the upstream message', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const service = createService(() => Response.json({
+      error: {
+        code: 403,
+        message: 'Rate limit exceeded for creating file subscriptions.',
+        status: 'PERMISSION_DENIED'
+      }
+    }, { status: 403 }));
+
+    const error = await captureError(service.watchSpreadsheetFile('sheet-1', {
+      webhookUrl: 'https://example.com/hook',
+      token: 'token'
+    }));
+
+    expect(error).toBeInstanceOf(BadGatewayError);
+    expect(toErrorResponse(error).body.error.details).toEqual({
+      status: 403,
+      googleStatus: 'PERMISSION_DENIED',
+      driveSubscriptionQuotaExceeded: true
+    });
+  });
+});
+
+describe('GoogleSheetsService.readTableSnapshot', () => {
+  it('rejects a snapshot whose header row differs from the separately read layout', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const service = new GoogleSheetsService({
+      clientEmail: 'service@example.com',
+      privateKey: testPrivateKey,
+      fetch: async (input) => {
+        const url = decodeURIComponent(String(input));
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return Response.json({ access_token: 'token', expires_in: 3600 });
+        }
+
+        if (url.includes("/values/'Users'!1:1")) {
+          return Response.json({ values: [['_id', 'name']] });
+        }
+
+        if (url.includes("/values/'Users'!A1:B")) {
+          return Response.json({ values: [['_id', 'email'], ['row-1', 'ada@example.com']] });
+        }
+
+        throw new Error(`Unexpected request: ${url}`);
+      }
+    });
+
+    await expect(service.readTableSnapshot({
+      projectSlug: 'demo',
+      tableSlug: 'users',
+      spreadsheetId: 'sheet-1',
+      sheetTabName: 'Users',
+      idColumn: '_id',
+      indexedFields: ['_id'],
+      readOnlyFields: [],
+      fieldRules: {},
+      headerRow: 1,
+      dataStartRow: 2,
+      readEnabled: true,
+      createEnabled: true,
+      updateEnabled: true,
+      deleteEnabled: true,
+      cacheTtlSeconds: 15,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z'
+    })).rejects.toMatchObject({
+      name: ServiceUnavailableError.name,
+      message: 'The sheet header row changed while the table snapshot was being read. Retry the request.'
+    });
   });
 });

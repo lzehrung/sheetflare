@@ -1,28 +1,78 @@
-import type {
-  AdminListApiKeysResult,
-  AdminCreateApiKeyResult,
-  AdminGetProjectResult,
-  AdminInspectSpreadsheetTabResult,
-  AdminListProjectsResult,
-  AdminListSpreadsheetWatchesResult,
-  AdminListSpreadsheetTabsResult,
-  ApiKeyPrincipal,
-  CreateProjectInput,
-  CreateTableInput,
-  DeleteProjectResult,
-  DeleteTableResult,
-  GetTableCacheStatusResult,
-  RefreshTableCacheResult,
-  ReindexTableResult
+import {
+  adminSessionPath,
+  adminCreateApiKeyResultSchema,
+  adminGetProjectResultSchema,
+  adminInspectSpreadsheetTabResultSchema,
+  adminListApiKeysResultSchema,
+  adminListProjectsResultSchema,
+  adminListSpreadsheetTabsResultSchema,
+  adminListSpreadsheetWatchesResultSchema,
+  deleteProjectResultSchema,
+  deleteTableResultSchema,
+  getTableCacheStatusResultSchema,
+  refreshTableCacheResultSchema,
+  reindexTableResultSchema,
+  upsertTableResultSchema,
+  type AdminSessionResponse,
+  type ApiKeyPrincipal,
+  type CreateProjectInput,
+  type CreateTableInput
 } from '@sheetflare/contracts';
-import { adminSessionPath, type AdminSessionResponse } from '@sheetflare/contracts';
 import { buildAdminHeaders, type AdminAccess } from './auth';
 
-type ApiErrorResponse = {
-  error?: {
-    message?: string;
-  };
+type SchemaIssue = { path: readonly PropertyKey[]; message: string };
+
+// Structural subset of a Zod schema: the admin app only needs to validate and read the parsed result.
+type ResultSchema<T> = {
+  safeParse(
+    input: unknown
+  ): { success: true; data: T } | { success: false; error: { issues: readonly SchemaIssue[] } };
 };
+
+export type AdminAuthFailure = 'invalid-credential' | 'insufficient-scope';
+
+/** A non-2xx Worker response. Carries the HTTP status and the contract error code so callers never parse messages. */
+export class AdminApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  readonly requestId: string | null;
+
+  constructor(message: string, status: number, code: string | null, requestId: string | null) {
+    super(message);
+    this.name = 'AdminApiError';
+    this.status = status;
+    this.code = code;
+    this.requestId = requestId;
+  }
+}
+
+/** A 2xx Worker response whose JSON does not match the exported contract schema (for example version skew). */
+export class AdminResponseShapeError extends Error {
+  readonly requestId: string | null;
+
+  constructor(message: string, requestId: string | null) {
+    super(message);
+    this.name = 'AdminResponseShapeError';
+    this.requestId = requestId;
+  }
+}
+
+// Missing or invalid credentials are 401. A valid key that lacks the required scope is 403 FORBIDDEN.
+export function classifyAuthFailure(error: unknown): AdminAuthFailure | null {
+  if (!(error instanceof AdminApiError)) {
+    return null;
+  }
+
+  if (error.status === 403 && error.code === 'FORBIDDEN') {
+    return 'insufficient-scope';
+  }
+
+  if (error.status === 401) {
+    return 'invalid-credential';
+  }
+
+  return null;
+}
 
 function summarizeBody(text: string) {
   const normalized = text.trim().replace(/\s+/g, ' ');
@@ -46,22 +96,21 @@ function parseJsonResponse(text: string) {
   }
 }
 
-function getApiErrorMessage(parsed: ApiErrorResponse | unknown) {
-  if (!parsed || typeof parsed !== 'object' || !('error' in parsed)) {
-    return null;
-  }
-
-  const error = parsed.error;
-  if (!error || typeof error !== 'object' || !('message' in error) || typeof error.message !== 'string') {
-    return null;
-  }
-
-  return error.message;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
-function formatRequestError(response: Response, parsed: ApiErrorResponse | unknown, text: string) {
+function getApiErrorField(parsed: unknown, field: 'code' | 'message') {
+  if (!isRecord(parsed) || !isRecord(parsed.error)) {
+    return null;
+  }
+
+  const value = parsed.error[field];
+  return typeof value === 'string' ? value : null;
+}
+
+function formatRequestError(response: Response, errorMessage: string | null, text: string) {
   const requestId = response.headers.get('x-request-id');
-  const errorMessage = getApiErrorMessage(parsed);
   const parts = [
     errorMessage ?? `Request failed: ${response.status}`,
     requestId ? `requestId=${requestId}` : null
@@ -74,9 +123,20 @@ function formatRequestError(response: Response, parsed: ApiErrorResponse | unkno
   return parts.filter(Boolean).join(' ');
 }
 
+function formatShapeError(path: string, issues: readonly SchemaIssue[], requestId: string | null) {
+  const firstIssue = issues[0];
+  const location = firstIssue && firstIssue.path.length > 0 ? firstIssue.path.map(String).join('.') : 'response';
+  return [
+    `The Worker returned an unexpected response for ${path} (${location}: ${firstIssue?.message ?? 'does not match the contract'}).`,
+    'The admin UI and the Worker may be on different versions.',
+    requestId ? `requestId=${requestId}` : null
+  ].filter(Boolean).join(' ');
+}
+
 async function requestAdminJson<T>(
   access: AdminAccess,
   path: string,
+  schema: ResultSchema<T>,
   init?: RequestInit
 ): Promise<T> {
   const headers = {
@@ -90,28 +150,59 @@ async function requestAdminJson<T>(
 
   const text = await response.text();
   const parsed = parseJsonResponse(text);
+  const requestId = response.headers.get('x-request-id');
 
   if (!response.ok) {
-    if (response.status === 401 && getApiErrorMessage(parsed) === null) {
-      throw new Error('The configured admin credential was rejected.');
+    const errorMessage = getApiErrorField(parsed, 'message');
+    const errorCode = getApiErrorField(parsed, 'code');
+    if (response.status === 401 && errorMessage === null) {
+      throw new AdminApiError('The configured admin credential was rejected.', 401, errorCode, requestId);
     }
 
-    throw new Error(formatRequestError(response, parsed, text));
+    throw new AdminApiError(
+      formatRequestError(response, errorMessage, text),
+      response.status,
+      errorCode,
+      requestId
+    );
   }
 
   if (parsed === null) {
-    const requestId = response.headers.get('x-request-id');
-    throw new Error(
+    throw new AdminResponseShapeError(
       [
         'Request returned an invalid JSON response.',
         requestId ? `requestId=${requestId}` : null,
         text.trim().length > 0 ? `body=${summarizeBody(text)}` : null
-      ].filter(Boolean).join(' ')
+      ].filter(Boolean).join(' '),
+      requestId
     );
   }
 
-  return parsed as T;
+  const result = schema.safeParse(parsed);
+  if (!result.success) {
+    throw new AdminResponseShapeError(formatShapeError(path, result.error.issues, requestId), requestId);
+  }
+
+  return result.data;
 }
+
+function signalInit(signal: AbortSignal | undefined): RequestInit {
+  return signal ? { signal } : {};
+}
+
+function isOkResult(input: unknown): input is { ok: true } {
+  return isRecord(input) && input.ok === true;
+}
+
+const okResultSchema: ResultSchema<{ ok: true }> = {
+  safeParse(input) {
+    if (isOkResult(input)) {
+      return { success: true, data: { ok: true } };
+    }
+
+    return { success: false, error: { issues: [{ path: ['ok'], message: 'Expected ok: true.' }] } };
+  }
+};
 
 export async function getAdminSession(): Promise<AdminSessionResponse> {
   const response = await fetch(adminSessionPath, {
@@ -134,45 +225,48 @@ export async function getAdminSession(): Promise<AdminSessionResponse> {
   return { serverCredential: parsed.serverCredential };
 }
 
-export function listProjects(access: AdminAccess) {
-  return requestAdminJson<AdminListProjectsResult>(access, '/v1/admin/projects');
+export function listProjects(access: AdminAccess, signal?: AbortSignal) {
+  return requestAdminJson(access, '/v1/admin/projects', adminListProjectsResultSchema, signalInit(signal));
 }
 
-export function getProject(access: AdminAccess, projectSlug: string) {
-  return requestAdminJson<AdminGetProjectResult>(
+export function getProject(access: AdminAccess, projectSlug: string, signal?: AbortSignal) {
+  return requestAdminJson(
     access,
-    `/v1/admin/projects?project=${encodeURIComponent(projectSlug)}`
+    `/v1/admin/projects?project=${encodeURIComponent(projectSlug)}`,
+    adminGetProjectResultSchema,
+    signalInit(signal)
   );
 }
 
 export function createProject(access: AdminAccess, input: CreateProjectInput) {
-  return requestAdminJson<AdminGetProjectResult>(access, '/v1/admin/projects', {
+  return requestAdminJson(access, '/v1/admin/projects', adminGetProjectResultSchema, {
     method: 'POST',
     body: JSON.stringify(input)
   });
 }
 
 export function deleteProject(access: AdminAccess, projectSlug: string) {
-  return requestAdminJson<DeleteProjectResult>(
+  return requestAdminJson(
     access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}`,
-    {
-      method: 'DELETE'
-    }
+    deleteProjectResultSchema,
+    { method: 'DELETE' }
   );
 }
 
 export function listSpreadsheetTabs(access: AdminAccess, projectSlug: string) {
-  return requestAdminJson<AdminListSpreadsheetTabsResult>(
+  return requestAdminJson(
     access,
-    `/v1/admin/projects/${encodeURIComponent(projectSlug)}/spreadsheet/tabs`
+    `/v1/admin/projects/${encodeURIComponent(projectSlug)}/spreadsheet/tabs`,
+    adminListSpreadsheetTabsResultSchema
   );
 }
 
 export function listSpreadsheetWatches(access: AdminAccess) {
-  return requestAdminJson<AdminListSpreadsheetWatchesResult>(
+  return requestAdminJson(
     access,
-    '/v1/admin/system/google/drive/watches'
+    '/v1/admin/system/google/drive/watches',
+    adminListSpreadsheetWatchesResultSchema
   );
 }
 
@@ -183,16 +277,18 @@ export function inspectSpreadsheetTab(
   headerRow?: number
 ) {
   const query = headerRow !== undefined ? `?headerRow=${encodeURIComponent(String(headerRow))}` : '';
-  return requestAdminJson<AdminInspectSpreadsheetTabResult>(
+  return requestAdminJson(
     access,
-    `/v1/admin/projects/${encodeURIComponent(projectSlug)}/spreadsheet/tabs/${encodeURIComponent(tabName)}${query}`
+    `/v1/admin/projects/${encodeURIComponent(projectSlug)}/spreadsheet/tabs/${encodeURIComponent(tabName)}${query}`,
+    adminInspectSpreadsheetTabResultSchema
   );
 }
 
 export function createTable(access: AdminAccess, projectSlug: string, input: CreateTableInput) {
-  return requestAdminJson<{ data: CreateTableInput & { projectSlug: string } }>(
+  return requestAdminJson(
     access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables`,
+    upsertTableResultSchema,
     {
       method: 'POST',
       body: JSON.stringify(input)
@@ -201,12 +297,11 @@ export function createTable(access: AdminAccess, projectSlug: string, input: Cre
 }
 
 export function deleteTable(access: AdminAccess, projectSlug: string, tableSlug: string) {
-  return requestAdminJson<DeleteTableResult>(
+  return requestAdminJson(
     access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}`,
-    {
-      method: 'DELETE'
-    }
+    deleteTableResultSchema,
+    { method: 'DELETE' }
   );
 }
 
@@ -218,7 +313,7 @@ export function createApiKey(
     scopes: string[];
   }
 ) {
-  return requestAdminJson<AdminCreateApiKeyResult>(access, '/v1/admin/keys', {
+  return requestAdminJson(access, '/v1/admin/keys', adminCreateApiKeyResultSchema, {
     method: 'POST',
     body: JSON.stringify(input)
   });
@@ -226,45 +321,46 @@ export function createApiKey(
 
 export function listApiKeys(access: AdminAccess, projectSlug?: string | null) {
   const query = projectSlug ? `?project=${encodeURIComponent(projectSlug)}` : '';
-  return requestAdminJson<AdminListApiKeysResult>(
-    access,
-    `/v1/admin/keys${query}`
-  );
+  return requestAdminJson(access, `/v1/admin/keys${query}`, adminListApiKeysResultSchema);
 }
 
 export function revokeApiKey(access: AdminAccess, apiKeyId: ApiKeyPrincipal['id']) {
-  return requestAdminJson<{ ok: true }>(
+  return requestAdminJson(
     access,
     `/v1/admin/keys/${encodeURIComponent(apiKeyId)}`,
-    {
-      method: 'DELETE'
-    }
+    okResultSchema,
+    { method: 'DELETE' }
   );
 }
 
-export function getCacheStatus(access: AdminAccess, projectSlug: string, tableSlug: string) {
-  return requestAdminJson<GetTableCacheStatusResult>(
+export function getCacheStatus(
+  access: AdminAccess,
+  projectSlug: string,
+  tableSlug: string,
+  signal?: AbortSignal
+) {
+  return requestAdminJson(
     access,
-    `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}/cache`
+    `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}/cache`,
+    getTableCacheStatusResultSchema,
+    signalInit(signal)
   );
 }
 
 export function refreshTableCache(access: AdminAccess, projectSlug: string, tableSlug: string) {
-  return requestAdminJson<RefreshTableCacheResult>(
+  return requestAdminJson(
     access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}/refresh`,
-    {
-      method: 'POST'
-    }
+    refreshTableCacheResultSchema,
+    { method: 'POST' }
   );
 }
 
 export function reindexTable(access: AdminAccess, projectSlug: string, tableSlug: string) {
-  return requestAdminJson<ReindexTableResult>(
+  return requestAdminJson(
     access,
     `/v1/admin/projects/${encodeURIComponent(projectSlug)}/tables/${encodeURIComponent(tableSlug)}/reindex`,
-    {
-      method: 'POST'
-    }
+    reindexTableResultSchema,
+    { method: 'POST' }
   );
 }

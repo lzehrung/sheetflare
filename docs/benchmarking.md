@@ -49,10 +49,11 @@ The load harness covers:
 - indexed list queries on a hot table
 - repeated point reads after a stale wait window
 - mixed create/update/delete cycles
-- rate-limit pressure on one principal
-- anonymous-read separation across many synthetic principals
+- rate-limit pressure on one principal (the admin credential, up to `SHEETFLARE_LOAD_RATE_LIMIT_SAME_PRINCIPAL_REQUESTS` requests, stopping at the first `429`)
 - reindex while reads continue
 - optional manual churn window for direct sheet edits during traffic
+
+The harness does not test rate-limit isolation between principals. Every request first counts against a client bucket keyed by the `cf-connecting-ip` header that Cloudflare sets from the real client address (`x-forwarded-for` is ignored); requests that present the bootstrap token use one shared `bootstrap-admin` bucket instead. A request with a valid API key then also counts against that key's own `api-key:<id>` bucket, with the same `RATE_LIMIT_MAX_REQUESTS` per `RATE_LIMIT_WINDOW_SECONDS` and route family. The first `429` therefore comes from whichever bucket runs out first, and the client bucket also counts the runner's other traffic. One load runner shares one client bucket, so it cannot show that separate clients are isolated: run the harness from distinct egress IPs for that.
 
 ## Recommended First Pilot Settings
 
@@ -62,7 +63,7 @@ Use these as a conservative first pass, not as a proven public limit:
 - `cacheTtlSeconds` between `15` and `60`
 - one hot table per meaningful workload, because each table is one `TableDO`
 - no more than `32` indexed fields including the managed ID column
-- treat `contains` as a bounded operator, not as a default public query primitive
+- treat `contains` and `startsWith` as bounded operators, not as a default public query primitive
 
 ## What To Publish After A Real Run
 

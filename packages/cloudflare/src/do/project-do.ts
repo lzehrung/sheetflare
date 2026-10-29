@@ -2,16 +2,18 @@ import {
   type AdminInspectSpreadsheetTabResult,
   type AdminListSpreadsheetTabsResult,
   type AdminGetProjectResult,
+  AppError,
   BadRequestError,
   ConflictError,
+  type ControlPlaneDoRequest,
   type ControlPlaneDoResponse,
   type CreateProjectInput,
   type CreateTableInput,
   type DeleteProjectResult,
   type DeleteTableResult,
+  maxCacheTtlSeconds,
   maxIndexedFieldCount,
   NotFoundError,
-  type ProjectAccessResult,
   type ProjectConfig,
   projectDoRequestSchema,
   type ProjectDoRequest,
@@ -82,11 +84,34 @@ function normalizeFieldNames(values: readonly string[]) {
 export class ProjectDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
 
+  // Lifecycle requests (creating or deleting a project or a table) read the project, wait on Google or the control
+  // plane, and then write and register the result. Other requests run during those waits, so the lifecycle requests are
+  // queued here and run one at a time in arrival order. Otherwise two creates of one slug both find it absent, and a
+  // table request can register a project again while a delete is removing it. Reads are not queued. A queued
+  // operation must not call another one, which would wait for itself.
+  private lifecycleQueue: Promise<unknown> = Promise.resolve();
+
+  // Anonymous reads address a ProjectDO for any valid slug. Tables are created by the first project write, so a
+  // Durable Object for an unknown slug answers NOT_FOUND without persisting storage.
+  private hasSchema: boolean;
+
   constructor(
     private readonly ctx: DurableObjectState,
     private readonly env: CloudflareEnv
   ) {
-    this.initialize();
+    this.hasSchema = this.ctx.storage.sql
+      .exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'project'`)
+      .toArray().length > 0;
+    if (this.hasSchema) {
+      this.initialize();
+    }
+  }
+
+  private ensureSchema() {
+    if (!this.hasSchema) {
+      this.initialize();
+      this.hasSchema = true;
+    }
   }
 
   private initialize() {
@@ -156,39 +181,41 @@ export class ProjectDO {
     }
   }
 
+  private runLifecycleOperation<Result>(operation: () => Promise<Result>): Promise<Result> {
+    const result = this.lifecycleQueue.then(operation);
+    // A failed operation must not stop the ones queued behind it.
+    this.lifecycleQueue = result.catch(() => undefined);
+    return result;
+  }
+
   private async handle(body: ProjectDoRequest): Promise<ProjectDoResponse> {
     switch (body.type) {
       case 'project.create':
         return {
           type: 'project.create.result',
-          result: await this.createProject(body.input, body.allowExisting ?? false)
+          result: await this.runLifecycleOperation(() => this.createProject(body.input, body.allowExisting ?? false))
         };
       case 'project.get':
         return {
           type: 'project.get.result',
           result: await this.getProject(body.projectSlug)
         };
-      case 'project.access.get':
-        return {
-          type: 'project.access.get.result',
-          result: {
-            data: this.getProjectAccess(body.projectSlug)
-          }
-        };
       case 'project.table.create':
         return {
           type: 'project.table.create.result',
-          result: await this.createTable(body.projectSlug, body.input, body.allowExisting ?? false)
+          result: await this.runLifecycleOperation(
+            () => this.createTable(body.projectSlug, body.input, body.allowExisting ?? false)
+          )
         };
       case 'project.table.delete':
         return {
           type: 'project.table.delete.result',
-          result: await this.deleteTable(body.projectSlug, body.tableSlug)
+          result: await this.runLifecycleOperation(() => this.deleteTable(body.projectSlug, body.tableSlug))
         };
       case 'project.delete':
         return {
           type: 'project.delete.result',
-          result: await this.deleteProject(body.projectSlug)
+          result: await this.runLifecycleOperation(() => this.deleteProject(body.projectSlug))
         };
       case 'project.table.list':
         return {
@@ -232,16 +259,89 @@ export class ProjectDO {
     const googleCredentialRef = normalizeOptionalFieldName(input.googleCredentialRef) ?? defaultGoogleCredentialRef;
 
     resolveGoogleCredential(this.env, googleCredentialRef);
-    const existing = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, input.slug);
+    const previous = this.findProjectToCreate(input.slug, allowExisting);
 
-    if (!allowExisting) {
-      if (existing) {
-        throw new ConflictError(`Project ${input.slug} already exists.`, {
-          projectSlug: input.slug
-        });
-      }
+    // Before anything is written here, the control plane checks in one step that the spreadsheet's other projects use
+    // this credential ref and records this project's claim to the spreadsheet, so two creations cannot both pass the
+    // check for one spreadsheet under different refs. For a slug without a project it also revokes keys an earlier
+    // project with this slug left behind.
+    const reservesSpreadsheet =
+      !previous
+      || previous.spreadsheet_id !== input.spreadsheetId
+      || previous.google_credential_ref !== googleCredentialRef;
+    if (reservesSpreadsheet) {
+      await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), {
+        type: 'control.project.reserve',
+        projectSlug: input.slug,
+        spreadsheetId: input.spreadsheetId,
+        googleCredentialRef,
+        revokeApiKeys: previous === null
+      });
     }
 
+    try {
+      this.writeProject(input, googleCredentialRef, now);
+    } catch (error) {
+      if (reservesSpreadsheet) {
+        await this.endReservation(input.slug, { type: 'control.project.release', projectSlug: input.slug });
+      }
+
+      throw error;
+    }
+
+    // Registering the project ends its reservation. If registering fails, the write is taken back: a project left
+    // readable but unregistered would hold its spreadsheet only until the reservation lapses, after which another
+    // project could take the spreadsheet under another credential ref and repeating this create would fail against it.
+    try {
+      await this.syncRegistry(input.slug);
+    } catch (error) {
+      await this.takeBackProject(input.slug, previous, error);
+      throw error;
+    }
+
+    return {
+      data: await this.getProject(input.slug),
+      created: previous === null
+    };
+  }
+
+  // Puts the project back as it was before this create wrote it. A project this create made has no tables, because
+  // table requests wait behind it. An error from the control plane means it rejected the registration and applied
+  // nothing, so the reservation is left to keep the spreadsheet for a repeated create until it expires. Without an
+  // answer the registration may have been applied, so the registry is brought back in step with what is stored: a
+  // project that did not exist is unregistered, and one that did is registered as it was. Either call also ends the
+  // reservation.
+  private async takeBackProject(projectSlug: string, previous: ProjectRow | null, registrationError: unknown) {
+    if (previous === null) {
+      this.ctx.storage.sql.exec(`DELETE FROM project WHERE slug = ?`, projectSlug);
+    } else {
+      this.ctx.storage.sql.exec(
+        `UPDATE project SET name = ?, spreadsheet_id = ?, google_credential_ref = ?, default_auth_mode = ?, updated_at = ? WHERE slug = ?`,
+        previous.name,
+        previous.spreadsheet_id,
+        previous.google_credential_ref,
+        previous.default_auth_mode,
+        previous.updated_at,
+        projectSlug
+      );
+    }
+
+    if (registrationError instanceof AppError) {
+      return;
+    }
+
+    if (previous === null) {
+      await this.endReservation(projectSlug, { type: 'control.project.delete', projectSlug });
+    } else {
+      await this.endReservation(projectSlug, {
+        type: 'control.project.upsert',
+        summary: this.getProjectSummary(projectSlug)
+      });
+    }
+  }
+
+  private writeProject(input: CreateProjectInput, googleCredentialRef: string, now: string) {
+    this.ensureSchema();
     this.ctx.storage.sql.exec(
       `
       INSERT INTO project (
@@ -262,12 +362,34 @@ export class ProjectDO {
       now,
       now
     );
+  }
 
-    await this.syncRegistry(input.slug);
-    return {
-      data: await this.getProject(input.slug),
-      created: existing === null
-    };
+  // Ends a failed create's reservation with the control-plane call that fits what the create left behind. Best effort:
+  // the error that led here is the one the caller needs, so a failed call is logged and does not replace it. A
+  // reservation left behind expires on its own, and a retried create or a delete of the slug replaces or removes it
+  // sooner.
+  private async endReservation(projectSlug: string, request: ControlPlaneDoRequest) {
+    try {
+      await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), request);
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: 'project.reservation.release.failed',
+        projectSlug,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+        errorMessage: error instanceof Error ? error.message : String(error)
+      }));
+    }
+  }
+
+  private findProjectToCreate(projectSlug: string, allowExisting: boolean) {
+    const existing = this.selectOptionalRow<ProjectRow>(`SELECT * FROM project WHERE slug = ?`, projectSlug);
+    if (existing && !allowExisting) {
+      throw new ConflictError(`Project ${projectSlug} already exists.`, {
+        projectSlug
+      });
+    }
+
+    return existing;
   }
 
   private async getProject(projectSlug: string): Promise<AdminGetProjectResult> {
@@ -276,14 +398,6 @@ export class ProjectDO {
     return {
       project: this.mapProject(project),
       tables: await this.listTables(projectSlug)
-    };
-  }
-
-  private getProjectAccess(projectSlug: string): ProjectAccessResult {
-    const project = this.requireProjectRow(projectSlug);
-    return {
-      slug: project.slug,
-      defaultAuthMode: project.default_auth_mode
     };
   }
 
@@ -448,9 +562,11 @@ export class ProjectDO {
     const tables = await this.listTables(projectSlug);
     const deletedTables = tables.map((table) => table.tableSlug);
 
+    // Revoke the project's keys and drop its registry entry first. If the control plane fails, nothing here has been
+    // deleted yet: the project keeps working, its slug cannot be re-created, and retrying the delete converges.
+    await this.deleteRegistryProject(projectSlug);
     this.ctx.storage.sql.exec(`DELETE FROM tables WHERE project_slug = ?`, projectSlug);
     this.ctx.storage.sql.exec(`DELETE FROM project WHERE slug = ?`, projectSlug);
-    await this.deleteRegistryProject(projectSlug);
 
     return {
       ok: true,
@@ -537,6 +653,10 @@ export class ProjectDO {
   }
 
   private selectOptionalRow<Row>(query: string, ...params: unknown[]): Row | null {
+    if (!this.hasSchema) {
+      return null;
+    }
+
     const rows = this.ctx.storage.sql.exec(query, ...params).toArray() as Row[];
     return rows[0] ?? null;
   }
@@ -602,7 +722,8 @@ export class ProjectDO {
       createEnabled: Boolean(row.create_enabled),
       updateEnabled: Boolean(row.update_enabled),
       deleteEnabled: Boolean(row.delete_enabled),
-      cacheTtlSeconds: row.cache_ttl_seconds,
+      // Tables stored before the contract bound existed are served at the bound so the snapshot still satisfies the TableDO RPC schema.
+      cacheTtlSeconds: Math.min(row.cache_ttl_seconds, maxCacheTtlSeconds),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

@@ -25,6 +25,10 @@ export type SetupSecrets = {
   googlePrivateKey: string;
   driveWebhookSecret: string;
   adminBearerToken: string;
+  /** True when setup minted the value rather than reading it from the environment. */
+  driveWebhookSecretGenerated: boolean;
+  /** True when setup minted the value; the operator has no other copy and must be handed it once. */
+  adminBearerTokenGenerated: boolean;
 };
 type GoogleProvisioningOptions = {
   enabled: boolean;
@@ -155,14 +159,18 @@ export async function collectSetupSecrets(options: {
     }
   }
 
-  const adminBearerToken = readEnvValue('ADMIN_BEARER_TOKEN') ?? generateSecretToken(32);
-  const driveWebhookSecret = readEnvValue('GOOGLE_DRIVE_WEBHOOK_SECRET') ?? generateSecretToken(32);
+  const suppliedAdminBearerToken = readEnvValue('ADMIN_BEARER_TOKEN');
+  const suppliedDriveWebhookSecret = readEnvValue('GOOGLE_DRIVE_WEBHOOK_SECRET');
+  const adminBearerToken = suppliedAdminBearerToken ?? generateSecretToken(32);
+  const driveWebhookSecret = suppliedDriveWebhookSecret ?? generateSecretToken(32);
 
   return {
     googleClientEmail,
     googlePrivateKey,
     driveWebhookSecret,
-    adminBearerToken
+    adminBearerToken,
+    driveWebhookSecretGenerated: suppliedDriveWebhookSecret === null,
+    adminBearerTokenGenerated: suppliedAdminBearerToken === null
   };
 }
 
@@ -294,6 +302,8 @@ export async function applyApiSecrets(options: {
   googlePrivateKey: string;
   driveWebhookSecret: string;
   adminBearerToken: string;
+  /** Called after each wrangler secret put succeeds, in apply order; a failed put throws before it is reported. */
+  onApplied?: (secretName: 'GOOGLE_PRIVATE_KEY' | 'GOOGLE_DRIVE_WEBHOOK_SECRET' | 'ADMIN_BEARER_TOKEN') => void;
 }) {
   const wrangler = getCommandName('npx');
   const commands = buildApiSecretCommands(options.apiWranglerConfigPath);
@@ -309,6 +319,7 @@ export async function applyApiSecrets(options: {
   if (privateKeyResult.code !== 0) {
     throw new ScriptError('Failed to apply GOOGLE_PRIVATE_KEY with wrangler secret put.');
   }
+  options.onApplied?.('GOOGLE_PRIVATE_KEY');
 
   const driveWebhookSecretResult = await runCommand(
     wrangler,
@@ -322,6 +333,7 @@ export async function applyApiSecrets(options: {
   if (driveWebhookSecretResult.code !== 0) {
     throw new ScriptError('Failed to apply GOOGLE_DRIVE_WEBHOOK_SECRET with wrangler secret put.');
   }
+  options.onApplied?.('GOOGLE_DRIVE_WEBHOOK_SECRET');
 
   const bearerResult = await runCommand(
     wrangler,
@@ -335,6 +347,7 @@ export async function applyApiSecrets(options: {
   if (bearerResult.code !== 0) {
     throw new ScriptError('Failed to apply ADMIN_BEARER_TOKEN with wrangler secret put.');
   }
+  options.onApplied?.('ADMIN_BEARER_TOKEN');
 }
 
 export function buildApiSecretCommands(apiWranglerConfigPath: string) {

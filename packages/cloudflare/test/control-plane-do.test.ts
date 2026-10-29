@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ControlPlaneDoResponse, ProjectDoResponse, TableDoResponse } from '@sheetflare/contracts';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { toErrorResponse, type ControlPlaneDoResponse, type ProjectDoResponse, type TableDoResponse } from '@sheetflare/contracts';
 import { ControlPlaneDO, ProjectDO, TableDO, doRpc, type CloudflareEnv } from '../src';
 import { createDurableObjectNamespace } from './support/do-harness';
+import { expectRpcResult } from './support/rpc-result';
 
 const testPrivateKey = [
   '-----BEGIN PRIVATE KEY-----',
@@ -223,7 +224,24 @@ function createTestEnv(overrides?: Partial<CloudflareEnv>) {
   env.PROJECT_DO = createDurableObjectNamespace(env, ProjectDO) as never;
   env.TABLE_DO = createDurableObjectNamespace(env, TableDO) as never;
   env.RATE_LIMIT_DO = null as never;
-  return { env, controlPlaneNamespace };
+  return {
+    env,
+    controlPlaneNamespace,
+    // Registries written before credential refs were checked at project creation can hold projects that share a
+    // spreadsheet under different refs. Registering such a pair is rejected now, so the rows go into storage the way
+    // that release wrote them.
+    seedRegistryProject(slug: string, spreadsheetId: string, googleCredentialRef: string) {
+      controlPlaneNamespace.runSql(
+        'control-plane',
+        `INSERT INTO project_registry (slug, name, spreadsheet_id, google_credential_ref, table_count, updated_at)
+         VALUES (?, ?, ?, ?, 0, '2026-05-01T00:00:00.000Z')`,
+        slug,
+        slug,
+        spreadsheetId,
+        googleCredentialRef
+      );
+    }
+  };
 }
 
 async function hashApiKeySecret(secret: string) {
@@ -950,13 +968,12 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       }
     );
 
-    expect((notifyResponse as {
-      type: 'control.spreadsheet-watch.notify.result';
-      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
-    }).result).toEqual({
+    expect(expectRpcResult(notifyResponse, 'control.spreadsheet-watch.notify.result')).toEqual({
       accepted: true,
       spreadsheetId: 'sheet-1',
-      debounceUntil: '2026-04-29T15:01:30.000Z'
+      debounceUntil: '2026-04-29T15:01:30.000Z',
+      changed: true,
+      projectSlugs: ['demo']
     });
 
     const duplicateResponse = await doRpc<ControlPlaneDoResponse>(
@@ -972,13 +989,12 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       }
     );
 
-    expect((duplicateResponse as {
-      type: 'control.spreadsheet-watch.notify.result';
-      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
-    }).result).toEqual({
+    expect(expectRpcResult(duplicateResponse, 'control.spreadsheet-watch.notify.result')).toEqual({
       accepted: true,
       spreadsheetId: 'sheet-1',
-      debounceUntil: '2026-04-29T15:01:30.000Z'
+      debounceUntil: '2026-04-29T15:01:30.000Z',
+      changed: false,
+      projectSlugs: ['demo']
     });
 
     const cacheAfterNotify = await doRpc<TableDoResponse>(
@@ -1119,13 +1135,12 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       channelExpiration: 'Fri, 01 May 2026 00:00:00 GMT'
     });
 
-    expect((nullMessageResponse as {
-      type: 'control.spreadsheet-watch.notify.result';
-      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
-    }).result).toEqual({
+    expect(expectRpcResult(nullMessageResponse, 'control.spreadsheet-watch.notify.result')).toEqual({
       accepted: true,
       spreadsheetId: 'sheet-1',
-      debounceUntil: '2026-04-29T15:01:40.000Z'
+      debounceUntil: '2026-04-29T15:01:40.000Z',
+      changed: true,
+      projectSlugs: ['demo']
     });
 
     const duplicateResponse = await doRpc<ControlPlaneDoResponse>(controlPlane, {
@@ -1138,13 +1153,12 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       channelExpiration: 'Fri, 01 May 2026 00:00:00 GMT'
     });
 
-    expect((duplicateResponse as {
-      type: 'control.spreadsheet-watch.notify.result';
-      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
-    }).result).toEqual({
+    expect(expectRpcResult(duplicateResponse, 'control.spreadsheet-watch.notify.result')).toEqual({
       accepted: true,
       spreadsheetId: 'sheet-1',
-      debounceUntil: '2026-04-29T15:01:40.000Z'
+      debounceUntil: '2026-04-29T15:01:40.000Z',
+      changed: false,
+      projectSlugs: ['demo']
     });
 
     vi.useRealTimers();
@@ -1640,7 +1654,7 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     }).result.data).toEqual([
       expect.objectContaining({
         spreadsheetId: 'sheet-1',
-        lastWatchError: 'Google Sheets authentication or permission check failed. Rate limit exceeded for creating file subscriptions.'
+        lastWatchError: 'Google Drive rate limit exceeded for creating file subscriptions.'
       })
     ]);
     expect(
@@ -1650,7 +1664,7 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
     vi.useRealTimers();
   });
 
-  it('returns structured Google watch registration errors with upstream details', async () => {
+  it('returns structured Google watch registration errors with the upstream status', async () => {
     const sheet: SheetState = {
       rows: [
         ['_id', 'status'],
@@ -1729,11 +1743,774 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       error: {
         code: 'BAD_GATEWAY',
         message: 'Google Sheets authentication or permission check failed.',
-        details: {
-          status: 403,
-          message: 'The caller does not have permission'
+        details: expect.objectContaining({
+          status: 403
+        })
+      }
+    });
+  });
+
+  it('relays Google watch registration failures to RPC callers without upstream details', async () => {
+    const sheet: SheetState = {
+      rows: [['_id', 'status']]
+    };
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/drive/v3/files/sheet-1/watch')) {
+        return Response.json({
+          error: {
+            code: 403,
+            message: 'Drive API has not been used in project 123456789012 before or it is disabled.',
+            status: 'PERMISSION_DENIED'
+          }
+        }, { status: 403 });
+      }
+
+      return createSheetsAndDriveFetch(sheet)(input, init);
+    });
+    const { env } = createTestEnv();
+
+    await doRpc<ProjectDoResponse>(env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo')), {
+      type: 'project.create',
+      input: { slug: 'demo', name: 'Demo', spreadsheetId: 'sheet-1' }
+    });
+    const failure = await doRpc<ControlPlaneDoResponse>(env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane')), {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30
+    }).then(
+      () => {
+        throw new Error('Expected watch registration to fail.');
+      },
+      (error: unknown) => error
+    );
+
+    expect(toErrorResponse(failure)).toEqual({
+      status: 502,
+      body: {
+        error: {
+          code: 'BAD_GATEWAY',
+          message: 'Google Sheets authentication or permission check failed.',
+          details: null
         }
       }
+    });
+  });
+});
+
+describe('ControlPlaneDO project removal', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('deletes a project when Google cannot stop its watch and retries the stop from the alarm', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-01T10:00:00.000Z'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    const stoppedChannels: string[] = [];
+    let googleStopFails = true;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/drive/v3/channels/stop')) {
+        stoppedChannels.push(String(JSON.parse(String(init?.body ?? '{}')).id));
+        if (googleStopFails) {
+          return Response.json({ error: { code: 500, message: 'Backend Error', status: 'INTERNAL' } }, { status: 500 });
+        }
+      }
+
+      return fallbackFetch(input, init);
+    });
+    const { env, controlPlaneNamespace } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    const project = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo'));
+    await doRpc<ProjectDoResponse>(project, {
+      type: 'project.create',
+      input: { slug: 'demo', name: 'Demo', spreadsheetId: 'sheet-1' }
+    });
+    await doRpc<ProjectDoResponse>(project, {
+      type: 'project.table.create',
+      projectSlug: 'demo',
+      input: { tableSlug: 'users', sheetTabName: 'Users' }
+    });
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30,
+      expirationMs: Date.parse('2026-05-08T10:00:00.000Z')
+    });
+
+    const deleted = expectRpcResult(
+      await doRpc<ProjectDoResponse>(project, { type: 'project.delete', projectSlug: 'demo' }),
+      'project.delete.result'
+    );
+
+    expect(deleted).toEqual({ ok: true, deletedProject: 'demo', deletedTables: ['users'] });
+    expect(expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.spreadsheet-watches.list' }),
+      'control.spreadsheet-watches.list.result'
+    ).data).toEqual([]);
+    expect(stoppedChannels).toEqual(['channel-sheet-1']);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"event":"drive.watch.stop.failed"'));
+    expect(controlPlaneNamespace.getAlarm('control-plane')).toBe(Date.parse('2026-05-01T10:01:00.000Z'));
+
+    vi.setSystemTime(new Date('2026-05-01T10:01:00.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect(stoppedChannels).toEqual(['channel-sheet-1', 'channel-sheet-1']);
+    expect(controlPlaneNamespace.getAlarm('control-plane')).toBe(Date.parse('2026-05-01T10:03:00.000Z'));
+
+    googleStopFails = false;
+    vi.setSystemTime(new Date('2026-05-01T10:03:00.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect(stoppedChannels).toEqual(['channel-sheet-1', 'channel-sheet-1', 'channel-sheet-1']);
+    expect(controlPlaneNamespace.getAlarm('control-plane')).toBeNull();
+  });
+
+  it('deletes a project while other projects share a spreadsheet under conflicting credential refs', async () => {
+    vi.stubGlobal('fetch', createSheetsAndDriveFetch({ rows: [['_id']] }));
+    const { env, seedRegistryProject } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    seedRegistryProject('alpha', 'sheet-1', 'default');
+    seedRegistryProject('beta', 'sheet-1', 'other');
+    const gamma = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:gamma'));
+    await doRpc<ProjectDoResponse>(gamma, {
+      type: 'project.create',
+      input: { slug: 'gamma', name: 'Gamma', spreadsheetId: 'sheet-2' }
+    });
+
+    await expect(doRpc<ProjectDoResponse>(gamma, { type: 'project.delete', projectSlug: 'gamma' }))
+      .resolves.toMatchObject({ type: 'project.delete.result' });
+    await expect(doRpc<ProjectDoResponse>(gamma, { type: 'project.delete', projectSlug: 'gamma' }))
+      .resolves.toMatchObject({ type: 'project.delete.result' });
+
+    expect(expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.projects.list' }),
+      'control.projects.list.result'
+    ).data.map((project) => project.slug).sort()).toEqual(['alpha', 'beta']);
+  });
+});
+
+describe('ControlPlaneDO project reservations', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function createProjectRegistry() {
+    const { env, controlPlaneNamespace, seedRegistryProject } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    return {
+      controlPlane,
+      controlPlaneNamespace,
+      seedRegistryProject,
+      reserve: (projectSlug: string, spreadsheetId: string, googleCredentialRef: string, revokeApiKeys = false) =>
+        doRpc<ControlPlaneDoResponse>(controlPlane, {
+          type: 'control.project.reserve',
+          projectSlug,
+          spreadsheetId,
+          googleCredentialRef,
+          revokeApiKeys
+        }),
+      release: (projectSlug: string) =>
+        doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.project.release', projectSlug }),
+      register: (slug: string, spreadsheetId: string, googleCredentialRef: string) =>
+        doRpc<ControlPlaneDoResponse>(controlPlane, {
+          type: 'control.project.upsert',
+          summary: { slug, name: slug, spreadsheetId, googleCredentialRef, tableCount: 0, updatedAt: '2026-05-01T00:00:00.000Z' }
+        }),
+      async listRegistered() {
+        const registry = expectRpcResult(
+          await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.projects.list' }),
+          'control.projects.list.result'
+        );
+        return registry.data
+          .map((project) => `${project.slug}:${project.spreadsheetId}:${project.googleCredentialRef}`)
+          .sort();
+      }
+    };
+  }
+
+  it('rejects a spreadsheet reserved under another credential ref and records nothing for the rejected project', async () => {
+    const { reserve, release } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+
+    await expect(reserve('beta', 'sheet-1', 'other')).rejects.toMatchObject({
+      code: 'CONFLICT',
+      status: 409,
+      details: { spreadsheetId: 'sheet-1', googleCredentialRef: 'other', registeredGoogleCredentialRefs: ['default'] }
+    });
+
+    // beta left no claim behind: once alpha lets go, the spreadsheet is free for any ref.
+    await release('alpha');
+    await expect(reserve('gamma', 'sheet-1', 'third')).resolves.toMatchObject({ type: 'control.project.reserve.result' });
+  });
+
+  it('lets projects reserve one spreadsheet under the same credential ref and different spreadsheets under different refs', async () => {
+    const { reserve } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+
+    await expect(reserve('beta', 'sheet-1', 'default')).resolves.toMatchObject({ type: 'control.project.reserve.result' });
+    await expect(reserve('gamma', 'sheet-2', 'other')).resolves.toMatchObject({ type: 'control.project.reserve.result' });
+  });
+
+  it('replaces the reservation of a slug that reserves again', async () => {
+    const { reserve } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+
+    // A retried create does not conflict with its own earlier reservation, and a create that moved takes its claim along.
+    await reserve('alpha', 'sheet-1', 'default');
+    await reserve('alpha', 'sheet-2', 'other');
+
+    await expect(reserve('beta', 'sheet-1', 'third')).resolves.toMatchObject({ type: 'control.project.reserve.result' });
+    await expect(reserve('gamma', 'sheet-2', 'default')).rejects.toMatchObject({
+      code: 'CONFLICT',
+      details: { registeredGoogleCredentialRefs: ['other'] }
+    });
+  });
+
+  it('drops a reservation when it is released or when its slug is deleted', async () => {
+    const { controlPlane, reserve, release } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+    await release('alpha');
+    await reserve('beta', 'sheet-1', 'other');
+    await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.project.delete', projectSlug: 'beta' });
+
+    // Neither reservation outlived its release or delete, and releasing a slug that holds none is not an error.
+    await expect(reserve('gamma', 'sheet-1', 'third')).resolves.toMatchObject({ type: 'control.project.reserve.result' });
+    await expect(release('nobody')).resolves.toMatchObject({ type: 'control.project.release.result' });
+  });
+
+  it('stops holding a spreadsheet for a reservation that expired', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-01T10:00:00.000Z'));
+    const { reserve } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+
+    vi.setSystemTime(new Date('2026-05-01T10:04:59.999Z'));
+    await expect(reserve('beta', 'sheet-1', 'other')).rejects.toMatchObject({ code: 'CONFLICT' });
+
+    vi.setSystemTime(new Date('2026-05-01T10:05:00.000Z'));
+    await expect(reserve('beta', 'sheet-1', 'other')).resolves.toMatchObject({ type: 'control.project.reserve.result' });
+  });
+
+  it('revokes the leftover keys of a slug only when its reservation is accepted', async () => {
+    const { controlPlane, reserve } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+    const created = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.api-key.create',
+        input: { name: 'Beta reader', projectSlug: 'beta', scopes: ['table:read'] }
+      }),
+      'control.api-key.create.result'
+    );
+    const readRevokedAt = async () => expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.api-key.get', apiKeyId: created.record.id }),
+      'control.api-key.get.result'
+    ).record?.revokedAt;
+
+    await expect(reserve('beta', 'sheet-1', 'other', true)).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(await readRevokedAt()).toBeNull();
+
+    await reserve('beta', 'sheet-1', 'default', true);
+    expect(await readRevokedAt()).toEqual(expect.any(String));
+  });
+
+  it('rejects registering a project under a credential ref that conflicts with a registered or reserved project', async () => {
+    const { reserve, register, listRegistered } = createProjectRegistry();
+    await register('alpha', 'sheet-1', 'default');
+    await reserve('gamma', 'sheet-2', 'default');
+
+    await expect(register('beta', 'sheet-1', 'other')).rejects.toMatchObject({
+      code: 'CONFLICT',
+      status: 409,
+      details: { spreadsheetId: 'sheet-1', googleCredentialRef: 'other', registeredGoogleCredentialRefs: ['default'] }
+    });
+    await expect(register('delta', 'sheet-2', 'other')).rejects.toMatchObject({ code: 'CONFLICT' });
+
+    // A rejected registration writes nothing, and a project that uses the spreadsheet's ref registers.
+    expect(await listRegistered()).toEqual(['alpha:sheet-1:default']);
+    await expect(register('epsilon', 'sheet-1', 'default')).resolves.toMatchObject({ type: 'control.project.upsert.result' });
+  });
+
+  it('ends the reservation of a project when it registers and leaves its claim to the registry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-01T10:00:00.000Z'));
+    const { controlPlaneNamespace, reserve, register } = createProjectRegistry();
+    await reserve('alpha', 'sheet-1', 'default');
+    await register('alpha', 'sheet-1', 'default');
+
+    expect(controlPlaneNamespace.runSql('control-plane', 'SELECT slug FROM project_reservations')).toEqual([]);
+    // The registry holds the spreadsheet well past the lifetime of the reservation that preceded it.
+    vi.setSystemTime(new Date('2026-05-01T11:00:00.000Z'));
+    await expect(reserve('beta', 'sheet-1', 'other')).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('keeps projects of a registry that already conflicts updatable and lets operators converge it', async () => {
+    const { seedRegistryProject, register, listRegistered } = createProjectRegistry();
+    seedRegistryProject('alpha', 'sheet-1', 'default');
+    seedRegistryProject('beta', 'sheet-1', 'other');
+
+    // Registering the pairing a project already has is not a new claim. A third ref is, and conflicts, while a ref the
+    // spreadsheet already has converges the registry.
+    await expect(register('beta', 'sheet-1', 'other')).resolves.toMatchObject({ type: 'control.project.upsert.result' });
+    await expect(register('beta', 'sheet-1', 'third')).rejects.toMatchObject({ code: 'CONFLICT' });
+    await register('beta', 'sheet-1', 'default');
+
+    expect(await listRegistered()).toEqual(['alpha:sheet-1:default', 'beta:sheet-1:default']);
+  });
+});
+
+describe('ControlPlaneDO Drive reindex', () => {
+  const webhookUrl = 'https://sheetflare.example/v1/system/google/drive/notifications';
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function getControlPlane(env: CloudflareEnv) {
+    return env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+  }
+
+  function getTable(env: CloudflareEnv, projectSlug: string, tableSlug: string) {
+    return env.TABLE_DO.get(env.TABLE_DO.idFromName(`table:${projectSlug}:${tableSlug}`));
+  }
+
+  async function createWatchedTables(
+    env: CloudflareEnv,
+    tables: Array<{ projectSlug: string; tableSlug: string; sheetTabName?: string }>,
+    expirationMs = Date.parse('2026-05-06T10:00:00.000Z')
+  ) {
+    for (const { projectSlug, tableSlug, sheetTabName = 'Users' } of tables) {
+      const project = env.PROJECT_DO.get(env.PROJECT_DO.idFromName(`project:${projectSlug}`));
+      await doRpc<ProjectDoResponse>(project, {
+        type: 'project.create',
+        allowExisting: true,
+        input: { slug: projectSlug, name: projectSlug, spreadsheetId: 'sheet-1' }
+      });
+      await doRpc<ProjectDoResponse>(project, {
+        type: 'project.table.create',
+        projectSlug,
+        input: { tableSlug, sheetTabName, cacheTtlSeconds: 3600 }
+      });
+    }
+
+    await doRpc<ControlPlaneDoResponse>(getControlPlane(env), {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl,
+      webhookToken: 'secret-token',
+      debounceSeconds: 30,
+      expirationMs
+    });
+  }
+
+  async function notifyChange(env: CloudflareEnv, messageNumber: string, changedAt: string) {
+    return expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(getControlPlane(env), {
+        type: 'control.spreadsheet-watch.notify',
+        channelId: 'channel-sheet-1',
+        resourceId: 'resource-sheet-1',
+        resourceState: 'update',
+        messageNumber,
+        changedAt,
+        channelExpiration: null
+      }),
+      'control.spreadsheet-watch.notify.result'
+    );
+  }
+
+  async function getWatch(env: CloudflareEnv) {
+    const [watch] = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(getControlPlane(env), { type: 'control.spreadsheet-watches.list' }),
+      'control.spreadsheet-watches.list.result'
+    ).data;
+    return watch;
+  }
+
+  async function getRowStatus(env: CloudflareEnv, projectSlug: string, tableSlug: string) {
+    return expectRpcResult(
+      await doRpc<TableDoResponse>(getTable(env, projectSlug, tableSlug), {
+        type: 'table.row.get',
+        projectSlug,
+        tableSlug,
+        rowId: 'row-1'
+      }),
+      'table.row.get.result'
+    ).data.values.status;
+  }
+
+  function readLogEvents(spy: { mock: { calls: unknown[][] } }, event: string) {
+    return spy.mock.calls
+      .map(([line]) => String(line))
+      .filter((line) => line.includes(`"event":"${event}"`))
+      .map((line) => JSON.parse(line));
+  }
+
+  it('keeps reindexing later tables after one fails and backs off its retries up to a cap', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'v1']
+      ]
+    };
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    let brokenTabReadable = true;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = decodeURIComponent(String(input));
+      if (url.includes('?fields=sheets.properties')) {
+        return Response.json({
+          sheets: [
+            { properties: { title: 'Broken', sheetId: 2, sheetType: 'GRID' } },
+            { properties: { title: 'Users', sheetId: 1, sheetType: 'GRID' } }
+          ]
+        });
+      }
+
+      if (url.includes("/values/'Broken'")) {
+        return brokenTabReadable
+          ? Response.json({ values: [['_id', 'status'], ['row-1', 'b1']] })
+          : Response.json({
+            error: { code: 403, message: 'Project 123456789012 cannot read Broken', status: 'PERMISSION_DENIED' }
+          }, { status: 403 });
+      }
+
+      return fallbackFetch(input, init);
+    });
+    const { env, controlPlaneNamespace } = createTestEnv();
+    await createWatchedTables(env, [
+      { projectSlug: 'a-proj', tableSlug: 'broken', sheetTabName: 'Broken' },
+      { projectSlug: 'z-proj', tableSlug: 'healthy' }
+    ]);
+
+    brokenTabReadable = false;
+    sheet.rows = [
+      ['_id', 'status'],
+      ['row-1', 'v2']
+    ];
+    await notifyChange(env, '2', '2026-04-29T10:00:00.000Z');
+    vi.setSystemTime(new Date('2026-04-29T10:00:30.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    // Reading the cache status does not sync, so this shows the alarm itself reindexed the later table.
+    expect(expectRpcResult(
+      await doRpc<TableDoResponse>(getTable(env, 'z-proj', 'healthy'), {
+        type: 'table.cache.get',
+        projectSlug: 'z-proj',
+        tableSlug: 'healthy'
+      }),
+      'table.cache.get.result'
+    ).data).toMatchObject({
+      staleReason: 'fresh',
+      externalChange: { pending: false, lastAutoReindexAt: '2026-04-29T10:00:30.000Z' }
+    });
+    expect(await getRowStatus(env, 'z-proj', 'healthy')).toBe('v2');
+    expect(await getWatch(env)).toMatchObject({
+      pendingChangedAt: '2026-04-29T10:00:00.000Z',
+      debounceUntil: '2026-04-29T10:01:00.000Z',
+      lastReindexError: 'a-proj/broken: Google Sheets authentication or permission check failed.'
+    });
+    expect(readLogEvents(errorSpy, 'drive.reindex.failed')).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        projectSlug: 'a-proj',
+        tableSlug: 'broken',
+        attempt: 1,
+        nextAttemptAt: '2026-04-29T10:01:00.000Z'
+      })
+    ]);
+
+    const retryDelaysSeconds: number[] = [];
+    for (let retry = 0; retry < 8; retry += 1) {
+      const dueAt = (await getWatch(env))?.debounceUntil ?? '';
+      vi.setSystemTime(new Date(dueAt));
+      await controlPlaneNamespace.triggerAlarm('control-plane');
+      retryDelaysSeconds.push((Date.parse((await getWatch(env))?.debounceUntil ?? '') - Date.parse(dueAt)) / 1000);
+    }
+
+    expect(retryDelaysSeconds).toEqual([60, 120, 240, 480, 960, 1920, 3600, 3600]);
+    expect(controlPlaneNamespace.getAlarm('control-plane')).toBe(Date.parse((await getWatch(env))?.debounceUntil ?? ''));
+
+    brokenTabReadable = true;
+    vi.setSystemTime(new Date((await getWatch(env))?.debounceUntil ?? ''));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect(await getWatch(env)).toMatchObject({ pendingChangedAt: null, debounceUntil: null, lastReindexError: null });
+    expect(await getRowStatus(env, 'a-proj', 'broken')).toBe('b1');
+
+    brokenTabReadable = false;
+    const changedAt = new Date().toISOString();
+    await notifyChange(env, '3', changedAt);
+    vi.setSystemTime(Date.parse(changedAt) + 30_000);
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect(Date.parse((await getWatch(env))?.debounceUntil ?? '') - Date.now()).toBe(30_000);
+  });
+
+  it('stores a generic reindex error for unexpected failures and keeps the detail in the log', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', createSheetsAndDriveFetch({ rows: [['_id', 'status'], ['row-1', 'v1']] }));
+    const { env, controlPlaneNamespace } = createTestEnv();
+    await createWatchedTables(env, [{ projectSlug: 'demo', tableSlug: 'users' }]);
+    const tableNamespace = env.TABLE_DO;
+    // The table binding fails the way a reset Durable Object does: the RPC throws instead of answering.
+    env.TABLE_DO = {
+      idFromName: (name: string) => tableNamespace.idFromName(name),
+      get: (id: DurableObjectId) => {
+        const stub = tableNamespace.get(id);
+        return {
+          async fetch(input: RequestInfo | URL, init?: RequestInit) {
+            if (String(init?.body ?? '').includes('"type":"table.reindex"')) {
+              throw new Error('Network connection lost to 10.1.2.3:443.');
+            }
+
+            return stub.fetch(input, init);
+          }
+        };
+      }
+    } as never;
+
+    await notifyChange(env, '2', '2026-04-29T10:00:00.000Z');
+    vi.setSystemTime(new Date('2026-04-29T10:00:30.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect((await getWatch(env))?.lastReindexError).toBe(
+      'demo/users: Reindex failed unexpectedly. See the drive.reindex.failed log event for details.'
+    );
+    expect(readLogEvents(errorSpy, 'drive.reindex.failed')).toEqual([
+      expect.objectContaining({
+        projectSlug: 'demo',
+        tableSlug: 'users',
+        errorMessage: 'Network connection lost to 10.1.2.3:443.'
+      })
+    ]);
+  });
+
+  it('stores only the contract message when a watch renewal fails and logs drive.watch.renew.failed', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fallbackFetch = createSheetsAndDriveFetch({ rows: [['_id', 'status'], ['row-1', 'v1']] });
+    let renewalRejected = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (renewalRejected && String(input).includes('/drive/v3/files/sheet-1/watch')) {
+        return Response.json({
+          error: { code: 403, message: 'Drive API is disabled in project 123456789012.', status: 'PERMISSION_DENIED' }
+        }, { status: 403 });
+      }
+
+      return fallbackFetch(input, init);
+    });
+    const { env, controlPlaneNamespace } = createTestEnv();
+    await createWatchedTables(env, [{ projectSlug: 'demo', tableSlug: 'users' }], Date.parse('2026-04-29T10:10:00.000Z'));
+
+    renewalRejected = true;
+    vi.setSystemTime(new Date('2026-04-29T10:05:01.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect((await getWatch(env))?.lastWatchError).toBe('Google Sheets authentication or permission check failed.');
+    expect(readLogEvents(errorSpy, 'drive.watch.renew.failed')).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-1',
+        channelId: 'channel-sheet-1',
+        errorCode: 'BAD_GATEWAY'
+      })
+    ]);
+  });
+
+  it('reports whether a notification changed anything and which projects share the spreadsheet', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+    vi.stubGlobal('fetch', createSheetsAndDriveFetch({ rows: [['_id', 'status'], ['row-1', 'v1']] }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { env } = createTestEnv();
+    await createWatchedTables(env, [
+      { projectSlug: 'demo', tableSlug: 'users' },
+      { projectSlug: 'prod', tableSlug: 'members' }
+    ]);
+    const notify = async (resourceState: string, messageNumber: string, channelId = 'channel-sheet-1') => expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(getControlPlane(env), {
+        type: 'control.spreadsheet-watch.notify',
+        channelId,
+        resourceId: 'resource-sheet-1',
+        resourceState,
+        messageNumber,
+        changedAt: new Date().toISOString(),
+        channelExpiration: null
+      }),
+      'control.spreadsheet-watch.notify.result'
+    );
+
+    expect(await notify('sync', '1')).toEqual({
+      accepted: true,
+      spreadsheetId: 'sheet-1',
+      debounceUntil: null,
+      changed: false,
+      projectSlugs: ['demo', 'prod']
+    });
+    expect(await notify('update', '2')).toEqual({
+      accepted: true,
+      spreadsheetId: 'sheet-1',
+      debounceUntil: '2026-04-29T10:00:30.000Z',
+      changed: true,
+      projectSlugs: ['demo', 'prod']
+    });
+    vi.setSystemTime(new Date('2026-04-29T10:00:05.000Z'));
+    expect(await notify('update', '2')).toEqual({
+      accepted: true,
+      spreadsheetId: 'sheet-1',
+      debounceUntil: '2026-04-29T10:00:30.000Z',
+      changed: false,
+      projectSlugs: ['demo', 'prod']
+    });
+    expect(await notify('update', '1')).toMatchObject({ accepted: true, changed: false });
+    expect(await notify('update', '3', 'channel-unknown')).toEqual({
+      accepted: false,
+      spreadsheetId: null,
+      debounceUntil: null,
+      changed: false,
+      projectSlugs: []
+    });
+  });
+
+  it('logs notifications for unknown channels or resources as drive.notification.rejected', async () => {
+    vi.stubGlobal('fetch', createSheetsAndDriveFetch({ rows: [['_id', 'status'], ['row-1', 'v1']] }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { env } = createTestEnv();
+    await createWatchedTables(env, [{ projectSlug: 'demo', tableSlug: 'users' }]);
+    const notify = async (channelId: string, resourceId: string) => expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(getControlPlane(env), {
+        type: 'control.spreadsheet-watch.notify',
+        channelId,
+        resourceId,
+        resourceState: 'update',
+        messageNumber: '2',
+        changedAt: '2026-04-29T10:00:00.000Z',
+        channelExpiration: null
+      }),
+      'control.spreadsheet-watch.notify.result'
+    );
+
+    expect(await notify('channel-unknown', 'resource-sheet-1')).toMatchObject({ accepted: false });
+    expect(await notify('channel-sheet-1', 'resource-other')).toMatchObject({ accepted: false });
+    expect(readLogEvents(warnSpy, 'drive.notification.rejected')).toEqual([
+      expect.objectContaining({ channelId: 'channel-unknown', resourceId: 'resource-sheet-1', reason: 'unknown-channel' }),
+      expect.objectContaining({ channelId: 'channel-sheet-1', resourceId: 'resource-other', reason: 'resource-mismatch' })
+    ]);
+  });
+
+  it('keeps a notification that arrives during an alarm reindex pending and re-arms the alarm for it', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'v1']
+      ]
+    };
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    const dataReadHeld = Promise.withResolvers<void>();
+    const dataReadReleased = Promise.withResolvers<void>();
+    let holdNextDataRead = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await fallbackFetch(input, init);
+      if (holdNextDataRead && decodeURIComponent(String(input)).includes("/values/'Users'!A")) {
+        holdNextDataRead = false;
+        dataReadHeld.resolve();
+        await dataReadReleased.promise;
+      }
+
+      return response;
+    });
+    const { env, controlPlaneNamespace } = createTestEnv();
+    await createWatchedTables(env, [{ projectSlug: 'demo', tableSlug: 'users' }]);
+    await notifyChange(env, '2', '2026-04-29T10:00:00.000Z');
+
+    vi.setSystemTime(new Date('2026-04-29T10:00:31.000Z'));
+    holdNextDataRead = true;
+    const alarm = controlPlaneNamespace.triggerAlarm('control-plane');
+    await dataReadHeld.promise;
+
+    // The reindex already holds the v1 snapshot when the sheet changes again.
+    sheet.rows = [
+      ['_id', 'status'],
+      ['row-1', 'v2']
+    ];
+    vi.setSystemTime(new Date('2026-04-29T10:00:32.000Z'));
+    await notifyChange(env, '3', '2026-04-29T10:00:32.000Z');
+    dataReadReleased.resolve();
+    await alarm;
+
+    expect(await getWatch(env)).toMatchObject({
+      pendingChangedAt: '2026-04-29T10:00:32.000Z',
+      debounceUntil: '2026-04-29T10:01:02.000Z',
+      lastReindexCompletedAt: '2026-04-29T10:00:32.000Z',
+      lastReindexError: null
+    });
+    expect(controlPlaneNamespace.getAlarm('control-plane')).toBe(Date.parse('2026-04-29T10:01:02.000Z'));
+
+    vi.setSystemTime(new Date('2026-04-29T10:01:02.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect(await getWatch(env)).toMatchObject({ pendingChangedAt: null, debounceUntil: null });
+    expect(await getRowStatus(env, 'demo', 'users')).toBe('v2');
+  });
+});
+
+describe('ControlPlaneDO API key lifecycle', () => {
+  it('keeps the first revocation timestamp when a key is revoked again', async () => {
+    const { env } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    const created = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.api-key.create',
+        input: { name: 'Demo reader', projectSlug: 'demo', scopes: ['table:read'] }
+      }),
+      'control.api-key.create.result'
+    );
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.api-key.revoke',
+      apiKeyId: created.record.id,
+      revokedAt: '2026-10-01T00:00:00.000Z'
+    });
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.api-key.revoke',
+      apiKeyId: created.record.id,
+      revokedAt: '2026-10-02T00:00:00.000Z'
+    });
+
+    const stored = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.api-key.get', apiKeyId: created.record.id }),
+      'control.api-key.get.result'
+    );
+    expect(stored.record?.revokedAt).toBe('2026-10-01T00:00:00.000Z');
+  });
+
+  it('rejects revoking an unknown API key with a not-found contract error', async () => {
+    const { env } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await expect(doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.api-key.revoke',
+      apiKeyId: 'missing-key',
+      revokedAt: '2026-10-01T00:00:00.000Z'
+    })).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+      status: 404
     });
   });
 });

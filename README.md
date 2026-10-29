@@ -30,7 +30,7 @@ npm run setup
 ```
 
 3. When setup prints a service-account email, share the sheet with it as **Editor**, then return to setup.
-4. Setup deploys and tests the API. Copy the generated API keys into your password manager when shown; they are shown once.
+4. Setup deploys and tests the API, then prints every credential it minted (the bootstrap admin token and the setup API keys) once, in a block headed `SAVE THESE CREDENTIALS NOW`. Copy them into your password manager before closing the terminal: setup never stores them and cannot show them again. Sign in to `/admin/` with the admin API key from that block.
 
 `npm run setup` prompts for your Sheet URL and tab name, deploys the Worker, and bootstraps the first project and API keys. It then prints your API URL and the admin UI at `<your-worker>/admin/`.
 
@@ -74,9 +74,10 @@ These target a live deployment. Most require `SHEETFLARE_BASE_URL` and `SHEETFLA
 **Setup reruns**
 
 ```powershell
-npm run setup -- --apply-secrets  # re-apply Worker secrets
+npm run setup -- --apply-secrets  # re-apply Worker secrets; mints a new bootstrap token (shown once) and re-registers Drive watches
 npm run setup -- --deploy         # redeploy the API Worker
-npm run setup -- --bootstrap      # re-run project and key bootstrap
+npm run setup -- --bootstrap      # re-run project/table bootstrap; existing API keys are left alone
+npm run setup -- --bootstrap --rotate-keys  # replace the setup API keys; new ones are shown once, old ones revoked
 npm run setup -- --smoke          # re-run smoke validation
 npm run setup -- --verify         # re-run post-deploy verification
 npm run doctor                    # alias for --verify; quickest health check
@@ -86,7 +87,7 @@ npm run doctor                    # alias for --verify; quickest health check
 
 ```powershell
 npm run ops:create-admin-key  # create a scoped admin API key
-npm run ops:bootstrap         # bootstrap projects/tables/keys from JSON config
+npm run ops:bootstrap         # bootstrap projects/tables/keys from JSON config (skips key names that are already active; rotation: see docs/operator-runbook.md)
 ```
 
 **Cache and reindex**
@@ -108,15 +109,15 @@ npm run ops:watch:drive:stop          # stop known watches
 
 ## Concepts
 
-**Auth** - Every project is private by default. Admin routes accept the bootstrap bearer token or a scoped admin API key. Data routes accept scoped API keys unless the project is configured as `public-read`. Available scopes: `admin:projects`, `admin:keys`, `table:read`, `table:create`, `table:update`, `table:delete`. Use the bootstrap token as break-glass only - create a scoped admin key after first deploy and use that for routine work. Project-scoped keys with `admin:keys` can create keys only for their own project and only with scopes the creator already holds.
+**Auth** - Every project is private by default. Admin routes accept the bootstrap bearer token or a scoped admin API key. Data routes accept scoped API keys unless the project is configured as `public-read`. Available scopes: `admin:projects`, `admin:keys`, `table:read`, `table:create`, `table:update`, `table:delete`. Use the bootstrap token as break-glass only - create a scoped admin key after first deploy and use that for routine work. Project-scoped keys with `admin:keys` can create keys only for their own project and only with scopes the creator already holds. A missing or invalid credential returns `401`; a valid key without the required scope returns `403` with code `FORBIDDEN`.
 
 **Row identity** - Every table requires a stable ID column (default: `_id`). Row numbers in the sheet are cache metadata, not identity - Sheetflare re-resolves rows by ID before every write, so manually reordering rows in the sheet is safe. All managed IDs must be unique and non-blank; duplicate or missing IDs block syncs.
 
-**Caching** - Reads (`list`, `get`, `schema`) serve from the local cache. Freshness is controlled by `cacheTtlSeconds`. Full syncs are bounded to the declared header width. Config changes that affect cache shape automatically trigger a resync on the next read or write.
+**Caching** - Reads (`list`, `get`, `schema`) serve from the local cache. Freshness is controlled by `cacheTtlSeconds` (an integer from 0 to 3600). Full syncs are bounded to the declared header width. Config changes that affect cache shape automatically trigger a resync on the next read or write.
 
-**Field rules** - Declare `readOnlyFields` to prevent API writes from touching formula-derived or operator-managed columns. Declare `fieldRules` to enforce required fields, unique values, enum constraints, normalization (trim/lowercase), and explicit type coercion (number, boolean, date) on writes. Sheet reads are string-first by default; use `fieldRules.type` when a field needs typed indexed filtering.
+**Field rules** - Declare `readOnlyFields` to prevent API writes from touching formula-derived or operator-managed columns. Declare `fieldRules` to enforce required fields, unique values, enum constraints, normalization (trim/lowercase), and explicit type coercion (number, boolean, date, datetime) on writes. Fields with normalization rules are filtered, sorted, and uniqueness-checked by their normalized value. Date and datetime values must be real calendar values, so `2026-02-30` is rejected. Sheet reads are string-first by default; use `fieldRules.type` when a field needs typed indexed filtering.
 
-**Queries** - Filters are AND-only. Sort is single-field with keyset pagination cursors. Indexed fields (declared in `indexedFields`) use fast cache lookups. The `contains` operator is scan-heavy and is blocked above `TABLE_MAX_FULL_SCAN_ROWS`. Passing a filter or sort on a non-indexed field is rejected rather than silently doing a full scan. The interactive API reference at `/docs` documents all filter operators and query parameters.
+**Queries** - Filters are AND-only. Sort is single-field with keyset pagination cursors. Indexed fields (declared in `indexedFields`) use fast cache lookups. `contains` and `startsWith` are case-sensitive, scan-heavy operators and are blocked above `TABLE_MAX_FULL_SCAN_ROWS`. `rowNumber` filters accept numeric operands only; `startsWith` and `contains` on `rowNumber` return `400`. A pagination cursor is valid only while the table's data is unchanged. If cached rows change between pages, the request returns `400` with `details.reason: "stale-cursor"`, and clients restart pagination without a cursor. Passing a filter or sort on a non-indexed field is rejected rather than silently doing a full scan. The interactive API reference at `/docs` documents all filter operators and query parameters.
 
 **CORS** - The admin UI is served from the Worker's own origin (or the local loopback proxy), so no CORS setup is needed for normal admin use. If you intentionally call the Worker API from another browser origin, set `SHEETFLARE_ALLOWED_ORIGINS` to a comma-separated list of allowed origins.
 

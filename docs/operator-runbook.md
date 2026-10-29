@@ -90,6 +90,8 @@ Project-scoped admin keys with `admin:keys` can create keys only for their own p
 
 Project deletion is destructive for Sheetflare-managed control-plane state only. It clears configured table caches before removing project metadata, revokes API keys scoped to that project, and stops Google Drive watches for spreadsheets no remaining projects use. It does not delete the upstream Google spreadsheet. Delete requests are idempotent, so retrying an already-completed delete returns success.
 
+Requests that create or delete a project, or create or delete one of its tables, run one at a time per project in arrival order. A table request sent while the project is being deleted waits for the delete to finish and cannot put the project back in the registry.
+
 For Google credential setup details, use [google-service-accounts.md](./google-service-accounts.md).
 
 ## Bootstrap A New Spreadsheet-Backed Project
@@ -156,6 +158,8 @@ npm run ops:bootstrap
 ```
 
 For a public anonymous read surface, create a separate project with `defaultAuthMode` set to `"public-read"` rather than widening the private project's auth model.
+
+Projects and tables are upserted, so `npm run ops:bootstrap` is safe to rerun. API keys are not: a key whose `name` already has an active key is skipped (the output lists it under `skippedKeys`), so a rerun never stacks duplicate privileged keys. Names must be unique within `apiKeys`; bootstrap rejects a repeated name before making any API call, because the name is what identifies a managed key for skip and rotate. Give a new key a new name, or rotate as described in [Rotate API keys](#rotate-api-keys).
 
 `readOnlyFields` is the right tool when:
 
@@ -304,6 +308,10 @@ Operational notes:
 - if a watch has expired or `lastWatchError` remains non-null, rerun `npm run ops:watch:drive` and investigate Worker logs
 - if Google returns `Rate limit exceeded for creating file subscriptions.`, stop known watches with `npm run ops:watch:drive:stop`, wait for Google to release stale subscriptions, then retry registration
 - `npm run ops:watch:drive:retry-advice` shows the current helper view of whether a spreadsheet is still cooling down and the earliest conservative retry time
+- Workers Logs are enabled in both Wrangler configs. When a watch or reindex misbehaves, filter for these structured events: `drive.reindex.failed`, `drive.watch.renew.failed`, `drive.watch.stop.failed`, and `drive.notification.rejected`
+- a Google quota rejection is stored in `lastWatchError` as `Google Drive rate limit exceeded for creating file subscriptions.`
+- projects that share one spreadsheet must use the same Google credential ref; creating a project returns 409 when the spreadsheet is registered, or is being created by another project, under a different ref. A create that fails leaves no project behind, and an upsert that fails leaves the project as it was, so either can be repeated. The failed request's claim on the spreadsheet can last up to 5 minutes, and ends at once when you delete that project slug. If the Durable Object restarts after writing a project but before registering it, repeat the create with `?upsert=true` to register it
+- reindex failures back off exponentially per watch: 30 seconds minimum, 1 hour cap; failed watch stops are retried from the control-plane alarm
 - Google Drive watch behavior is documented at:
   - https://developers.google.com/workspace/drive/api/guides/push
   - https://developers.google.com/workspace/drive/api/reference/rest/v3/files/watch
@@ -390,7 +398,7 @@ Symptoms:
 
 Cause:
 
-- the query uses a scan-heavy operator such as `contains` on a large cached table
+- the query uses a scan-heavy operator (`contains` or `startsWith`) on a large cached table
 
 Fix:
 
@@ -412,9 +420,25 @@ Use [google-service-accounts.md](./google-service-accounts.md) if you need the e
 ### Rotate bootstrap admin token
 
 1. Create or confirm a working admin API key first.
-2. Replace `ADMIN_BEARER_TOKEN` in the deployed environment.
+2. Replace `ADMIN_BEARER_TOKEN` in the deployed environment. `npm run setup -- --apply-secrets` does this for you: it mints a new token (printed once in the `SAVE THESE CREDENTIALS NOW` block) unless you export `ADMIN_BEARER_TOKEN`.
 3. Verify bootstrap auth only if you intentionally keep it enabled.
 4. Keep routine operations on the scoped admin API key.
+
+`--apply-secrets` also replaces the Drive webhook secret, which orphans existing Drive watches (the Worker rejects their notifications until they are re-registered). Setup re-registers them itself when it knows the API URL and an admin credential; otherwise it warns, and you run `npm run ops:watch:drive`.
+
+### Rotate API keys
+
+Key names are not unique, and creating a key never revokes another, so bootstrap guards reruns: a configured key whose name already has an active key is skipped, and its secret cannot be shown again. To replace keys deliberately (for example after losing one), rotate:
+
+```powershell
+npm run setup -- --bootstrap --rotate-keys   # through setup; new keys are printed once
+
+$env:SHEETFLARE_BOOTSTRAP_ROTATE_KEYS = "true"
+$env:SHEETFLARE_SHOW_SECRETS = "true"        # required: the old keys are revoked, so the new ones must not be redacted
+npm run ops:bootstrap                        # directly; refuses to rotate without SHEETFLARE_SHOW_SECRETS
+```
+
+Rotation first creates every replacement key, then revokes all active keys that share a configured name, using `DELETE /v1/admin/keys/{id}`. Anything still using an old key fails with `401` afterward, so update stored copies. To revoke a single key without replacing it, call that route with an admin credential.
 
 ## Production Smoke Check
 
@@ -431,7 +455,7 @@ The smoke script verifies:
 - private-table anonymous rejection
 - private-table keyed reads
 - cache status `staleReason`
-- create/get/update/delete on a smoke row
+- create, get, update, delete on a smoke row; after the update the row is read back (and again after the reindex) and every configured update value must have persisted, so a PATCH that returns `200` without changing the row fails the smoke
 - admin reindex
 
 When `SHEETFLARE_PUBLIC_PROJECT` and `SHEETFLARE_PUBLIC_TABLE` are set, it also verifies:

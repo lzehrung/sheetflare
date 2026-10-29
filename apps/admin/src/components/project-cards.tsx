@@ -4,9 +4,10 @@ type ProjectCardsProps = {
   projects: ProjectSummary[];
   selectedProjectSlug: string | null;
   onSelect: (projectSlug: string) => void;
+  disabled: boolean;
 };
 
-export function ProjectCards({ projects, selectedProjectSlug, onSelect }: ProjectCardsProps) {
+export function ProjectCards({ projects, selectedProjectSlug, onSelect, disabled }: ProjectCardsProps) {
   return (
     <div className="projectList">
       {projects.map((project) => (
@@ -17,6 +18,7 @@ export function ProjectCards({ projects, selectedProjectSlug, onSelect }: Projec
           data-testid={`project-card-${project.slug}`}
           onClick={() => onSelect(project.slug)}
           aria-pressed={selectedProjectSlug === project.slug}
+          disabled={disabled}
         >
           <div className="projectListTop">
             <div>

@@ -2,7 +2,7 @@ import type { ApiKeyPrincipal } from '@sheetflare/contracts';
 
 type ApiKeySectionsProps = {
   keys: ApiKeyPrincipal[];
-  onRevoke: (apiKeyId: string) => void;
+  onRevoke: (apiKey: ApiKeyPrincipal) => void;
   busy: boolean;
   emptyMessage: string;
   title?: string;
@@ -14,7 +14,7 @@ function formatTimestamp(value: string | null) {
 
 type ApiKeyCardProps = {
   apiKey: ApiKeyPrincipal;
-  onRevoke: (apiKeyId: string) => void;
+  onRevoke: (apiKey: ApiKeyPrincipal) => void;
   busy: boolean;
 };
 
@@ -48,7 +48,7 @@ function ApiKeyCard({ apiKey, onRevoke, busy }: ApiKeyCardProps) {
         <button
           type="button"
           className="secondaryButton"
-          onClick={() => onRevoke(apiKey.id)}
+          onClick={() => onRevoke(apiKey)}
           disabled={busy || revoked}
         >
           {revoked ? 'Revoked' : 'Revoke'}

@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { listDriveWatchRetryAdvice, listDriveWatches, registerDriveWatches } from './setup-drive-watches';
+import {
+  listDriveWatchRetryAdvice,
+  listDriveWatches,
+  planDriveWatchRegistration,
+  registerDriveWatches
+} from './setup-drive-watches';
 
 describe('registerDriveWatches', () => {
   afterEach(() => {
@@ -187,5 +192,84 @@ describe('registerDriveWatches', () => {
         })
       })
     );
+  });
+});
+
+describe('planDriveWatchRegistration', () => {
+  const noActions = { applySecretsNow: false, deployNow: false, bootstrapNow: false };
+  const known = { apiUrl: 'https://example.workers.dev', adminCredential: 'sfk_admin.secret' };
+
+  it('re-registers watches after --apply-secrets rotates the webhook secret and the API is reachable', () => {
+    expect(planDriveWatchRegistration({
+      actions: { ...noActions, applySecretsNow: true },
+      ...known
+    })).toEqual({ kind: 'register' });
+  });
+
+  it('warns with the exact recovery command when the API URL is unknown after rotating secrets', () => {
+    const plan = planDriveWatchRegistration({
+      actions: { ...noActions, applySecretsNow: true },
+      apiUrl: null,
+      adminCredential: 'sfk_admin.secret'
+    });
+
+    expect(plan.kind).toBe('warn');
+    if (plan.kind === 'warn') {
+      expect(plan.message).toContain('Drive webhook secret');
+      expect(plan.message).toContain('SHEETFLARE_BASE_URL');
+      expect(plan.message).not.toContain('SHEETFLARE_ADMIN_CREDENTIAL');
+      expect(plan.message).toContain('npm run ops:watch:drive');
+    }
+  });
+
+  it('names the admin credential when only that is unknown', () => {
+    const plan = planDriveWatchRegistration({
+      actions: { ...noActions, applySecretsNow: true },
+      apiUrl: known.apiUrl,
+      adminCredential: null
+    });
+
+    expect(plan.kind).toBe('warn');
+    if (plan.kind === 'warn') {
+      expect(plan.message).toContain('SHEETFLARE_ADMIN_CREDENTIAL');
+      expect(plan.message).not.toContain('SHEETFLARE_BASE_URL');
+      expect(plan.message).toContain('npm run ops:watch:drive');
+    }
+  });
+
+  it('registers after deploy or bootstrap as before, and stays silent when nothing is known yet', () => {
+    expect(planDriveWatchRegistration({ actions: { ...noActions, deployNow: true }, ...known })).toEqual({ kind: 'register' });
+    expect(planDriveWatchRegistration({ actions: { ...noActions, bootstrapNow: true }, ...known })).toEqual({ kind: 'register' });
+    expect(planDriveWatchRegistration({
+      actions: { ...noActions, deployNow: true },
+      apiUrl: null,
+      adminCredential: null
+    })).toEqual({ kind: 'skip' });
+  });
+
+  it('does nothing for runs that neither apply secrets nor deploy nor bootstrap', () => {
+    expect(planDriveWatchRegistration({ actions: noActions, ...known })).toEqual({ kind: 'skip' });
+  });
+
+  it('stays quiet when bootstrap has no API URL and secrets were not applied', () => {
+    expect(planDriveWatchRegistration({
+      actions: { ...noActions, bootstrapNow: true },
+      apiUrl: null,
+      adminCredential: 'sfk_admin.secret'
+    })).toEqual({ kind: 'skip' });
+  });
+
+  it('warns with the recovery command when secrets were applied with bootstrap but the API URL is unknown', () => {
+    const plan = planDriveWatchRegistration({
+      actions: { applySecretsNow: true, deployNow: false, bootstrapNow: true },
+      apiUrl: null,
+      adminCredential: 'sfk_admin.secret'
+    });
+
+    expect(plan.kind).toBe('warn');
+    if (plan.kind === 'warn') {
+      expect(plan.message).toContain('SHEETFLARE_BASE_URL');
+      expect(plan.message).toContain('npm run ops:watch:drive');
+    }
   });
 });

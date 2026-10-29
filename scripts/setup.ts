@@ -1,12 +1,19 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setupConfigUsesDefaultGoogleCredential } from './lib/setup-config';
-import { actionsRequireWranglerAuth, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
+import { actionsRequireWranglerAuth, assertRotateKeysApplicable, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
 import { confirmSheetShared, createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, recordPrereqResult, type SetupPrereqResult } from './lib/setup-prereqs';
-import { createBootstrapCommandOptions, createBootstrapEnv, findCreatedKey, parseBootstrapOutput, redactBootstrapResultMarker } from './lib/setup-bootstrap';
+import {
+  createBootstrapCommandOptions,
+  createBootstrapEnv,
+  findCreatedKeyIfPresent,
+  readBootstrapCommandResult,
+  redactBootstrapResultMarker,
+  type SetupBootstrapOutput
+} from './lib/setup-bootstrap';
 import { deployApiWorker, getApiWranglerConfigPath } from './lib/setup-deploy';
-import { listDriveWatches, registerDriveWatches } from './lib/setup-drive-watches';
+import { listDriveWatches, planDriveWatchRegistration, registerDriveWatches } from './lib/setup-drive-watches';
 import {
   applyApiSecrets,
   collectSetupSecrets,
@@ -23,12 +30,12 @@ import {
   writeSetupLocalState
 } from './lib/setup-state';
 import {
+  replaceSupersededAdminCredential,
   resolvePreferredAdminCredential,
   resolveSetupRuntimeState,
-  mergeSetupRuntimeState,
-  summarizeSetupSecrets,
-  type SetupSecretsSummary
+  mergeSetupRuntimeState
 } from './lib/setup-runtime';
+import { collectMintedCredentials, formatCredentialHandoff } from './lib/setup-credentials';
 import { getSetupDoctorFailureMessage, runSetupDoctor } from './lib/setup-doctor';
 import { checkGcloudAuthPrereq, isPlaceholderGoogleClientEmail } from './lib/setup-google';
 import { formatBeginnerSetupNextSteps, formatSheetShareInstruction } from './lib/setup-next-steps';
@@ -38,7 +45,8 @@ import { ScriptError, getEnv, logSetupStep as logStep, logSetupSuccess as logSuc
 type SetupExecutionSummary = {
   configPath: string;
   apiUrl: string | null;
-} & SetupSecretsSummary;
+  localStatePath: string | null;
+};
 
 async function readConfigFile(path: string) {
   const text = await readFile(path, 'utf8');
@@ -138,12 +146,12 @@ async function runBootstrap(env: NodeJS.ProcessEnv) {
     if (result.stderr.trim().length > 0) {
       process.stderr.write(result.stderr);
     }
-    throw new ScriptError(
-      'Bootstrap failed. Confirm the spreadsheet is shared with the Google service-account email as Editor, the configured tab exists, the _id header exists, and existing _id values are unique and non-blank.'
-    );
   }
 
-  return parseBootstrapOutput(result.stdout);
+  return readBootstrapCommandResult({
+    code: result.code,
+    stdout: result.stdout
+  });
 }
 
 async function runSmoke(env: NodeJS.ProcessEnv) {
@@ -221,7 +229,28 @@ async function registerDriveWatchesIfPossible(options: {
   }
 }
 
+async function recoverDriveWatches(options: {
+  actions: { applySecretsNow: boolean; deployNow: boolean; bootstrapNow: boolean };
+  apiUrl: string | null;
+  adminCredential: string | null;
+}) {
+  try {
+    const plan = planDriveWatchRegistration(options);
+    if (plan.kind === 'warn') {
+      console.warn(`Warning: ${plan.message}`);
+    }
 
+    await registerDriveWatchesIfPossible({
+      apiUrl: options.apiUrl,
+      adminCredential: options.adminCredential,
+      shouldRegister: plan.kind === 'register'
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Warning: Failed to register Google Drive spreadsheet watches automatically: ${message}`);
+    console.warn('Setup will continue. To retry watch registration later, run: npm run ops:watch:drive');
+  }
+}
 
 async function main() {
   const options = parseSetupArgs(process.argv.slice(2));
@@ -258,6 +287,18 @@ async function main() {
   let configInput: unknown;
   let promptActions: SetupPromptActions | null = null;
   let beginnerSetupStarted = false;
+  let generatedAdminBearerToken: string | null = null;
+  let bootstrapOutput: SetupBootstrapOutput | null = null;
+  let apiUrl: string | null = null;
+  let adminBearerToken: string | null = null;
+  let adminApiKey: string | null = null;
+  let webhookSecretApplied = false;
+  let driveWatchRecoveryHandled = false;
+  let driveWatchActions: {
+    applySecretsNow: boolean;
+    deployNow: boolean;
+    bootstrapNow: boolean;
+  } | null = null;
 
   try {
     try {
@@ -311,6 +352,12 @@ async function main() {
     logSuccess(`Setup choices look valid for project ${config.privateProject.slug} with ${tableCount} table${tableCount === 1 ? '' : 's'}.`);
 
     const actions = resolveSetupActions(options, promptActions);
+    driveWatchActions = {
+      applySecretsNow: actions.applySecretsNow,
+      deployNow: actions.deployNow,
+      bootstrapNow: actions.bootstrapNow
+    };
+    assertRotateKeysApplicable(options, actions);
 
     if (!actions.applySecretsNow && !actions.deployNow && !actions.bootstrapNow && !actions.smokeNow && !actions.verifyNow) {
       return;
@@ -329,9 +376,9 @@ async function main() {
     }
 
     const resolvedRuntimeState = resolveSetupRuntimeState(localState);
-    let apiUrl: string | null = resolvedRuntimeState.apiUrl;
-    let adminBearerToken: string | null = resolvedRuntimeState.adminBearerToken;
-    let adminApiKey: string | null = resolvedRuntimeState.adminApiKey;
+    apiUrl = resolvedRuntimeState.apiUrl;
+    adminBearerToken = resolvedRuntimeState.adminBearerToken;
+    adminApiKey = resolvedRuntimeState.adminApiKey;
     let privateReadKey: string | null = resolvedRuntimeState.privateReadKey;
     let mutationKey: string | null = resolvedRuntimeState.mutationKey;
 
@@ -350,7 +397,6 @@ async function main() {
           debug: options.debug
         }
       });
-      adminBearerToken = setupSecrets.adminBearerToken;
 
       logStep('Saving API secrets to Cloudflare');
       await applyApiSecrets({
@@ -358,9 +404,23 @@ async function main() {
         debug: options.debug,
         googlePrivateKey: setupSecrets.googlePrivateKey,
         driveWebhookSecret: setupSecrets.driveWebhookSecret,
-        adminBearerToken: setupSecrets.adminBearerToken
+        adminBearerToken: setupSecrets.adminBearerToken,
+        onApplied: (secretName) => {
+          if (secretName === 'GOOGLE_DRIVE_WEBHOOK_SECRET') {
+            webhookSecretApplied = true;
+          }
+        }
       });
+      // Adopt the new admin credential only once ADMIN_BEARER_TOKEN has landed. If that put fails, the
+      // Worker still accepts the previous credential, which the finally block uses for watch re-registration.
+      const adoptedCredentials = replaceSupersededAdminCredential(
+        { adminApiKey, adminBearerToken },
+        setupSecrets.adminBearerToken
+      );
+      adminBearerToken = adoptedCredentials.adminBearerToken;
+      adminApiKey = adoptedCredentials.adminApiKey;
       logSuccess('API secrets saved');
+      generatedAdminBearerToken = setupSecrets.adminBearerTokenGenerated ? setupSecrets.adminBearerToken : null;
 
       localState = await persistLocalState(resolvedConfigPath, localState, {
         ...createSetupLocalState({
@@ -433,11 +493,25 @@ async function main() {
       }
 
       logStep('Creating projects and API keys');
-      const bootstrapOutput = await runBootstrap(createBootstrapEnv(config, apiUrl, adminBearerToken));
-      if (config.smoke.enabled) {
-        adminApiKey = findCreatedKey(bootstrapOutput, config.smoke.adminKeyName);
-        privateReadKey = findCreatedKey(bootstrapOutput, config.smoke.privateReadKeyName);
-        mutationKey = findCreatedKey(bootstrapOutput, config.smoke.mutationKeyName);
+      const bootstrapOutcome = await runBootstrap(createBootstrapEnv(config, apiUrl, adminBearerToken, { rotateKeys: options.rotateKeys }));
+      if (bootstrapOutcome.output) {
+        bootstrapOutput = bootstrapOutcome.output;
+        if (config.smoke.enabled) {
+          adminApiKey = findCreatedKeyIfPresent(bootstrapOutput, config.smoke.adminKeyName) ?? adminApiKey;
+          privateReadKey = findCreatedKeyIfPresent(bootstrapOutput, config.smoke.privateReadKeyName) ?? privateReadKey;
+          mutationKey = findCreatedKeyIfPresent(bootstrapOutput, config.smoke.mutationKeyName) ?? mutationKey;
+        }
+        if (bootstrapOutput.skippedKeys.length > 0) {
+          console.warn(
+            `Warning: Left existing API keys in place: ${bootstrapOutput.skippedKeys.map((key) => key.name).join(', ')}. Their secrets cannot be shown again. Supply them through SHEETFLARE_ADMIN_CREDENTIAL, SHEETFLARE_PRIVATE_READ_KEY, and SHEETFLARE_MUTATION_KEY, or replace them with: npm run setup -- --bootstrap --rotate-keys`
+          );
+        }
+        if (bootstrapOutput.revokedKeys.length > 0) {
+          logSuccess(`Revoked ${bootstrapOutput.revokedKeys.length} replaced API key${bootstrapOutput.revokedKeys.length === 1 ? '' : 's'}`);
+        }
+      }
+      if (!bootstrapOutcome.ok) {
+        throw new ScriptError(bootstrapOutcome.failureMessage);
       }
       logSuccess('Projects and API keys are ready');
 
@@ -449,15 +523,15 @@ async function main() {
       localStateWritten = true;
     }
 
-    const setupAdminCredential = resolvePreferredAdminCredential({
-      adminApiKey,
-      adminBearerToken
-    });
-    await registerDriveWatchesIfPossible({
+    await recoverDriveWatches({
+      actions,
       apiUrl,
-      adminCredential: setupAdminCredential,
-      shouldRegister: actions.deployNow || actions.bootstrapNow
+      adminCredential: resolvePreferredAdminCredential({
+        adminApiKey,
+        adminBearerToken
+      })
     });
+    driveWatchRecoveryHandled = true;
 
     if (actions.smokeNow) {
       if (!config.smoke.enabled) {
@@ -512,14 +586,7 @@ async function main() {
     printExecutionSummary({
       configPath: resolvedConfigPath,
       apiUrl,
-      ...summarizeSetupSecrets({
-        showSecrets: options.showSecrets,
-        localStatePath: localStateWritten ? localStatePath : null,
-        adminBearerToken,
-        adminApiKey,
-        privateReadKey,
-        mutationKey
-      })
+      localStatePath: localStateWritten ? localStatePath : null
     });
 
     if (actions.verifyNow) {
@@ -561,11 +628,26 @@ async function main() {
       }
     }
   } finally {
+    // wrangler secret put deploys the webhook secret immediately. A later failure must still
+    // re-register once; the happy path above sets driveWatchRecoveryHandled so this does not repeat.
+    if (webhookSecretApplied && !driveWatchRecoveryHandled && driveWatchActions) {
+      await recoverDriveWatches({
+        actions: driveWatchActions,
+        apiUrl,
+        adminCredential: resolvePreferredAdminCredential({
+          adminApiKey,
+          adminBearerToken
+        })
+      });
+    }
     prompter?.close?.();
+    for (const line of formatCredentialHandoff(collectMintedCredentials({ generatedAdminBearerToken, bootstrapOutput }))) {
+      console.log(line);
+    }
   }
 }
 
-void main().catch((error: unknown) => {
+export const setupRun = main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 });

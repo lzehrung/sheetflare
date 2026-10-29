@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   mergeSetupRuntimeState,
+  replaceSupersededAdminCredential,
   resolvePreferredAdminCredential,
-  resolveSetupRuntimeState,
-  summarizeSetupSecrets
+  resolveSetupRuntimeState
 } from './setup-runtime';
 
 afterEach(() => {
@@ -90,47 +90,27 @@ describe('mergeSetupRuntimeState', () => {
   });
 });
 
-describe('summarizeSetupSecrets', () => {
-  it('omits every credential when secret display is disabled', () => {
-    expect(summarizeSetupSecrets({
-      showSecrets: false,
-      localStatePath: 'E:/repo/.sheetflare.setup.local.json',
-      adminBearerToken: 'bearer.secret',
-      adminApiKey: 'sfk_admin.secret',
-      privateReadKey: 'sfk_read.secret',
-      mutationKey: 'sfk_mutation.secret'
-    })).toEqual({
-      localStatePath: 'E:/repo/.sheetflare.setup.local.json'
+describe('replaceSupersededAdminCredential', () => {
+  const apiKey = 'sfk_11111111-1111-4111-8111-111111111111.' + 'ab'.repeat(32);
+  const appliedToken = 'new-bootstrap-token';
+
+  it('never replaces a scoped API key when it is also the runtime bootstrap bearer', () => {
+    expect(replaceSupersededAdminCredential({
+      adminApiKey: apiKey,
+      adminBearerToken: apiKey
+    }, appliedToken)).toEqual({
+      adminApiKey: apiKey,
+      adminBearerToken: appliedToken
     });
   });
 
-  it('shows full values only when explicitly requested', () => {
-    expect(summarizeSetupSecrets({
-      showSecrets: true,
-      localStatePath: 'E:/repo/.sheetflare.setup.local.json',
-      adminBearerToken: 'bearer.secret',
-      adminApiKey: 'sfk_admin.secret',
-      privateReadKey: 'sfk_read.secret',
-      mutationKey: 'sfk_mutation.secret'
-    })).toEqual({
-      adminBearerToken: 'bearer.secret',
-      adminApiKey: 'sfk_admin.secret',
-      privateReadKey: 'sfk_read.secret',
-      mutationKey: 'sfk_mutation.secret',
-      localStatePath: 'E:/repo/.sheetflare.setup.local.json'
-    });
-  });
-
-  it('reports no local state path when the current run did not persist local state', () => {
-    expect(summarizeSetupSecrets({
-      showSecrets: false,
-      localStatePath: null,
-      adminBearerToken: 'bearer.secret',
-      adminApiKey: 'sfk_admin.secret',
-      privateReadKey: 'sfk_read.secret',
-      mutationKey: 'sfk_mutation.secret'
-    })).toEqual({
-      localStatePath: null
+  it('replaces adminApiKey when it holds the superseded bootstrap token', () => {
+    expect(replaceSupersededAdminCredential({
+      adminApiKey: 'old-bootstrap-token',
+      adminBearerToken: 'old-bootstrap-token'
+    }, appliedToken)).toEqual({
+      adminApiKey: appliedToken,
+      adminBearerToken: appliedToken
     });
   });
 });

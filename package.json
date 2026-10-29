@@ -22,10 +22,10 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run -ws build",
+    "build": "npm run --workspaces build",
     "lint": "eslint .",
-    "typecheck": "npm run -ws typecheck && tsc -p tsconfig.scripts.json --noEmit",
-    "test": "npm run -ws test && vitest run --config vitest.config.ts",
+    "typecheck": "npm run --workspaces typecheck && tsc -p tsconfig.scripts.json --noEmit",
+    "test": "npm run --workspaces test && vitest run --config vitest.config.ts",
     "check": "npm run lint && npm run typecheck && npm run test && npm run build",
     "dev:api": "npm --workspace @sheetflare/api run dev",
     "dev:admin": "npm --workspace @sheetflare/admin run dev",

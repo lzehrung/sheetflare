@@ -1,6 +1,39 @@
+import { z } from 'zod';
+import { fieldRulesSchema, type FieldRules } from '@sheetflare/contracts';
 import { getEnv, assert, assertPresent, logStep, logSuccess, requestJson, ScriptError } from './lib/runtime';
 import { readSmokeConfig } from './lib/smoke-config';
+import { assertReadinessChecksOk, assertUpdatedValuesPersisted, type ReadinessChecks } from './lib/smoke-assertions';
 import { summarizeJson, writeReportArtifacts } from './lib/reporting';
+
+const privateTableFieldRulesSchema = z.object({
+  data: z.array(z.object({
+    tableSlug: z.string(),
+    fieldRules: fieldRulesSchema.optional()
+  }))
+});
+
+async function loadPrivateTableFieldRules(options: {
+  baseUrl: string;
+  adminCredential: string;
+  privateProject: string;
+  privateTable: string;
+}): Promise<FieldRules> {
+  const response = await requestJson<unknown>({
+    baseUrl: options.baseUrl,
+    path: `/v1/admin/projects/${encodeURIComponent(options.privateProject)}/tables`,
+    bearer: options.adminCredential,
+    expectedStatus: 200
+  });
+  const parsed = privateTableFieldRulesSchema.safeParse(response.data);
+  if (!parsed.success) {
+    throw new ScriptError(`Could not read field rules for ${options.privateProject}/${options.privateTable}.`);
+  }
+  const table = parsed.data.data.find((entry) => entry.tableSlug === options.privateTable);
+  if (!table) {
+    throw new ScriptError(`Smoke table ${options.privateTable} was not found when reading field rules.`);
+  }
+  return table.fieldRules ?? {};
+}
 
 type RowEnvelope = {
   id: string;
@@ -137,6 +170,7 @@ async function main() {
   const smokeId = `smoke-${Date.now()}`;
   const hasPublicReadCoverage = Boolean(publicProject && publicTable);
   let createdRowId: string | null = null;
+  let smokeFieldRules: FieldRules = {};
 
   async function runStep<T>(options: {
     name: string;
@@ -203,21 +237,21 @@ async function main() {
         path: '/ready',
         auth: 'anonymous'
       },
-      summary: (value) => `Readiness reported controlPlane=${value.checks.controlPlane} rateLimit=${value.checks.rateLimit}.`,
+      summary: (value) => value.checks
+        ? `Readiness reported controlPlane=${value.checks.controlPlane} rateLimit=${value.checks.rateLimit}.`
+        : 'Readiness is ok; the response omitted detailed checks.',
       run: async () => {
         const readiness = await requestJson<{
-          checks: {
-            controlPlane: string;
-            rateLimit: string;
-          };
+          ok: boolean;
+          checks?: ReadinessChecks;
         }>({
           baseUrl,
           path: '/ready',
+          bearer: adminCredential,
           expectedStatus: 200
         });
         const body = assertPresent(readiness.data, 'Readiness check returned an empty response body.');
-        assert(body.checks.controlPlane === 'ok', 'Readiness check reported control-plane failure.');
-        assert(body.checks.rateLimit === 'ok', 'Readiness check reported rate-limit failure.');
+        assertReadinessChecksOk(body.checks);
         return {
           responseStatus: readiness.response.status,
           responseBody: body,
@@ -460,6 +494,38 @@ async function main() {
       }
     });
 
+    smokeFieldRules = await loadPrivateTableFieldRules({
+      baseUrl,
+      adminCredential,
+      privateProject,
+      privateTable
+    });
+
+    await runStep({
+      name: 'Read the updated smoke row back',
+      request: {
+        method: 'GET',
+        path: `/v1/projects/${encodeURIComponent(privateProject)}/tables/${encodeURIComponent(privateTable)}/rows/${encodeURIComponent(smokeId)}`,
+        auth: 'private-read'
+      },
+      summary: () => 'Every configured update value persisted.',
+      run: async () => {
+        const response = await requestJson<GetRowResponse>({
+          baseUrl,
+          path: `/v1/projects/${encodeURIComponent(privateProject)}/tables/${encodeURIComponent(privateTable)}/rows/${encodeURIComponent(smokeId)}`,
+          bearer: privateReadKey,
+          expectedStatus: 200
+        });
+        const body = assertPresent(response.data, 'Get row returned an empty response body.');
+        assertUpdatedValuesPersisted(body.data.values, updateValues, 'after the update', smokeFieldRules);
+        return {
+          responseStatus: response.response.status,
+          responseBody: body,
+          value: body
+        };
+      }
+    });
+
     await runStep({
       name: 'Force a reindex',
       request: {
@@ -478,6 +544,31 @@ async function main() {
         });
         const body = assertPresent(response.data, 'Reindex returned an empty response body.');
         assert(body.ok === true, 'Reindex did not succeed.');
+        return {
+          responseStatus: response.response.status,
+          responseBody: body,
+          value: body
+        };
+      }
+    });
+
+    await runStep({
+      name: 'Read the smoke row back after reindex',
+      request: {
+        method: 'GET',
+        path: `/v1/projects/${encodeURIComponent(privateProject)}/tables/${encodeURIComponent(privateTable)}/rows/${encodeURIComponent(smokeId)}`,
+        auth: 'private-read'
+      },
+      summary: () => 'Updated values survived the reindex from the sheet.',
+      run: async () => {
+        const response = await requestJson<GetRowResponse>({
+          baseUrl,
+          path: `/v1/projects/${encodeURIComponent(privateProject)}/tables/${encodeURIComponent(privateTable)}/rows/${encodeURIComponent(smokeId)}`,
+          bearer: privateReadKey,
+          expectedStatus: 200
+        });
+        const body = assertPresent(response.data, 'Get row returned an empty response body.');
+        assertUpdatedValuesPersisted(body.data.values, updateValues, 'after the reindex', smokeFieldRules);
         return {
           responseStatus: response.response.status,
           responseBody: body,

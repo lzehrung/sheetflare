@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyFieldRuleNormalization, coerceRowFilter, normalizeFieldRules, validateFieldRules } from '../src';
+import { applyFieldRuleNormalization, canonicalizeFieldValue, coerceRowFilter, normalizeFieldRules, validateFieldRules } from '../src';
 
 describe('normalizeFieldRules', () => {
   it('trims field names and removes duplicate enum and normalize entries', () => {
@@ -30,6 +30,15 @@ describe('applyFieldRuleNormalization', () => {
       email: 'alice@example.com',
       active: true
     });
+  });
+});
+
+describe('canonicalizeFieldValue', () => {
+  it('applies the write-time normalization before type coercion', () => {
+    expect(canonicalizeFieldValue('  Alice@Example.com ', { normalize: ['trim', 'lowercase'] })).toBe('alice@example.com');
+    expect(canonicalizeFieldValue(' 10 ', { type: 'number', normalize: ['trim'] })).toBe(10);
+    expect(canonicalizeFieldValue('Ada', undefined)).toBe('Ada');
+    expect(canonicalizeFieldValue(null, { normalize: ['trim'] })).toBeNull();
   });
 });
 
@@ -107,10 +116,39 @@ describe('validateFieldRules', () => {
       }
     ]);
   });
+
+  it('rejects impossible calendar dates and datetime components', () => {
+    const rules = {
+      dueDate: { type: 'date' as const },
+      updatedAt: { type: 'datetime' as const }
+    };
+
+    for (const dueDate of ['2026-02-30', '2026-02-29', '2026-04-31', '2026-13-01', '2026-00-10', '2026-01-00']) {
+      expect(validateFieldRules({ dueDate }, rules)).toEqual([
+        { field: 'dueDate', code: 'TYPE', message: 'dueDate must be a date.' }
+      ]);
+    }
+
+    for (const updatedAt of ['2026-02-30T00:00:00.000Z', '2026-04-26T24:00:00Z', '2026-04-26T10:60:00Z', '2026-04-26T10:00:61Z', '2026-04-26T10:00:00+25:00', '2026-04-26Tnoon']) {
+      expect(validateFieldRules({ updatedAt }, rules)).toEqual([
+        { field: 'updatedAt', code: 'TYPE', message: 'updatedAt must be a datetime.' }
+      ]);
+    }
+
+    expect(validateFieldRules({
+      dueDate: '2024-02-29',
+      updatedAt: '2024-02-29T23:59:59.999Z'
+    }, rules)).toEqual([]);
+    expect(validateFieldRules({
+      dueDate: '2026-12-31',
+      updatedAt: '2026-04-26T10:00:00+05:30'
+    }, rules)).toEqual([]);
+    expect(validateFieldRules({ updatedAt: '2026-04-26T10:00' }, rules)).toEqual([]);
+  });
 });
 
 describe('coerceRowFilter', () => {
-  it('coerces typed scalar filter values while leaving id and rowNumber untouched', () => {
+  it('coerces typed scalar filter values, canonicalizes rowNumber operands, and leaves id untouched', () => {
     expect(coerceRowFilter({
       score: {
         eq: '10',
@@ -141,11 +179,48 @@ describe('coerceRowFilter', () => {
         eq: true
       },
       rowNumber: {
-        gt: '10'
+        gt: 10
       },
       id: {
         eq: 'row-10'
       }
+    });
+  });
+
+  it('canonicalizes numeric rowNumber operands and rejects operands that cannot match a row number', () => {
+    expect(coerceRowFilter({
+      rowNumber: { in: ['2', 3, null] }
+    }, {})).toEqual({
+      rowNumber: { in: [2, 3, null] }
+    });
+    expect(coerceRowFilter({
+      rowNumber: { gte: '2', lt: 5 }
+    }, {})).toEqual({
+      rowNumber: { gte: 2, lt: 5 }
+    });
+
+    for (const definition of [{ eq: 'two' }, { eq: '02' }, { eq: true }, { neq: '' }, { in: [2, 'x'] }, { gt: 'abc' }]) {
+      expect(() => coerceRowFilter({ rowNumber: definition }, {})).toThrow('rowNumber filters require numeric values.');
+    }
+
+    for (const definition of [{ contains: '2' }, { startsWith: '1' }]) {
+      expect(() => coerceRowFilter({ rowNumber: definition }, {})).toThrow('rowNumber filters do not support startsWith or contains.');
+    }
+  });
+
+  it('normalizes operands for normalized fields, folding only case for pattern operators', () => {
+    expect(coerceRowFilter({
+      email: { eq: ' ALICE@example.com ' },
+      name: { startsWith: ' Al' },
+      tag: { in: [' X ', null] }
+    }, {
+      email: { normalize: ['trim', 'lowercase'] },
+      name: { normalize: ['trim', 'lowercase'] },
+      tag: { normalize: ['trim'] }
+    })).toEqual({
+      email: { eq: 'alice@example.com' },
+      name: { startsWith: ' al' },
+      tag: { in: ['X', null] }
     });
   });
 });

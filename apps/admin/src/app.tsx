@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type {
+  AdminGetProjectResult,
   AdminInspectSpreadsheetTabResult,
   ApiKeyPrincipal,
   ProjectConfig,
@@ -21,6 +22,7 @@ import {
   type CreateTableDraft
 } from './admin-drafts';
 import {
+  classifyAuthFailure,
   createApiKey,
   createProject,
   createTable,
@@ -36,18 +38,23 @@ import {
   listSpreadsheetTabs,
   refreshTableCache,
   revokeApiKey,
-  reindexTable
+  reindexTable,
+  type AdminAuthFailure
 } from './api';
 import {
   adminCredentialStorageKey,
   normalizeAdminCredential,
   type AdminAccess
 } from './auth';
+import { forEachWithConcurrency } from './concurrency';
+import { useRequestGeneration } from './request-generation';
 import { ApiKeyPanel } from './components/api-key-panel';
 import { CredentialPanel } from './components/credential-panel';
 import { CreateProjectForm } from './components/create-project-form';
 import { NoticeBanner } from './components/notice-banner';
 import { ProjectCards } from './components/project-cards';
+import { ProjectScopeEntry, type ProjectScopeEntryState } from './components/project-scope-entry';
+import { RefreshWarning } from './components/refresh-warning';
 import { SelectedProjectPanel } from './components/selected-project-panel';
 import './styles.css';
 
@@ -55,7 +62,8 @@ type LoadState =
   | { status: 'idle'; message: string }
   | { status: 'loading' }
   | { status: 'ready'; data: ProjectSummary[] }
-  | { status: 'error'; message: string; unauthorized: boolean };
+  | { status: 'scope-limited'; message: string }
+  | { status: 'error'; message: string; authFailure: AdminAuthFailure | null };
 
 type ProjectDetailState =
   | { status: 'idle'; message: string }
@@ -73,7 +81,15 @@ type GlobalKeysState =
   | { status: 'idle'; message: string }
   | { status: 'loading' }
   | { status: 'ready'; data: ApiKeyPrincipal[] }
-  | { status: 'error'; message: string; unauthorized: boolean };
+  | { status: 'error'; message: string; authFailure: AdminAuthFailure | null };
+
+// 'unknown' until the registry probe settles; 'project' means the key is valid but not global.
+type AdminScope = 'unknown' | 'global' | 'project';
+
+type RefreshWarningState = {
+  message: string;
+  retry: () => Promise<void>;
+};
 
 type NoticeState =
   | { tone: 'idle'; message: string | null }
@@ -101,6 +117,57 @@ type SpreadsheetWatchState =
   | { status: 'loading' }
   | { status: 'ready'; watch: SpreadsheetWatch | null }
   | { status: 'error'; message: string };
+
+const cacheStatusConcurrency = 4;
+
+const projectKeyPromptMessage =
+  'This credential is valid but is not a global admin key, so it cannot list every project. Enter the slug of the project it is scoped to. The project registry, global keys, and spreadsheet watches are skipped for project-scoped keys.';
+const projectScopedGlobalKeysMessage =
+  'Global keys are only available to a global admin key. This project-scoped key manages keys for its own project.';
+const projectScopedWatchMessage = 'Spreadsheet watch status requires a global admin key.';
+
+function describeError(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'Unknown error';
+  const authFailure = classifyAuthFailure(error);
+  if (authFailure === 'invalid-credential') {
+    return `${message} The Worker rejected this credential; check it or enter another.`;
+  }
+
+  if (authFailure === 'insufficient-scope') {
+    return `${message} This credential is valid but lacks the scope or project access for this action.`;
+  }
+
+  return message;
+}
+
+function summarizeProject(detail: AdminGetProjectResult): ProjectSummary {
+  return {
+    slug: detail.project.slug,
+    name: detail.project.name,
+    spreadsheetId: detail.project.spreadsheetId,
+    googleCredentialRef: detail.project.googleCredentialRef,
+    tableCount: detail.tables.length,
+    updatedAt: detail.project.updatedAt
+  };
+}
+
+async function fetchRegistry(
+  access: AdminAccess,
+  projectScopeSlug: string | null,
+  signal?: AbortSignal
+): Promise<ProjectSummary[]> {
+  if (projectScopeSlug === null) {
+    return (await listProjects(access, signal)).data;
+  }
+
+  return [summarizeProject(await getProject(access, projectScopeSlug, signal))];
+}
+
+function upsertBySlug<Entry extends { slug: string }>(entries: Entry[], entry: Entry): Entry[] {
+  return entries.some((candidate) => candidate.slug === entry.slug)
+    ? entries.map((candidate) => (candidate.slug === entry.slug ? entry : candidate))
+    : [...entries, entry];
+}
 
 function getSelectedProjectSlug(projects: ProjectSummary[], currentProjectSlug: string | null) {
   if (currentProjectSlug && projects.some((project) => project.slug === currentProjectSlug)) {
@@ -174,7 +241,12 @@ function countTableHealth(
 
 type ServerCredentialState = 'checking' | 'available' | 'unavailable';
 
-function getCredentialStatus(access: AdminAccess | null, serverCredentialState: ServerCredentialState, state: LoadState) {
+function getCredentialStatus(
+  access: AdminAccess | null,
+  serverCredentialState: ServerCredentialState,
+  state: LoadState,
+  adminScope: AdminScope
+) {
   if (!access) {
     return serverCredentialState === 'checking' ? 'checking' as const : 'required' as const;
   }
@@ -183,12 +255,16 @@ function getCredentialStatus(access: AdminAccess | null, serverCredentialState: 
     return 'checking' as const;
   }
 
+  if (state.status === 'scope-limited') {
+    return 'project-scoped' as const;
+  }
+
   if (state.status === 'ready') {
-    return 'configured' as const;
+    return adminScope === 'project' ? 'project-scoped' as const : 'configured' as const;
   }
 
   if (state.status === 'error') {
-    return state.unauthorized ? 'rejected' as const : 'error' as const;
+    return state.authFailure === 'invalid-credential' ? 'rejected' as const : 'error' as const;
   }
 
   return 'checking' as const;
@@ -211,6 +287,10 @@ export function App() {
     status: 'idle',
     message: 'Select a project to inspect and manage scoped API keys.'
   });
+  const [adminScope, setAdminScope] = useState<AdminScope>('unknown');
+  const [projectScopeSlug, setProjectScopeSlug] = useState<string | null>(null);
+  const [projectScopeEntry, setProjectScopeEntry] = useState<ProjectScopeEntryState>({ status: 'idle' });
+  const [refreshWarning, setRefreshWarning] = useState<RefreshWarningState | null>(null);
   const [globalKeysState, setGlobalKeysState] = useState<GlobalKeysState>({
     status: 'idle',
     message: 'Load a global admin credential to inspect global keys.'
@@ -243,6 +323,11 @@ export function App() {
   const [createProjectDraft, setCreateProjectDraft] = useState<CreateProjectDraft>(initialCreateProjectDraft);
   const [createTableDraft, setCreateTableDraft] = useState<CreateTableDraft>(initialCreateTableDraft);
   const [createKeyDraft, setCreateKeyDraft] = useState<CreateKeyDraft>(initialCreateKeyDraft);
+
+  const registryGeneration = useRequestGeneration();
+  const detailGeneration = useRequestGeneration();
+  const projectKeysGeneration = useRequestGeneration();
+  const globalKeysGeneration = useRequestGeneration();
 
   const createProjectValidation = validateCreateProjectDraft(createProjectDraft);
   const createTableValidation = validateCreateTableDraft(createTableDraft);
@@ -286,6 +371,11 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const generationId = registryGeneration.begin();
+    setAdminScope('unknown');
+    setProjectScopeSlug(null);
+    setProjectScopeEntry({ status: 'idle' });
+
     if (!access) {
       setState({
         status: 'idle',
@@ -294,30 +384,42 @@ export function App() {
       return;
     }
 
-    let cancelled = false;
+    const controller = new AbortController();
     setState({ status: 'loading' });
 
     void (async () => {
       try {
-        const body = await listProjects(access);
-        if (!cancelled) {
-          setState({ status: 'ready', data: body.data });
-          setSelectedProjectSlug((current) => getSelectedProjectSlug(body.data, current));
+        const body = await listProjects(access, controller.signal);
+        if (controller.signal.aborted || !registryGeneration.isCurrent(generationId)) {
+          return;
         }
+
+        setAdminScope('global');
+        setState({ status: 'ready', data: body.data });
+        setSelectedProjectSlug((current) => getSelectedProjectSlug(body.data, current));
       } catch (error) {
-        if (!cancelled) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
-          setState({
-            status: 'error',
-            message,
-            unauthorized: message.includes('rejected')
-          });
+        if (controller.signal.aborted || !registryGeneration.isCurrent(generationId)) {
+          return;
         }
+
+        const authFailure = classifyAuthFailure(error);
+        if (authFailure === 'insufficient-scope') {
+          setAdminScope('project');
+          setSelectedProjectSlug(null);
+          setState({ status: 'scope-limited', message: projectKeyPromptMessage });
+          return;
+        }
+
+        setState({
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Unknown error',
+          authFailure
+        });
       }
     })();
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [access]);
 
@@ -326,6 +428,8 @@ export function App() {
   }, [selectedProjectSlug]);
 
   useEffect(() => {
+    const generationId = detailGeneration.begin();
+
     if (!access || !selectedProjectSlug) {
       setProjectDetailState({
         status: 'idle',
@@ -342,40 +446,49 @@ export function App() {
       return;
     }
 
-    let cancelled = false;
+    const controller = new AbortController();
     setProjectDetailState({ status: 'loading' });
 
     void (async () => {
       try {
-        const detail = await getProject(access, selectedProjectSlug);
-        if (!cancelled) {
-          setProjectDetailState({
-            status: 'ready',
-            project: detail.project,
-            tables: detail.tables
-          });
+        const detail = await getProject(access, selectedProjectSlug, controller.signal);
+        if (controller.signal.aborted || !detailGeneration.isCurrent(generationId)) {
+          return;
         }
+
+        setProjectDetailState({
+          status: 'ready',
+          project: detail.project,
+          tables: detail.tables
+        });
       } catch (error) {
-        if (!cancelled) {
-          setProjectDetailState({
-            status: 'error',
-            message: error instanceof Error ? error.message : 'Unknown error'
-          });
+        if (controller.signal.aborted || !detailGeneration.isCurrent(generationId)) {
+          return;
         }
+
+        setProjectDetailState({
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Unknown error'
+        });
       }
     })();
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [access, selectedProjectSlug]);
 
   useEffect(() => {
-    if (!access || !selectedProjectSlug) {
+    if (!access || !selectedProjectSlug || adminScope === 'unknown') {
       setSpreadsheetWatchState({
         status: 'idle',
         message: 'Select a project to inspect spreadsheet watch status.'
       });
+      return;
+    }
+
+    if (adminScope === 'project') {
+      setSpreadsheetWatchState({ status: 'idle', message: projectScopedWatchMessage });
       return;
     }
 
@@ -412,6 +525,7 @@ export function App() {
     };
   }, [
     access,
+    adminScope,
     selectedProjectSlug,
     projectDetailState.status,
     projectDetailState.status === 'ready' ? projectDetailState.project.spreadsheetId : null
@@ -521,11 +635,18 @@ export function App() {
   }, [access, selectedProjectSlug, createTableDraft.sheetTabName, createTableDraft.headerRow, tableSetupOpen]);
 
   useEffect(() => {
-    if (!access) {
+    const generationId = globalKeysGeneration.begin();
+
+    if (!access || adminScope === 'unknown') {
       setGlobalKeysState({
         status: 'idle',
         message: 'Load a global admin credential to inspect global keys.'
       });
+      return;
+    }
+
+    if (adminScope === 'project') {
+      setGlobalKeysState({ status: 'idle', message: projectScopedGlobalKeysMessage });
       return;
     }
 
@@ -535,19 +656,18 @@ export function App() {
     void (async () => {
       try {
         const result = await listApiKeys(access);
-        if (!cancelled) {
+        if (!cancelled && globalKeysGeneration.isCurrent(generationId)) {
           setGlobalKeysState({
             status: 'ready',
             data: result.data.filter((apiKey) => apiKey.projectSlug === null)
           });
         }
       } catch (error) {
-        if (!cancelled) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
+        if (!cancelled && globalKeysGeneration.isCurrent(generationId)) {
           setGlobalKeysState({
             status: 'error',
-            message,
-            unauthorized: message.includes('rejected') || message.includes('global admin key')
+            message: error instanceof Error ? error.message : 'Unknown error',
+            authFailure: classifyAuthFailure(error)
           });
         }
       }
@@ -556,9 +676,11 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [access]);
+  }, [access, adminScope]);
 
   useEffect(() => {
+    const generationId = projectKeysGeneration.begin();
+
     if (!access || !selectedProjectSlug) {
       setProjectKeysState({
         status: 'idle',
@@ -573,14 +695,14 @@ export function App() {
     void (async () => {
       try {
         const result = await listApiKeys(access, selectedProjectSlug);
-        if (!cancelled) {
+        if (!cancelled && projectKeysGeneration.isCurrent(generationId)) {
           setProjectKeysState({
             status: 'ready',
             data: result.data
           });
         }
       } catch (error) {
-        if (!cancelled) {
+        if (!cancelled && projectKeysGeneration.isCurrent(generationId)) {
           setProjectKeysState({
             status: 'error',
             message: error instanceof Error ? error.message : 'Unknown error'
@@ -599,11 +721,12 @@ export function App() {
       return;
     }
 
-    let cancelled = false;
+    const controller = new AbortController();
     const tableEntries = projectDetailState.tables.map((table) => ({
       table,
       cacheKey: getTableCacheKey(table.projectSlug, table.tableSlug)
     }));
+    const unsettledCacheKeys = new Set(tableEntries.map((entry) => entry.cacheKey));
 
     setCacheStatusLoadingByTable((current) => ({
       ...current,
@@ -614,48 +737,39 @@ export function App() {
       ...Object.fromEntries(tableEntries.map((entry) => [entry.cacheKey, null]))
     }));
 
-    void (async () => {
-      const results = await Promise.all(
-        tableEntries.map(async (entry) => {
-          try {
-            const response = await getCacheStatus(access, entry.table.projectSlug, entry.table.tableSlug);
-            return {
-              cache: response.data,
-              cacheKey: entry.cacheKey,
-              errorMessage: null,
-              ok: true as const
-            };
-          } catch (error) {
-            return {
-              cache: null,
-              cacheKey: entry.cacheKey,
-              errorMessage: error instanceof Error ? error.message : 'Unknown error',
-              ok: false as const
-            };
-          }
-        })
-      );
+    // Bounded fan-out: at most `cacheStatusConcurrency` requests in flight; each result renders as it settles.
+    void forEachWithConcurrency(tableEntries, cacheStatusConcurrency, controller.signal, async (entry) => {
+      try {
+        const response = await getCacheStatus(access, entry.table.projectSlug, entry.table.tableSlug, controller.signal);
+        if (controller.signal.aborted) {
+          return;
+        }
 
-      if (cancelled) {
-        return;
+        unsettledCacheKeys.delete(entry.cacheKey);
+        setCacheStateByTable((current) => ({ ...current, [entry.cacheKey]: response.data }));
+        setCacheStatusErrorByTable((current) => ({ ...current, [entry.cacheKey]: null }));
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        unsettledCacheKeys.delete(entry.cacheKey);
+        setCacheStatusErrorByTable((current) => ({
+          ...current,
+          [entry.cacheKey]: error instanceof Error ? error.message : 'Unknown error'
+        }));
       }
 
-      setCacheStateByTable((current) => ({
-        ...current,
-        ...Object.fromEntries(results.filter((result) => result.ok).map((result) => [result.cacheKey, result.cache]))
-      }));
-      setCacheStatusErrorByTable((current) => ({
-        ...current,
-        ...Object.fromEntries(results.map((result) => [result.cacheKey, result.errorMessage]))
-      }));
-      setCacheStatusLoadingByTable((current) => ({
-        ...current,
-        ...Object.fromEntries(results.map((result) => [result.cacheKey, false]))
-      }));
-    })();
+      setCacheStatusLoadingByTable((current) => ({ ...current, [entry.cacheKey]: false }));
+    });
 
     return () => {
-      cancelled = true;
+      controller.abort();
+      const abandoned = [...unsettledCacheKeys];
+      setCacheStatusLoadingByTable((current) => ({
+        ...current,
+        ...Object.fromEntries(abandoned.map((cacheKey) => [cacheKey, false]))
+      }));
     };
   }, [access, projectDetailState]);
 
@@ -672,9 +786,14 @@ export function App() {
   }, [projectDetailState]);
 
   async function refreshProjects(requestAccess: AdminAccess) {
-    const body = await listProjects(requestAccess);
-    setState({ status: 'ready', data: body.data });
-    setSelectedProjectSlug((current) => getSelectedProjectSlug(body.data, current));
+    const generationId = registryGeneration.begin();
+    const data = await fetchRegistry(requestAccess, projectScopeSlug);
+    if (!registryGeneration.isCurrent(generationId)) {
+      return;
+    }
+
+    setState({ status: 'ready', data });
+    setSelectedProjectSlug((current) => getSelectedProjectSlug(data, current));
   }
 
   async function refreshProjectDetail(
@@ -682,11 +801,16 @@ export function App() {
     projectSlug: string,
     options?: { showLoading?: boolean }
   ) {
+    const generationId = detailGeneration.begin();
     if (options?.showLoading) {
       setProjectDetailState({ status: 'loading' });
     }
 
     const detail = await getProject(requestAccess, projectSlug);
+    if (!detailGeneration.isCurrent(generationId)) {
+      return;
+    }
+
     setProjectDetailState({
       status: 'ready',
       project: detail.project,
@@ -699,11 +823,16 @@ export function App() {
     projectSlug: string,
     options?: { showLoading?: boolean }
   ) {
+    const generationId = projectKeysGeneration.begin();
     if (options?.showLoading) {
       setProjectKeysState({ status: 'loading' });
     }
 
     const result = await listApiKeys(requestAccess, projectSlug);
+    if (!projectKeysGeneration.isCurrent(generationId)) {
+      return;
+    }
+
     setProjectKeysState({
       status: 'ready',
       data: result.data
@@ -714,11 +843,16 @@ export function App() {
     requestAccess: AdminAccess,
     options?: { showLoading?: boolean }
   ) {
+    const generationId = globalKeysGeneration.begin();
     if (options?.showLoading) {
       setGlobalKeysState({ status: 'loading' });
     }
 
     const result = await listApiKeys(requestAccess);
+    if (!globalKeysGeneration.isCurrent(generationId)) {
+      return;
+    }
+
     setGlobalKeysState({
       status: 'ready',
       data: result.data.filter((apiKey) => apiKey.projectSlug === null)
@@ -727,6 +861,7 @@ export function App() {
 
   async function runAction(actionLabel: string, work: () => Promise<void>) {
     setBusyAction(actionLabel);
+    setRefreshWarning(null);
     setNotice({
       tone: 'loading',
       message: actionLabel
@@ -741,7 +876,77 @@ export function App() {
     } catch (error) {
       setNotice({
         tone: 'error',
-        message: error instanceof Error ? error.message : 'Unknown error'
+        message: describeError(error)
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  // A mutation that the Worker accepted is never reported as failed because the follow-up refresh failed:
+  // the returned data is committed locally first and a refresh failure becomes a separate, retryable warning.
+  async function runMutation<Result>(options: {
+    label: string;
+    mutate: () => Promise<Result>;
+    commit: (result: Result) => void;
+    refresh?: () => Promise<void>;
+  }) {
+    const { label, mutate, commit, refresh } = options;
+    setBusyAction(label);
+    setRefreshWarning(null);
+    setNotice({
+      tone: 'loading',
+      message: label
+    });
+
+    let result: Result;
+    try {
+      result = await mutate();
+    } catch (error) {
+      setNotice({
+        tone: 'error',
+        message: describeError(error)
+      });
+      setBusyAction(null);
+      return;
+    }
+
+    commit(result);
+
+    if (refresh) {
+      try {
+        await refresh();
+      } catch (error) {
+        setRefreshWarning({
+          message: `${label} succeeded, but refreshing the view failed: ${describeError(error)}`,
+          retry: refresh
+        });
+      }
+    }
+
+    setNotice({
+      tone: 'success',
+      message: `${label} complete.`
+    });
+    setBusyAction(null);
+  }
+
+  async function handleRetryRefresh() {
+    if (!refreshWarning) return;
+    const { retry } = refreshWarning;
+    setBusyAction('Retrying refresh');
+
+    try {
+      await retry();
+      setRefreshWarning(null);
+      setNotice({
+        tone: 'success',
+        message: 'Refresh complete.'
+      });
+    } catch (error) {
+      setRefreshWarning({
+        message: `Refreshing the view failed again: ${describeError(error)}`,
+        retry
       });
     } finally {
       setBusyAction(null);
@@ -757,6 +962,7 @@ export function App() {
     setAccess(normalized ? { source: 'browser', credential: normalized } : getDefaultAccess());
     setCacheStateByTable({});
     setCreatedKey(null);
+    setRefreshWarning(null);
     setDraftCredential(normalized ?? '');
     setNotice({
       tone: 'idle',
@@ -786,6 +992,24 @@ export function App() {
       ...current,
       [cacheKey]: cache
     }));
+  }
+
+  function removeTableCacheEntries(cacheKey: string) {
+    setCacheStateByTable((current) => {
+      const { [cacheKey]: removed, ...rest } = current;
+      void removed;
+      return rest;
+    });
+    setCacheStatusErrorByTable((current) => {
+      const { [cacheKey]: removed, ...rest } = current;
+      void removed;
+      return rest;
+    });
+    setCacheStatusLoadingByTable((current) => {
+      const { [cacheKey]: removed, ...rest } = current;
+      void removed;
+      return rest;
+    });
   }
 
   async function fetchCacheStatusForTable(requestAccess: AdminAccess, projectSlug: string, tableSlug: string) {
@@ -823,6 +1047,7 @@ export function App() {
       message: 'Choose a sheet tab to preview its headers.'
     });
     setCreatedKey(null);
+    setRefreshWarning(null);
     setDraftCredential('');
     setSelectedProjectSlug(null);
     setProjectDetailState({
@@ -846,29 +1071,95 @@ export function App() {
     setAccessKeysOpen(false);
   }
 
+  async function handleLoadScopedProject(projectSlug: string) {
+    if (!access) return;
+    const generationId = registryGeneration.begin();
+    setProjectScopeEntry({ status: 'loading' });
+
+    try {
+      const detail = await getProject(access, projectSlug);
+      if (!registryGeneration.isCurrent(generationId)) {
+        return;
+      }
+
+      setProjectScopeSlug(projectSlug);
+      setProjectScopeEntry({ status: 'idle' });
+      setState({ status: 'ready', data: [summarizeProject(detail)] });
+      setSelectedProjectSlug(projectSlug);
+    } catch (error) {
+      if (!registryGeneration.isCurrent(generationId)) {
+        return;
+      }
+
+      // 401 is a rejected credential. 403 FORBIDDEN is a key that cannot access this project. Both stay on the slug prompt.
+      const message = classifyAuthFailure(error) === null
+        ? describeError(error)
+        : `${error instanceof Error ? error.message : 'Unauthorized'} This key is not authorized for project ${projectSlug}: check the slug, and that the key is scoped to it with the admin:projects scope.`;
+      setProjectScopeEntry({ status: 'error', message });
+    }
+  }
+
   async function handleCreateProject() {
     if (!access || !createProjectValidation.value) return;
     const input = createProjectValidation.value;
 
-    await runAction(`Saving project ${input.slug}`, async () => {
-      await createProject(access, input);
-      setCreateProjectDraft(initialCreateProjectDraft);
-      setProjectSetupOpen(false);
-      await refreshProjects(access);
-      setSelectedProjectSlug(input.slug);
+    await runMutation({
+      label: `Saving project ${input.slug}`,
+      mutate: () => createProject(access, input),
+      commit: (detail) => {
+        setCreateProjectDraft(initialCreateProjectDraft);
+        setProjectSetupOpen(false);
+        setState((current) =>
+          current.status === 'ready'
+            ? { status: 'ready', data: upsertBySlug(current.data, summarizeProject(detail)) }
+            : current
+        );
+        setSelectedProjectSlug(input.slug);
+      },
+      refresh: () => refreshProjects(access)
     });
   }
 
   async function handleCreateTable() {
     if (!access || !selectedProjectSlug || !createTableValidation.value) return;
+    const projectSlug = selectedProjectSlug;
     const input = createTableValidation.value;
 
-    await runAction(`Saving table ${selectedProjectSlug}/${input.tableSlug}`, async () => {
-      await createTable(access, selectedProjectSlug, input);
-      setCreateTableDraft(initialCreateTableDraft);
-      setTableSetupOpen(false);
-      await refreshProjects(access);
-      await refreshProjectDetail(access, selectedProjectSlug);
+    await runMutation({
+      label: `Saving table ${projectSlug}/${input.tableSlug}`,
+      mutate: () => createTable(access, projectSlug, input),
+      commit: (result) => {
+        const table = result.data;
+        const isNewTable =
+          projectDetailState.status === 'ready'
+          && !projectDetailState.tables.some((candidate) => candidate.tableSlug === table.tableSlug);
+        setCreateTableDraft(initialCreateTableDraft);
+        setTableSetupOpen(false);
+        setProjectDetailState((current) =>
+          current.status === 'ready' && current.project.slug === projectSlug
+            ? {
+                ...current,
+                tables: [...current.tables.filter((candidate) => candidate.tableSlug !== table.tableSlug), table]
+              }
+            : current
+        );
+        if (isNewTable) {
+          setState((current) =>
+            current.status === 'ready'
+              ? {
+                  status: 'ready',
+                  data: current.data.map((project) =>
+                    project.slug === projectSlug ? { ...project, tableCount: project.tableCount + 1 } : project
+                  )
+                }
+              : current
+          );
+        }
+      },
+      refresh: async () => {
+        await refreshProjects(access);
+        await refreshProjectDetail(access, projectSlug);
+      }
     });
   }
 
@@ -880,15 +1171,31 @@ export function App() {
       scopes: validatedInput.scopes,
       ...(validatedInput.projectSlug !== undefined ? { projectSlug: validatedInput.projectSlug } : {})
     };
+    const projectSlug = selectedProjectSlug;
 
-    await runAction(`Creating API key ${input.name}`, async () => {
-      const response = await createApiKey(access, input);
-      setCreatedKey(response.apiKey);
-      if (selectedProjectSlug) {
-        await refreshProjectKeys(access, selectedProjectSlug);
-      }
-      if (!input.projectSlug) {
-        await refreshGlobalKeys(access);
+    await runMutation({
+      label: `Creating API key ${input.name}`,
+      mutate: () => createApiKey(access, input),
+      commit: (response) => {
+        setCreatedKey(response.apiKey);
+        if (response.record.projectSlug !== null && response.record.projectSlug === projectSlug) {
+          setProjectKeysState((current) =>
+            current.status === 'ready' ? { status: 'ready', data: [...current.data, response.record] } : current
+          );
+        }
+        if (response.record.projectSlug === null) {
+          setGlobalKeysState((current) =>
+            current.status === 'ready' ? { status: 'ready', data: [...current.data, response.record] } : current
+          );
+        }
+      },
+      refresh: async () => {
+        if (projectSlug) {
+          await refreshProjectKeys(access, projectSlug);
+        }
+        if (!input.projectSlug && adminScope === 'global') {
+          await refreshGlobalKeys(access);
+        }
       }
     });
   }
@@ -940,68 +1247,120 @@ export function App() {
 
   async function handleDeleteTable(tableSlug: string) {
     if (!access || !selectedProjectSlug) return;
-    const confirmed = window.confirm(`Delete table ${selectedProjectSlug}/${tableSlug}? This removes Sheetflare configuration and clears the local cache, but does not delete the Google Sheets tab.`);
+    const projectSlug = selectedProjectSlug;
+    const confirmed = window.confirm(`Delete table ${projectSlug}/${tableSlug}? This removes Sheetflare configuration and clears the local cache, but does not delete the Google Sheets tab.`);
     if (!confirmed) return;
 
-    await runAction(`Deleting table ${selectedProjectSlug}/${tableSlug}`, async () => {
-      await deleteTable(access, selectedProjectSlug, tableSlug);
-      const cacheKey = getTableCacheKey(selectedProjectSlug, tableSlug);
-      setCacheStateByTable((current) => {
-        const { [cacheKey]: removed, ...rest } = current;
-        void removed;
-        return rest;
-      });
-      setCacheStatusErrorByTable((current) => {
-        const { [cacheKey]: removed, ...rest } = current;
-        void removed;
-        return rest;
-      });
-      setCacheStatusLoadingByTable((current) => {
-        const { [cacheKey]: removed, ...rest } = current;
-        void removed;
-        return rest;
-      });
-      await refreshProjects(access);
-      await refreshProjectDetail(access, selectedProjectSlug);
+    await runMutation({
+      label: `Deleting table ${projectSlug}/${tableSlug}`,
+      mutate: () => deleteTable(access, projectSlug, tableSlug),
+      commit: () => {
+        removeTableCacheEntries(getTableCacheKey(projectSlug, tableSlug));
+        const existed =
+          projectDetailState.status === 'ready'
+          && projectDetailState.tables.some((candidate) => candidate.tableSlug === tableSlug);
+        setProjectDetailState((current) =>
+          current.status === 'ready' && current.project.slug === projectSlug
+            ? { ...current, tables: current.tables.filter((candidate) => candidate.tableSlug !== tableSlug) }
+            : current
+        );
+        if (existed) {
+          setState((current) =>
+            current.status === 'ready'
+              ? {
+                  status: 'ready',
+                  data: current.data.map((project) =>
+                    project.slug === projectSlug
+                      ? { ...project, tableCount: Math.max(0, project.tableCount - 1) }
+                      : project
+                  )
+                }
+              : current
+          );
+        }
+      },
+      refresh: async () => {
+        await refreshProjects(access);
+        await refreshProjectDetail(access, projectSlug);
+      }
     });
   }
 
   async function handleDeleteProject() {
     if (!access || !selectedProjectSlug || projectDetailState.status !== 'ready') return;
+    const projectSlug = selectedProjectSlug;
     const tableCount = projectDetailState.tables.length;
-    const confirmed = window.confirm(`Delete project ${selectedProjectSlug} and its ${tableCount} configured table${tableCount === 1 ? '' : 's'}? This does not delete the upstream Google spreadsheet.`);
+    const confirmed = window.confirm(`Delete project ${projectSlug} and its ${tableCount} configured table${tableCount === 1 ? '' : 's'}? This does not delete the upstream Google spreadsheet.`);
     if (!confirmed) return;
 
-    await runAction(`Deleting project ${selectedProjectSlug}`, async () => {
-      await deleteProject(access, selectedProjectSlug);
-      setCacheStateByTable({});
-      setCacheStatusErrorByTable({});
-      setCacheStatusLoadingByTable({});
-      setProjectDetailState({
-        status: 'idle',
-        message: 'Select a project to inspect tables, cache state, and keys.'
-      });
-      setProjectKeysState({
-        status: 'idle',
-        message: 'Select a project to inspect and manage scoped API keys.'
-      });
-      setSpreadsheetWatchState({
-        status: 'idle',
-        message: 'Select a project to inspect spreadsheet watch status.'
-      });
-      await refreshProjects(access);
+    await runMutation({
+      label: `Deleting project ${projectSlug}`,
+      mutate: () => deleteProject(access, projectSlug),
+      commit: () => {
+        setCacheStateByTable({});
+        setCacheStatusErrorByTable({});
+        setCacheStatusLoadingByTable({});
+        setProjectDetailState({
+          status: 'idle',
+          message: 'Select a project to inspect tables, cache state, and keys.'
+        });
+        setProjectKeysState({
+          status: 'idle',
+          message: 'Select a project to inspect and manage scoped API keys.'
+        });
+        setSpreadsheetWatchState({
+          status: 'idle',
+          message: 'Select a project to inspect spreadsheet watch status.'
+        });
+
+        if (projectScopeSlug !== null) {
+          setProjectScopeSlug(null);
+          setSelectedProjectSlug(null);
+          setState({ status: 'scope-limited', message: projectKeyPromptMessage });
+          return;
+        }
+
+        const remaining = state.status === 'ready'
+          ? state.data.filter((project) => project.slug !== projectSlug)
+          : [];
+        setState({ status: 'ready', data: remaining });
+        setSelectedProjectSlug(getSelectedProjectSlug(remaining, null));
+      },
+      ...(projectScopeSlug === null ? { refresh: () => refreshProjects(access) } : {})
     });
   }
 
-  async function handleRevokeKey(apiKeyId: string) {
+  async function handleRevokeKey(apiKey: ApiKeyPrincipal) {
     if (!access) return;
-    await runAction(`Revoking key ${apiKeyId}`, async () => {
-      await revokeApiKey(access, apiKeyId);
-      setCreatedKey((current) => (current?.startsWith(`sfk_${apiKeyId}.`) ? null : current));
-      if (selectedProjectSlug) {
-        await refreshProjectKeys(access, selectedProjectSlug);
+    const confirmed = window.confirm(
+      `Revoke API key "${apiKey.name}" (${apiKey.id})? Clients using it stop working immediately and this cannot be undone.`
+    );
+    if (!confirmed) return;
+    const projectSlug = selectedProjectSlug;
+
+    await runMutation({
+      label: `Revoking key ${apiKey.id}`,
+      mutate: () => revokeApiKey(access, apiKey.id),
+      commit: () => {
+        const revokedAt = new Date().toISOString();
+        const markRevoked = (keys: ApiKeyPrincipal[]) =>
+          keys.map((candidate) => (candidate.id === apiKey.id ? { ...candidate, revokedAt } : candidate));
+        setCreatedKey((current) => (current?.startsWith(`sfk_${apiKey.id}.`) ? null : current));
+        setProjectKeysState((current) =>
+          current.status === 'ready' ? { status: 'ready', data: markRevoked(current.data) } : current
+        );
+        setGlobalKeysState((current) =>
+          current.status === 'ready' ? { status: 'ready', data: markRevoked(current.data) } : current
+        );
+      },
+      refresh: async () => {
+        if (projectSlug) {
+          await refreshProjectKeys(access, projectSlug);
+        }
+        if (adminScope === 'global') {
+          await refreshGlobalKeys(access);
+        }
       }
-      await refreshGlobalKeys(access);
     });
   }
 
@@ -1009,7 +1368,16 @@ export function App() {
     if (!access) return;
     setState({ status: 'loading' });
     await runAction('Refreshing project registry', async () => {
-      await refreshProjects(access);
+      try {
+        await refreshProjects(access);
+      } catch (error) {
+        setState({
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Unknown error',
+          authFailure: classifyAuthFailure(error)
+        });
+        throw error;
+      }
     });
   }
 
@@ -1035,6 +1403,8 @@ export function App() {
   }
 
   function handleSelectProject(projectSlug: string) {
+    // Target-bound actions read the selected project when they commit; never switch under them.
+    if (busyAction !== null) return;
     setSelectedProjectSlug(projectSlug);
     setProjectsExpanded(false);
   }
@@ -1054,7 +1424,7 @@ export function App() {
           cacheStatusLoadingByTable
         )
       : null;
-  const credentialStatus = getCredentialStatus(access, serverCredentialState, state);
+  const credentialStatus = getCredentialStatus(access, serverCredentialState, state, adminScope);
 
   return (
     <main className="shell">
@@ -1069,6 +1439,7 @@ export function App() {
       <CredentialPanel
         credentialStatus={credentialStatus}
         credentialSource={access?.source ?? null}
+        projectScopeSlug={projectScopeSlug}
         draftCredential={draftCredential}
         onDraftCredentialChange={setDraftCredential}
         onSave={saveCredential}
@@ -1079,6 +1450,11 @@ export function App() {
       />
 
       <NoticeBanner tone={notice.tone} message={notice.message} />
+      <RefreshWarning
+        message={refreshWarning?.message ?? null}
+        onRetry={() => void handleRetryRefresh()}
+        busy={busyAction !== null}
+      />
 
       <section className="workspaceStack">
         <section className="panel projectPanel">
@@ -1100,7 +1476,12 @@ export function App() {
                   {projectsExpanded ? 'Collapse projects' : 'Show projects'}
                 </button>
               ) : null}
-              <button type="button" className="secondaryButton" onClick={() => void handleRefreshProjects()} disabled={!access || busyAction !== null}>
+              <button
+                type="button"
+                className="secondaryButton"
+                onClick={() => void handleRefreshProjects()}
+                disabled={!access || busyAction !== null || state.status === 'scope-limited'}
+              >
                 Refresh projects
               </button>
               <span className="badge">{projectCount}</span>
@@ -1110,10 +1491,30 @@ export function App() {
           {state.status === 'idle' ? <p className="muted">{state.message}</p> : null}
           {state.status === 'loading' ? <p className="muted">Loading project registry...</p> : null}
           {state.status === 'error' ? (
-            <p className="error">
-              {state.message}
-              {state.unauthorized ? ' Update the credential and try again.' : ''}
-            </p>
+            <div className="stack compactStack">
+              <p className="error" role="alert">
+                {state.message}
+                {state.authFailure === 'invalid-credential' ? ' Update the credential and try again.' : ''}
+              </p>
+              <div className="actions">
+                <button
+                  type="button"
+                  className="secondaryButton"
+                  onClick={() => void handleRefreshProjects()}
+                  disabled={!access || busyAction !== null}
+                >
+                  Retry
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {state.status === 'scope-limited' ? (
+            <ProjectScopeEntry
+              message={state.message}
+              entryState={projectScopeEntry}
+              onSubmit={(projectSlug) => void handleLoadScopedProject(projectSlug)}
+              disabled={!access || busyAction !== null}
+            />
           ) : null}
           {state.status === 'ready' && state.data.length === 0 ? (
             <div className="emptyState">
@@ -1144,6 +1545,7 @@ export function App() {
               projects={state.data}
               selectedProjectSlug={selectedProjectSlug}
               onSelect={handleSelectProject}
+              disabled={busyAction !== null}
             />
           ) : null}
         </section>
@@ -1193,13 +1595,17 @@ export function App() {
               </div>
               <span className="badge badgeMuted">On demand</span>
             </summary>
-            <CreateProjectForm
-              draft={createProjectDraft}
-              fieldErrors={createProjectValidation.fieldErrors}
-              onChange={setCreateProjectDraft}
-              onSubmit={() => void handleCreateProject()}
-              submitDisabled={!access || busyAction !== null || !createProjectValidation.isValid}
-            />
+            {adminScope === 'project' ? (
+              <p className="muted">Creating projects requires a global admin key.</p>
+            ) : (
+              <CreateProjectForm
+                draft={createProjectDraft}
+                fieldErrors={createProjectValidation.fieldErrors}
+                onChange={setCreateProjectDraft}
+                onSubmit={() => void handleCreateProject()}
+                submitDisabled={!access || busyAction !== null || !createProjectValidation.isValid}
+              />
+            )}
           </details>
 
           <details className="disclosureCard" open={accessKeysOpen} onToggle={(event) => setAccessKeysOpen((event.currentTarget as HTMLDetailsElement).open)}>
@@ -1221,7 +1627,8 @@ export function App() {
               projectKeysState={projectKeysState}
               globalKeysState={globalKeysState}
               busy={busyAction !== null}
-              onRevoke={(apiKeyId) => void handleRevokeKey(apiKeyId)}
+              globalKeysAvailable={adminScope === 'global'}
+              onRevoke={(apiKey) => void handleRevokeKey(apiKey)}
               onRefreshProjectKeys={() => void handleRefreshProjectKeys()}
               onRefreshGlobalKeys={() => void handleRefreshGlobalKeys()}
             />

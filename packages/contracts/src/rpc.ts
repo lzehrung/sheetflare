@@ -31,7 +31,7 @@ import type { ApiKeyPrincipal } from './auth';
 import { apiKeyIdSchema, projectSlugSchema, rowIdSchema, tableSlugSchema } from './ids';
 import type { ProjectConfig, TableConfig } from './project';
 import { fieldRulesSchema, maxIndexedFieldCount, tableConfigSchema } from './project';
-import type { ListRowsResult } from './table';
+import type { ListRowsResult, TableDataGeneration } from './table';
 import { listRowsQuerySchema } from './table';
 
 export const tableRequestContextSchema = z.object({
@@ -60,11 +60,17 @@ const createTableRpcInputSchema = z.object({
   createEnabled: z.boolean().optional(),
   updateEnabled: z.boolean().optional(),
   deleteEnabled: z.boolean().optional(),
-  cacheTtlSeconds: z.number().int().nonnegative().optional()
+  cacheTtlSeconds: tableConfigSchema.shape.cacheTtlSeconds.optional()
 });
 
 export const controlPlaneDoRequestSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('control.projects.list') }),
+  // Registers a project or updates its registration, which also ends its reservation. A pairing of spreadsheet and
+  // credential ref that the project is not registered with yet is checked like a reservation and rejected with CONFLICT
+  // when other projects, registered or being created, use the spreadsheet under a different ref. That backs up a
+  // reservation that expired or was never made. Updating the pairing a project is registered with always succeeds.
+  // ProjectDO also sends it to restore the registration of a project whose update did not complete, when the answer to
+  // the update was lost and the control plane may have applied it.
   z.object({
     type: z.literal('control.project.upsert'),
     summary: z.object({
@@ -76,6 +82,29 @@ export const controlPlaneDoRequestSchema = z.discriminatedUnion('type', [
       updatedAt: z.string().datetime()
     })
   }),
+  // Sent by ProjectDO before it writes a new project or moves one to another spreadsheet or credential ref. In one step
+  // the control plane rejects a spreadsheet that other projects, registered or being created, use under a different
+  // credential ref, and otherwise records the project's claim to the spreadsheet so that a concurrent create sees it.
+  // Reserving again for the same slug replaces its claim. The claim ends with the project's upsert or delete, with a
+  // release, or after a few minutes, so a ProjectDO that dies before its write cannot hold the spreadsheet for good.
+  // When `revokeApiKeys` is set because the slug has no project yet, API keys left bound to the slug by an earlier
+  // project are revoked.
+  z.object({
+    type: z.literal('control.project.reserve'),
+    projectSlug: projectSlugSchema,
+    spreadsheetId: z.string().min(1),
+    googleCredentialRef: z.string().min(1),
+    revokeApiKeys: z.boolean()
+  }),
+  // Sent by ProjectDO when the write that follows a reservation fails, so the reservation stops holding the spreadsheet.
+  z.object({
+    type: z.literal('control.project.release'),
+    projectSlug: projectSlugSchema
+  }),
+  // Removes a project from the registry, ends its reservation, revokes the API keys bound to its slug and stops Drive
+  // watches that no remaining project uses. It is idempotent. ProjectDO sends it to delete a project, and to unregister
+  // a project whose create did not complete when the answer to its registration was lost and the control plane may
+  // have applied it.
   z.object({
     type: z.literal('control.project.delete'),
     projectSlug: projectSlugSchema
@@ -134,10 +163,6 @@ export const controlPlaneDoRequestSchema = z.discriminatedUnion('type', [
 export const projectDoRequestSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('project.get'),
-    projectSlug: projectSlugSchema
-  }),
-  z.object({
-    type: z.literal('project.access.get'),
     projectSlug: projectSlugSchema
   }),
   z.object({
@@ -266,6 +291,13 @@ export const tableDoRequestSchema = z.discriminatedUnion('type', [
     tableSlug: tableSlugSchema,
     resolvedConfig: resolvedTableConfigSnapshotSchema.optional(),
     requestContext: tableRequestContextSchema.optional()
+  }),
+  z.object({
+    type: z.literal('table.generation.get'),
+    projectSlug: projectSlugSchema,
+    tableSlug: tableSlugSchema,
+    resolvedConfig: resolvedTableConfigSnapshotSchema.optional(),
+    requestContext: tableRequestContextSchema.optional()
   })
 ]);
 
@@ -281,15 +313,30 @@ export const rateLimitDoRequestSchema = z.discriminatedUnion('type', [
 
 export type ControlPlaneDoRequest = z.infer<typeof controlPlaneDoRequestSchema>;
 
+// Result of control.spreadsheet-watch.notify. `changed` is true only when the notification recorded a new content
+// change; sync messages and duplicate, replayed or out-of-order message numbers report false. `projectSlugs` lists the
+// projects registered on the notified spreadsheet and is empty when the notification was not accepted.
+export const spreadsheetWatchNotifyResultSchema = z.object({
+  accepted: z.boolean(),
+  spreadsheetId: z.string().min(1).nullable(),
+  debounceUntil: z.string().datetime().nullable(),
+  changed: z.boolean(),
+  projectSlugs: z.array(projectSlugSchema)
+});
+
+export type SpreadsheetWatchNotifyResult = z.infer<typeof spreadsheetWatchNotifyResultSchema>;
+
 export type ControlPlaneDoResponse =
   | { type: 'control.projects.list.result'; result: AdminListProjectsResult }
   | { type: 'control.project.upsert.result'; result: { ok: true } }
+  | { type: 'control.project.reserve.result'; result: { ok: true } }
+  | { type: 'control.project.release.result'; result: { ok: true } }
   | { type: 'control.project.delete.result'; result: { ok: true } }
   | { type: 'control.spreadsheet-watches.list.result'; result: AdminListSpreadsheetWatchesResult }
   | { type: 'control.spreadsheet-watches.retry-advice.list.result'; result: AdminListSpreadsheetWatchRetryAdviceResult }
   | { type: 'control.spreadsheet-watches.register.result'; result: AdminRegisterSpreadsheetWatchesResult }
   | { type: 'control.spreadsheet-watches.stop.result'; result: AdminRegisterSpreadsheetWatchesResult }
-  | { type: 'control.spreadsheet-watch.notify.result'; result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null } }
+  | { type: 'control.spreadsheet-watch.notify.result'; result: SpreadsheetWatchNotifyResult }
   | { type: 'control.api-key.create.result'; result: AdminCreateApiKeyResult }
   | { type: 'control.api-keys.list.result'; result: AdminListApiKeysResult }
   | { type: 'control.api-key.get.result'; result: { record: ApiKeyPrincipal | null } }
@@ -301,7 +348,6 @@ export type ProjectDoRequest = z.infer<typeof projectDoRequestSchema>;
 
 export type ProjectDoResponse =
   | { type: 'project.get.result'; result: AdminGetProjectResult }
-  | { type: 'project.access.get.result'; result: { data: ProjectAccessResult } }
   | { type: 'project.create.result'; result: { data: AdminGetProjectResult; created: boolean } }
   | { type: 'project.table.create.result'; result: { data: UpsertTableResult['data']; created: boolean } }
   | { type: 'project.table.delete.result'; result: DeleteTableResult }
@@ -320,8 +366,6 @@ export type ResolvedProjectTableResult = {
   resolvedConfig: ResolvedTableConfigSnapshot;
 };
 
-export type ProjectAccessResult = Pick<ProjectConfig, 'slug' | 'defaultAuthMode'>;
-
 export type TableDoRequest = z.infer<typeof tableDoRequestSchema>;
 
 export type TableDoResponse =
@@ -335,7 +379,8 @@ export type TableDoResponse =
   | { type: 'table.cache.refresh.result'; result: RefreshTableCacheResult }
   | { type: 'table.cache.clear.result'; result: { ok: true } }
   | { type: 'table.external-change.record.result'; result: { ok: true } }
-  | { type: 'table.reindex.result'; result: ReindexTableResult };
+  | { type: 'table.reindex.result'; result: ReindexTableResult }
+  | { type: 'table.generation.get.result'; result: TableDataGeneration };
 
 export type TableRequestContext = z.infer<typeof tableRequestContextSchema>;
 

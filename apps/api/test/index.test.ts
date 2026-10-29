@@ -1,1136 +1,52 @@
 import { z } from 'zod';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { exports as workerExports } from 'cloudflare:workers';
-import {
-  resolvedTableConfigSnapshotSchema,
-  type ControlPlaneDoResponse,
-  type TableDoResponse
-} from '@sheetflare/contracts';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../src/env';
 import {
-  CachedTableReads,
-  type CachedTableReadProps,
   __getRecentApiKeyTouchCacheSizeForTests,
-  __resetRecentApiKeyTouchesForTests,
+  __resetGatewayStateForTests,
+  __timingSafeEqualSecretForTests,
   __touchApiKeyIfNeededForTests,
   createApp
 } from '../src/index';
+import { apiKeys, forgedApiKey } from './support/api-keys';
+import {
+  type CachePurgeCall,
+  cannedTableSyncCompletedAt,
+  type CachedReadRequestRecord,
+  createCachedTableReadsHarness,
+  createEnv,
+  defaultCachedTableReadProps,
+  expectCachedDataReadGatewayHeaders,
+  expectCachedReadPurgeCalls,
+  expectDefaultGatewayNoStore,
+  expectNoCredentialMaterial,
+  expectSuccessfulCachedReadHeaders,
+  getOnlyCachedReadRequest,
+  requireCacheKey
+} from './support/harness';
+import { WorkersCacheEmulator } from './support/workers-cache';
 
-type StubHandler = (request: Request) => Response | Promise<Response>;
-
-type CachedReadRequestRecord = {
-  url: string;
-  method: string;
-  authorization: string | null;
-  cacheKey: string | null;
-};
-
-const resolvedTableConfigSnapshot = resolvedTableConfigSnapshotSchema.parse({
-  projectSlug: 'demo',
-  tableSlug: 'users',
-  sheetTabName: 'Users',
-  idColumn: '_id',
-  indexedFields: ['_id'],
-  readOnlyFields: [],
-  fieldRules: {},
-  headerRow: 1,
-  dataStartRow: 2,
-  readEnabled: true,
-  createEnabled: true,
-  updateEnabled: true,
-  deleteEnabled: true,
-  cacheTtlSeconds: 15,
-  createdAt: '2026-04-26T00:00:00.000Z',
-  updatedAt: '2026-04-26T00:00:00.000Z',
-  spreadsheetId: 'sheet-1',
-  googleCredentialRef: 'default'
+describe('timingSafeEqualSecret', () => {
+  it('matches equal secrets and rejects unequal or different-length secrets', async () => {
+    expect(await __timingSafeEqualSecretForTests('drive-secret', 'drive-secret')).toBe(true);
+    expect(await __timingSafeEqualSecretForTests('drive-secret', 'Drive-secret')).toBe(false);
+    expect(await __timingSafeEqualSecretForTests('drive-secret', 'drive-secret-longer')).toBe(false);
+  });
 });
 
-const defaultCachedTableReadProps: CachedTableReadProps = {
-  resolvedConfig: resolvedTableConfigSnapshot
-};
-
-class FakeDurableObjectStub {
-  constructor(private readonly handler: StubHandler) {}
-
-  fetch(request: RequestInfo | URL, init?: RequestInit) {
-    return this.handler(new Request(request, init));
-  }
-}
-
-class FakeDurableObjectNamespace {
-  constructor(private readonly handlerForName: (name: string) => StubHandler) {}
-
-  idFromName(name: string) {
-    return name;
-  }
-
-  get(name: string) {
-    return new FakeDurableObjectStub(this.handlerForName(name));
-  }
-}
-
-function buildApiKeyRecord(apiKeyId: string) {
-  if (apiKeyId === 'project-key') {
-    return {
-      id: 'project-key',
-      projectSlug: 'demo',
-      name: 'Demo key',
-      scopes: ['table:create', 'table:read'],
-      createdAt: '2026-04-26T00:00:00.000Z',
-      revokedAt: null,
-      lastUsedAt: null
-    };
-  }
-
-  if (apiKeyId === 'touch-key') {
-    return {
-      id: 'touch-key',
-      projectSlug: 'demo',
-      name: 'Touch key',
-      scopes: ['table:read'],
-      createdAt: '2026-04-26T00:00:00.000Z',
-      revokedAt: null,
-      lastUsedAt: null
-    };
-  }
-
-  if (/^touch-key-\d+$/.test(apiKeyId)) {
-    return {
-      id: apiKeyId,
-      projectSlug: 'demo',
-      name: `Touch key ${apiKeyId}`,
-      scopes: ['table:read'],
-      createdAt: '2026-04-26T00:00:00.000Z',
-      revokedAt: null,
-      lastUsedAt: null
-    };
-  }
-
-  if (apiKeyId === 'project-admin-key') {
-    return {
-      id: 'project-admin-key',
-      projectSlug: 'demo',
-      name: 'Demo admin key',
-      scopes: ['admin:projects', 'admin:keys', 'table:read'],
-      createdAt: '2026-04-26T00:00:00.000Z',
-      revokedAt: null,
-      lastUsedAt: null
-    };
-  }
-
-  if (apiKeyId === 'global-key') {
-    return {
-      id: 'global-key',
-      projectSlug: null,
-      name: 'Global key',
-      scopes: ['admin:keys'],
-      createdAt: '2026-04-26T00:00:00.000Z',
-      revokedAt: null,
-      lastUsedAt: null
-    };
-  }
-
-  return null;
-}
-
-type UnexpectedTableResponseRequest =
-  | 'table.cache.refresh'
-  | 'table.reindex'
-  | 'table.row.create'
-  | 'table.row.update'
-  | 'table.row.delete';
-
-function createEnv(options?: {
-  rateLimitAllowed?: boolean;
-  defaultAuthMode?: 'private' | 'public-read';
-  projectAccessStatus?: 200 | 404 | 500;
-  tableCacheClearStatus?: 200 | 503;
-  tableCacheGetUnexpectedResponse?: boolean;
-  tableUnexpectedResponseFor?: UnexpectedTableResponseRequest;
-  controlProjectsListUnexpectedResponse?: boolean;
-  controlSpreadsheetWatchNotifyUnexpectedResponse?: boolean;
-  tableRowsListStatus?: 200 | 503;
-  tableCacheTtlSeconds?: number;
-  tableCacheStatus?: 'idle' | 'syncing' | 'ready' | 'error';
-  tableCacheStale?: boolean;
-  tableCacheStaleReason?: 'fresh' | 'never-synced' | 'ttl-expired' | 'config-changed' | 'external-change' | 'error';
-  tableExternalChangeDebounceUntil?: string | null;
-  googleClientEmail?: string;
-  googlePrivateKey?: string;
-  googleCredentialsJson?: string;
-  adminBearerToken?: string;
-  allowedOrigins?: string;
-  cachedReadPurgeShouldFail?: boolean;
-  cachedReadResponseHeaders?: Record<string, string>;
-}): Env {
-  const rateLimitRequests: Array<{ name: string; key: string }> = [];
-  const projectRequests: string[] = [];
-  const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }> = [];
-  const controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> = [];
-  const durableObjectRequests: string[] = [];
-  const cachedReadRequests: CachedReadRequestRecord[] = [];
-  const cachedReadPurgeCalls: CachePurgeCall[] = [];
-  let verifyApiKeyCallCount = 0;
-  let apiKeyTouchCallCount = 0;
-  const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
-    const body = (await request.json()) as { type: string; apiKeyId?: string; hash?: string; projectSlug?: string | null };
-    controlPlaneRequests.push({
-      type: body.type,
-      body
-    });
-
-    if (body.type === 'control.api-key.verify') {
-      verifyApiKeyCallCount += 1;
-      return Response.json({
-        type: 'control.api-key.verify.result',
-        result: {
-          record: buildApiKeyRecord(body.apiKeyId ?? '')
-        }
-      });
-    }
-
-    if (body.type === 'control.api-key.touch') {
-      apiKeyTouchCallCount += 1;
-      return Response.json({
-        type: 'control.api-key.touch.result',
-        result: { ok: true }
-      });
-    }
-
-    if (body.type === 'control.api-key.create') {
-      return Response.json({
-        type: 'control.api-key.create.result',
-        result: {
-          apiKey: 'sfk_created-key.secret',
-          record: {
-            id: 'created-key',
-            projectSlug: null,
-            name: 'Created key',
-            scopes: ['admin:keys'],
-            createdAt: '2026-04-26T00:00:00.000Z',
-            revokedAt: null,
-            lastUsedAt: null
-          }
-        }
-      });
-    }
-
-    if (body.type === 'control.api-keys.list') {
-      return Response.json({
-        type: 'control.api-keys.list.result',
-        result: {
-          data: [
-            {
-              id: 'project-key',
-              projectSlug: body.projectSlug ?? 'demo',
-              name: 'Demo key',
-              scopes: ['table:create', 'table:read'],
-              createdAt: '2026-04-26T00:00:00.000Z',
-              revokedAt: null,
-              lastUsedAt: null
-            }
-          ]
-        }
-      });
-    }
-
-    if (body.type === 'control.api-key.get') {
-      return Response.json({
-        type: 'control.api-key.get.result',
-        result: {
-          record: buildApiKeyRecord(body.apiKeyId ?? '')
-        }
-      });
-    }
-
-    if (body.type === 'control.spreadsheet-watches.register') {
-      return Response.json({
-        type: 'control.spreadsheet-watches.register.result',
-        result: {
-          data: [
-            {
-              spreadsheetId: 'sheet-1',
-              googleCredentialRef: 'default',
-              channelId: 'channel-1',
-              resourceId: 'resource-1',
-              resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
-              expirationAt: '2026-05-03T00:00:00.000Z',
-              lastWatchError: null,
-              lastNotificationAt: null,
-              pendingChangedAt: null,
-              debounceUntil: null,
-              lastReindexStartedAt: null,
-              lastReindexCompletedAt: null,
-              lastReindexError: null,
-              projectSlugs: ['demo']
-            }
-          ]
-        }
-      });
-    }
-
-    if (body.type === 'control.spreadsheet-watches.list') {
-      return Response.json({
-        type: 'control.spreadsheet-watches.list.result',
-        result: {
-          data: [
-            {
-              spreadsheetId: 'sheet-1',
-              googleCredentialRef: 'default',
-              channelId: 'channel-1',
-              resourceId: 'resource-1',
-              resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
-              expirationAt: '2026-05-03T00:00:00.000Z',
-              lastWatchError: null,
-              lastNotificationAt: '2026-04-26T00:00:00.000Z',
-              pendingChangedAt: null,
-              debounceUntil: null,
-              lastReindexStartedAt: null,
-              lastReindexCompletedAt: '2026-04-26T00:00:10.000Z',
-              lastReindexError: null,
-              projectSlugs: ['demo']
-            }
-          ]
-        }
-      });
-    }
-
-    if (body.type === 'control.spreadsheet-watches.retry-advice.list') {
-      return Response.json({
-        type: 'control.spreadsheet-watches.retry-advice.list.result',
-        result: {
-          data: [
-            {
-              spreadsheetId: 'sheet-1',
-              status: 'cooldown-recommended',
-              currentWatchExpirationAt: null,
-              lastKnownStoppedAt: '2026-05-01T18:00:00.000Z',
-              lastKnownExpirationAt: '2026-05-02T17:37:46.000Z',
-              safeRetryAt: '2026-05-02T17:52:46.000Z',
-              note: 'Wait until after the last known watch expiration plus a short grace window before re-registering.',
-              projectSlugs: ['demo']
-            }
-          ]
-        }
-      });
-    }
-
-    if (body.type === 'control.spreadsheet-watches.stop') {
-      return Response.json({
-        type: 'control.spreadsheet-watches.stop.result',
-        result: {
-          data: [
-            {
-              spreadsheetId: 'sheet-1',
-              googleCredentialRef: 'default',
-              channelId: 'channel-1',
-              resourceId: 'resource-1',
-              resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
-              expirationAt: '2026-05-03T00:00:00.000Z',
-              lastWatchError: null,
-              lastNotificationAt: '2026-04-26T00:00:00.000Z',
-              pendingChangedAt: null,
-              debounceUntil: null,
-              lastReindexStartedAt: null,
-              lastReindexCompletedAt: '2026-04-26T00:00:10.000Z',
-              lastReindexError: null,
-              projectSlugs: ['demo']
-            }
-          ]
-        }
-      });
-    }
-
-    if (body.type === 'control.spreadsheet-watch.notify' && options?.controlSpreadsheetWatchNotifyUnexpectedResponse === true) {
-      const response = {
-        type: 'control.project.upsert.result',
-        result: { ok: true }
-      } satisfies ControlPlaneDoResponse;
-      return Response.json(response);
-    }
-
-    if (body.type === 'control.spreadsheet-watch.notify') {
-      return Response.json({
-        type: 'control.spreadsheet-watch.notify.result',
-        result: {
-          accepted: true,
-          spreadsheetId: 'sheet-1',
-          debounceUntil: '2026-04-26T00:00:30.000Z'
-        }
-      });
-    }
-
-    if (body.type === 'control.projects.list' && options?.controlProjectsListUnexpectedResponse === true) {
-      const response = {
-        type: 'control.project.upsert.result',
-        result: { ok: true }
-      } satisfies ControlPlaneDoResponse;
-      return Response.json(response);
-    }
-
-    return Response.json({
-      type: 'control.projects.list.result',
-      result: {
-        data: [
-          {
-            slug: 'demo',
-            name: 'Demo',
-            spreadsheetId: 'sheet-1',
-            googleCredentialRef: 'default',
-            tableCount: 2,
-            updatedAt: '2026-04-26T00:00:00.000Z'
-          }
-        ]
-      }
-    });
-  });
-
-  const project = new FakeDurableObjectNamespace(() => async (request) => {
-    const body = (await request.json()) as {
-      type: string;
-      projectSlug?: string;
-      tableSlug?: string;
-      tab?: string;
-      headerRow?: number;
-      allowExisting?: boolean;
-      input?: {
-        slug?: string;
-        tableSlug?: string;
-      };
-    };
-    projectRequests.push(body.type);
-    durableObjectRequests.push(body.type);
-    const requestUrl = new URL(request.url);
-    const table = {
-      projectSlug: 'demo',
-      tableSlug: 'users',
-      sheetTabName: 'Users',
-      idColumn: '_id',
-      indexedFields: ['_id'],
-      readOnlyFields: [],
-      fieldRules: {},
-      headerRow: 1,
-      dataStartRow: 2,
-      readEnabled: true,
-      createEnabled: true,
-      updateEnabled: true,
-      deleteEnabled: true,
-      cacheTtlSeconds: options?.tableCacheTtlSeconds ?? 15,
-      createdAt: '2026-04-26T00:00:00.000Z',
-      updatedAt: '2026-04-26T00:00:00.000Z'
-    };
-    const resolvedConfig = {
-      ...resolvedTableConfigSnapshot,
-      cacheTtlSeconds: table.cacheTtlSeconds
-    };
-
-    if (body.type === 'project.create') {
-      if (body.input?.slug === 'demo' && body.allowExisting !== true && requestUrl.searchParams.get('upsert') !== 'true') {
-        return Response.json({
-          error: {
-            code: 'CONFLICT',
-            message: 'Project demo already exists.',
-            details: {
-              projectSlug: 'demo'
-            }
-          }
-        }, { status: 409 });
-      }
-
-      return Response.json({
-        type: 'project.create.result',
-        result: {
-          created: !(body.allowExisting === true && body.input?.slug === 'demo'),
-          data: {
-            project: {
-              slug: body.input?.slug ?? 'demo',
-              name: 'Demo',
-              spreadsheetId: 'sheet-1',
-              googleCredentialRef: 'default',
-              createdAt: '2026-04-26T00:00:00.000Z',
-              updatedAt: '2026-04-26T00:00:00.000Z',
-              defaultAuthMode: options?.defaultAuthMode ?? 'private'
-            },
-            tables: [table]
-          }
-        }
-      });
-    }
-
-    if (body.type === 'project.get') {
-      return Response.json({
-        type: 'project.get.result',
-        result: {
-          project: {
-            slug: 'demo',
-            name: 'Demo',
-            spreadsheetId: 'sheet-1',
-            googleCredentialRef: 'default',
-            createdAt: '2026-04-26T00:00:00.000Z',
-            updatedAt: '2026-04-26T00:00:00.000Z',
-            defaultAuthMode: options?.defaultAuthMode ?? 'private'
-          },
-          tables: [table]
-        }
-      });
-    }
-
-    if (body.type === 'project.access.get') {
-      if (options?.projectAccessStatus === 404) {
-        return Response.json(
-          {
-            error: {
-              code: 'NOT_FOUND',
-              message: 'Project demo was not found.',
-              details: null
-            }
-          },
-          { status: 404 }
-        );
-      }
-
-      if (options?.projectAccessStatus === 500) {
-        return new Response('project access failed', { status: 500 });
-      }
-
-      return Response.json({
-        type: 'project.access.get.result',
-        result: {
-          data: {
-            slug: 'demo',
-            defaultAuthMode: options?.defaultAuthMode ?? 'private'
-          }
-        }
-      });
-    }
-
-    if (body.type === 'project.table.resolve') {
-      return Response.json({
-        type: 'project.table.resolve.result',
-        result: {
-          data: {
-            project: {
-              slug: 'demo',
-              spreadsheetId: 'sheet-1',
-              googleCredentialRef: 'default',
-              defaultAuthMode: options?.defaultAuthMode ?? 'private'
-            },
-            table,
-            resolvedConfig
-          }
-        }
-      });
-    }
-
-    if (body.type === 'project.spreadsheet.tabs.list') {
-      return Response.json({
-        type: 'project.spreadsheet.tabs.list.result',
-        result: {
-          data: [
-            {
-              title: 'Users',
-              sheetGid: 11
-            },
-            {
-              title: 'Archive',
-              sheetGid: 12
-            }
-          ]
-        }
-      });
-    }
-
-    if (body.type === 'project.spreadsheet.tab.inspect') {
-      return Response.json({
-        type: 'project.spreadsheet.tab.inspect.result',
-        result: {
-          data: {
-            tab: {
-              title: body.tab ?? 'Users',
-              sheetGid: 11
-            },
-            headerRow: body.headerRow ?? 1,
-            headers: ['_id', 'email', 'status']
-          }
-        }
-      });
-    }
-
-    if (body.type === 'project.table.create') {
-      if (body.input?.tableSlug === 'users' && body.allowExisting !== true && requestUrl.searchParams.get('upsert') !== 'true') {
-        return Response.json({
-          error: {
-            code: 'CONFLICT',
-            message: 'Table demo/users already exists.',
-            details: {
-              projectSlug: 'demo',
-              tableSlug: 'users'
-            }
-          }
-        }, { status: 409 });
-      }
-
-      return Response.json({
-        type: 'project.table.create.result',
-        result: {
-          created: !(body.allowExisting === true && body.input?.tableSlug === 'users'),
-          data: table
-        }
-      });
-    }
-
-    if (body.type === 'project.table.delete') {
-      return Response.json({
-        type: 'project.table.delete.result',
-        result: {
-          ok: true,
-          deletedTable: body.tableSlug ?? 'users'
-        }
-      });
-    }
-
-    if (body.type === 'project.delete') {
-      return Response.json({
-        type: 'project.delete.result',
-        result: {
-          ok: true,
-          deletedProject: body.projectSlug ?? 'demo',
-          deletedTables: body.projectSlug === 'missing-project' ? [] : ['users']
-        }
-      });
-    }
-
-    if (body.type === 'project.table.list') {
-      if (body.projectSlug === 'missing-project') {
-        return Response.json({
-          error: {
-            code: 'NOT_FOUND',
-            message: 'Project missing-project was not found.',
-            details: {
-              projectSlug: 'missing-project'
-            }
-          }
-        }, { status: 404 });
-      }
-
-      return Response.json({
-        type: 'project.table.list.result',
-        result: {
-          data: [table]
-        }
-      });
-    }
-
-    return Response.json({
-      type: 'project.table.list.result',
-      result: {
-        data: [table]
-      }
-    });
-  });
-
-  const table = new FakeDurableObjectNamespace(() => async (request) => {
-    const body = (await request.json()) as {
-      type: string;
-      input?: { values?: Record<string, unknown> };
-      query?: unknown;
-      resolvedConfig?: Record<string, unknown>;
-      requestContext?: Record<string, unknown>;
-      rowId?: string;
-    };
-    tableRequests.push({
-      type: body.type,
-      resolvedConfig: body.resolvedConfig,
-      requestContext: body.requestContext
-    });
-    durableObjectRequests.push(body.type);
-    if (options?.tableUnexpectedResponseFor === body.type) {
-      const response = {
-        type: 'table.cache.clear.result',
-        result: { ok: true }
-      } satisfies TableDoResponse;
-      return Response.json(response);
-    }
-
-
-    if (body.type === 'table.row.create') {
-      return Response.json({
-        type: 'table.row.create.result',
-        result: {
-          data: {
-            id: 'row-1',
-            rowNumber: 2,
-            values: body.input?.values ?? {}
-          },
-          ignoredKeys: []
-        }
-      });
-    }
-
-    if (body.type === 'table.row.update') {
-      return Response.json({
-        type: 'table.row.update.result',
-        result: {
-          data: {
-            id: body.rowId ?? 'row-1',
-            rowNumber: 2,
-            values: body.input?.values ?? {}
-          },
-          ignoredKeys: []
-        }
-      });
-    }
-
-    if (body.type === 'table.row.delete') {
-      return Response.json({
-        type: 'table.row.delete.result',
-        result: {
-          ok: true,
-          deletedId: body.rowId ?? 'row-1'
-        }
-      });
-    }
-
-    if (body.type === 'table.cache.get') {
-      if (options?.tableCacheGetUnexpectedResponse) {
-        const response = {
-          type: 'table.cache.clear.result',
-          result: { ok: true }
-        } satisfies TableDoResponse;
-        return Response.json(response);
-      }
-
-      const stale = options?.tableCacheStale ?? false;
-      return Response.json({
-        type: 'table.cache.get.result',
-        result: {
-          data: {
-            status: options?.tableCacheStatus ?? 'ready',
-            cacheTtlSeconds: options?.tableCacheTtlSeconds ?? 15,
-            stale,
-            staleReason: options?.tableCacheStaleReason ?? (stale ? 'ttl-expired' : 'fresh'),
-            rowCount: 2,
-            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
-            lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
-            lastSyncError: null,
-            validation: {
-              status: 'ok',
-              issueCount: 0,
-              issues: [],
-              validatedAt: '2026-04-26T00:00:02.000Z'
-            },
-            externalChange: {
-              pending: options?.tableExternalChangeDebounceUntil !== undefined,
-              lastChangedAt: options?.tableExternalChangeDebounceUntil === undefined ? null : '2026-04-26T00:00:00.000Z',
-              debounceUntil: options?.tableExternalChangeDebounceUntil ?? null,
-              lastAutoReindexAt: null
-            }
-          }
-        }
-      });
-    }
-
-    if (body.type === 'table.cache.refresh') {
-      return Response.json({
-        type: 'table.cache.refresh.result',
-        result: {
-          ok: true,
-          rowCount: 3,
-          cache: {
-            status: 'ready',
-            cacheTtlSeconds: 15,
-            stale: false,
-            staleReason: 'fresh',
-            rowCount: 3,
-            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
-            lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
-            lastSyncError: null,
-            validation: {
-              status: 'ok',
-              issueCount: 0,
-              issues: [],
-              validatedAt: '2026-04-26T00:00:03.000Z'
-            },
-            externalChange: {
-              pending: false,
-              lastChangedAt: null,
-              debounceUntil: null,
-              lastAutoReindexAt: null
-            }
-          }
-        }
-      });
-    }
-
-    if (body.type === 'table.reindex') {
-      return Response.json({
-        type: 'table.reindex.result',
-        result: {
-          ok: true,
-          rowCount: 3,
-          cache: {
-            status: 'ready',
-            cacheTtlSeconds: 15,
-            stale: false,
-            staleReason: 'fresh',
-            rowCount: 3,
-            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
-            lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
-            lastSyncError: null,
-            validation: {
-              status: 'ok',
-              issueCount: 0,
-              issues: [],
-              validatedAt: '2026-04-26T00:00:03.000Z'
-            },
-            externalChange: {
-              pending: false,
-              lastChangedAt: null,
-              debounceUntil: null,
-              lastAutoReindexAt: null
-            }
-          }
-        }
-      });
-    }
-
-    if (body.type === 'table.cache.clear') {
-      if (options?.tableCacheClearStatus === 503) {
-        return Response.json({
-          error: {
-            code: 'SERVICE_UNAVAILABLE',
-            message: 'Cache clear unavailable.',
-            details: null
-          }
-        }, { status: 503 });
-      }
-
-      return Response.json({
-        type: 'table.cache.clear.result',
-        result: {
-          ok: true
-        }
-      });
-    }
-
-    if (body.type === 'table.rows.list') {
-      if (options?.tableRowsListStatus === 503) {
-        return Response.json({
-          error: {
-            code: 'SERVICE_UNAVAILABLE',
-            message: 'Cached rows are temporarily unavailable.',
-            details: null
-          }
-        }, { status: 503 });
-      }
-
-      return Response.json({
-        type: 'table.rows.list.result',
-        result: {
-          data: body.query ? [{ id: 'row-1', rowNumber: 2, values: { matched: true } }] : [],
-          nextCursor: null
-        }
-      });
-    }
-
-    if (body.type === 'table.schema.get') {
-      return Response.json({
-        type: 'table.schema.get.result',
-        result: {
-          data: {
-            fields: [
-              {
-                name: '_id',
-                inferredType: 'string',
-                nullable: false
-              }
-            ],
-            inferredAt: '2026-04-26T00:00:00.000Z'
-          }
-        }
-      });
-    }
-
-    return Response.json({
-      type: 'table.row.get.result',
-      result: {
-        data: {
-          id: 'row-1',
-          rowNumber: 2,
-          values: {}
-        }
-      }
-    });
-  });
-
-  const rateLimit = new FakeDurableObjectNamespace((name) => async (request) => {
-    const body = (await request.json()) as { key: string };
-    rateLimitRequests.push({ name, key: body.key });
-    return Response.json({
-      type: 'rate-limit.check.result',
-      result: {
-        allowed: options?.rateLimitAllowed ?? true,
-        remaining: options?.rateLimitAllowed === false ? 0 : 299,
-        resetAtMs: Date.parse('2026-04-26T00:01:00.000Z')
-      }
-    });
-  });
-
-  const env: Env = {
-    CONTROL_PLANE_DO: controlPlane as never,
-    PROJECT_DO: project as never,
-    TABLE_DO: table as never,
-    RATE_LIMIT_DO: rateLimit as never,
-    GOOGLE_CLIENT_EMAIL: options?.googleClientEmail ?? 'service@example.com',
-    GOOGLE_PRIVATE_KEY: options?.googlePrivateKey ?? 'private-key',
-    GOOGLE_CREDENTIALS_JSON: options?.googleCredentialsJson,
-    GOOGLE_DRIVE_WEBHOOK_SECRET: 'drive-secret',
-    ADMIN_BEARER_TOKEN: options?.adminBearerToken ?? 'secret',
-    RATE_LIMIT_MAX_REQUESTS: '300',
-    RATE_LIMIT_WINDOW_SECONDS: '60',
-    SHEETFLARE_ALLOWED_ORIGINS: options?.allowedOrigins
-  };
-
-  const fetchCachedTableRead = async (
-    props: CachedTableReadProps,
-    request: Request,
-    init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]
-  ) => {
-    cachedReadRequests.push({
-      url: request.url,
-      method: request.method,
-      authorization: request.headers.get('authorization'),
-      cacheKey: init?.cf?.cacheKey ?? null
-    });
-    const response = await createCachedTableReadsHarness(env, {
-      props,
-      purgeCalls: cachedReadPurgeCalls,
-      purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
-    }).entrypoint.fetch(request);
-    for (const [name, value] of Object.entries(options?.cachedReadResponseHeaders ?? {})) {
-      response.headers.set(name, value);
-    }
-    return response;
-  };
-  workerExports.CachedTableReads = Object.assign(
-    ({ props }: { props: CachedTableReadProps }) => ({
-      fetch: (request: Request, init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]) =>
-        fetchCachedTableRead(props, request, init)
-    }),
-    {
-      fetch: (request: Request, init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]) =>
-        fetchCachedTableRead(defaultCachedTableReadProps, request, init),
-      async invalidateProject(projectSlug: string) {
-        await createCachedTableReadsHarness(env, {
-          purgeCalls: cachedReadPurgeCalls,
-          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
-        }).entrypoint.invalidateProject(projectSlug);
-      },
-      async invalidateTable(projectSlug: string, tableSlug: string) {
-        await createCachedTableReadsHarness(env, {
-          purgeCalls: cachedReadPurgeCalls,
-          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
-        }).entrypoint.invalidateTable(projectSlug, tableSlug);
-      },
-      async invalidateRow(projectSlug: string, tableSlug: string, rowId: string) {
-        await createCachedTableReadsHarness(env, {
-          purgeCalls: cachedReadPurgeCalls,
-          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
-        }).entrypoint.invalidateRow(projectSlug, tableSlug, rowId);
-      }
-    }
-  );
-
-  Object.defineProperty(env, '__rateLimitRequests', {
-    value: rateLimitRequests,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__tableRequests', {
-    value: tableRequests,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__projectRequests', {
-    value: projectRequests,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__controlPlaneRequests', {
-    value: controlPlaneRequests,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__durableObjectRequests', {
-    value: durableObjectRequests,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__cachedReadRequests', {
-    value: cachedReadRequests,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__cachedReadPurgeCalls', {
-    value: cachedReadPurgeCalls,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__verifyApiKeyCallCount', {
-    get: () => verifyApiKeyCallCount,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__apiKeyTouchCallCount', {
-    get: () => apiKeyTouchCallCount,
-    enumerable: false
-  });
-
-  return env;
-}
-
-type CachePurgeCall = Parameters<CacheContext['purge']>[0];
-
-class FakeSpan implements Span {
-  get isTraced() {
-    return false;
-  }
-
-  setAttribute() {}
-
-  end() {}
-}
-
-function createTracing(): Tracing {
-  return {
-    Span: FakeSpan,
-    enterSpan<T, A extends unknown[]>(
-      _name: string,
-      callback: (span: Span, ...args: A) => T,
-      ...args: A
-    ): T {
-      return callback(new FakeSpan(), ...args);
-    },
-    startActiveSpan<T, A extends unknown[]>(
-      _name: string,
-      callback: (span: Span, ...args: A) => T,
-      ...args: A
-    ): T {
-      return callback(new FakeSpan(), ...args);
-    }
-  };
-}
-
-function createCachedTableReadsHarness(
-  env: Env = createEnv(),
-  options?: {
-    props?: CachedTableReadProps;
-    purgeCalls?: CachePurgeCall[];
-    purgeShouldFail?: boolean;
-    purgeResultShouldFail?: boolean;
-  }
-): { entrypoint: CachedTableReads; purgeCalls: CachePurgeCall[] } {
-  const purgeCalls = options?.purgeCalls ?? [];
-  const ctx: ExecutionContext<CachedTableReadProps> = {
-    waitUntil(promise: Promise<unknown>) {
-      void promise;
-    },
-    passThroughOnException() {},
-    props: options?.props ?? defaultCachedTableReadProps,
-    cache: {
-      async purge(purgeOptions) {
-        purgeCalls.push(purgeOptions);
-        if (options?.purgeShouldFail === true) {
-          throw new Error('Workers Cache purge failed for test.');
-        }
-        if (options?.purgeResultShouldFail === true) {
-          return {
-            success: false,
-            errors: [
-              {
-                code: 1000,
-                message: 'Workers Cache purge was rejected for test.'
-              }
-            ]
-          };
-        }
-        return {
-          success: true,
-          errors: []
-        };
-      }
-    },
-    tracing: createTracing()
-  };
-
-  return {
-    entrypoint: new CachedTableReads(ctx, env),
-    purgeCalls
-  };
-}
-
-function getOnlyCachedReadRequest(env: { __cachedReadRequests: CachedReadRequestRecord[] }) {
-  expect(env.__cachedReadRequests).toHaveLength(1);
-  const [request] = env.__cachedReadRequests;
-  if (!request) {
-    throw new Error('Expected one cached read request.');
-  }
-  return request;
-}
-
-function requireCacheKey(record: CachedReadRequestRecord) {
-  expect(record.cacheKey).toEqual(expect.any(String));
-  if (record.cacheKey === null) {
-    throw new Error('Expected cached read request to include cf.cacheKey.');
-  }
-  return record.cacheKey;
-}
-
-
-function readCacheTagHeader(response: Response) {
-  const value = response.headers.get('cache-tag');
-  expect(value).toEqual(expect.any(String));
-  if (value === null) {
-    throw new Error('Expected Cache-Tag header.');
-  }
-  return value.split(',').map((tag) => tag.trim()).filter((tag) => tag.length > 0);
-}
-
-function expectCachedReadPurgeCalls(
-  env: { __cachedReadPurgeCalls: CachePurgeCall[] },
-  expectedTags: string[][]
-) {
-  expect(env.__cachedReadPurgeCalls).toEqual(
-    expectedTags.map((tags) => ({
-      tags
-    }))
-  );
-}
-
-function expectSuccessfulCachedReadHeaders(
-  response: Response,
-  options: { edgeCacheControl: string; tags: string[] }
-) {
-  expect(response.headers.get('cache-control')).toBe('private, no-store');
-  expect(response.headers.get('cloudflare-cdn-cache-control')).toBe(options.edgeCacheControl);
-  expect(readCacheTagHeader(response)).toEqual(options.tags);
-}
-
-function expectDefaultGatewayNoStore(response: Response) {
-  expect(response.headers.get('cache-control')).toBe('no-store');
-  expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
-  expect(response.headers.get('cache-tag')).toBeNull();
-}
-
-function expectCachedDataReadGatewayHeaders(response: Response) {
-  expect(response.headers.get('cache-control')).toBe('private, no-store');
-  expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
-  expect(response.headers.get('cache-tag')).toBeNull();
-}
-
-function expectNoCredentialMaterial(value: string) {
-  const lowerValue = value.toLowerCase();
-  expect(lowerValue).not.toContain('authorization');
-  expect(lowerValue).not.toContain('bearer');
-  expect(value).not.toContain('sfk_project-key.any-secret');
-  expect(value).not.toContain('project-key');
-  expect(value).not.toContain('any-secret');
-}
 
 describe('CachedTableReads', () => {
+  beforeEach(() => {
+    // Edge freshness counts from the table's last sync, so a test that asserts an exact max-age stands at the instant
+    // the canned table completed its sync.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.parse(cannedTableSyncCompletedAt));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('sets client-safe and Workers Cache headers for list rows', async () => {
     const { entrypoint } = createCachedTableReadsHarness(createEnv({ tableCacheTtlSeconds: 42 }));
 
@@ -1239,52 +155,24 @@ describe('CachedTableReads', () => {
     });
   });
 
-  it('caps Workers Cache max-age to the external-change debounce window', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-04-26T00:00:00.000Z'));
+  it.each([
+    { name: 'inside the debounce window', debounceUntil: '2026-04-26T00:00:08.000Z' },
+    { name: 'after the debounce deadline passed without a reindex', debounceUntil: '2020-01-01T00:00:00.000Z' }
+  ])('never stores Workers Cache entries while an external change is pending $name', async ({ debounceUntil }) => {
+    const { entrypoint } = createCachedTableReadsHarness(createEnv({
+      tableCacheTtlSeconds: 60,
+      tableExternalChangeDebounceUntil: debounceUntil
+    }));
 
-    try {
-      const { entrypoint } = createCachedTableReadsHarness(createEnv({
-        tableCacheTtlSeconds: 60,
-        tableExternalChangeDebounceUntil: '2026-04-26T00:00:08.000Z'
-      }));
+    const response = await entrypoint.fetch(
+      new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10')
+    );
 
-      const response = await entrypoint.fetch(
-        new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10')
-      );
-
-      expect(response.status).toBe(200);
-      expectSuccessfulCachedReadHeaders(response, {
-        edgeCacheControl: 'public, max-age=8, stale-if-error=0',
-        tags: ['project:demo', 'table:demo:users']
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('sets Workers Cache no-store when less than one debounce second remains', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-04-26T00:00:07.250Z'));
-
-    try {
-      const { entrypoint } = createCachedTableReadsHarness(createEnv({
-        tableCacheTtlSeconds: 60,
-        tableExternalChangeDebounceUntil: '2026-04-26T00:00:08.000Z'
-      }));
-
-      const response = await entrypoint.fetch(
-        new Request('https://cached.sheetflare.internal/internal/cache/v1/projects/demo/tables/users/rows?limit=10')
-      );
-
-      expect(response.status).toBe(200);
-      expectSuccessfulCachedReadHeaders(response, {
-        edgeCacheControl: 'no-store',
-        tags: ['project:demo', 'table:demo:users']
-      });
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(response.status).toBe(200);
+    expectSuccessfulCachedReadHeaders(response, {
+      edgeCacheControl: 'no-store',
+      tags: ['project:demo', 'table:demo:users']
+    });
   });
 
   it('sets Workers Cache no-store when cache status is stale or not ready', async () => {
@@ -1369,10 +257,10 @@ describe('CachedTableReads', () => {
     expect(env.__tableRequests).toEqual([]);
   });
 
-  it('purges the project tag when invalidating a project', async () => {
+  it('purges the project tag for a project target', async () => {
     const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
 
-    await entrypoint.invalidateProject('demo');
+    await entrypoint.purge([{ kind: 'project', projectSlug: 'demo' }]);
 
     expect(purgeCalls).toEqual([
       {
@@ -1381,10 +269,10 @@ describe('CachedTableReads', () => {
     ]);
   });
 
-  it('purges the table tag when invalidating a table', async () => {
+  it('purges the table tag for a table target', async () => {
     const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
 
-    await entrypoint.invalidateTable('demo', 'users');
+    await entrypoint.purge([{ kind: 'table', projectSlug: 'demo', tableSlug: 'users' }]);
 
     expect(purgeCalls).toEqual([
       {
@@ -1393,18 +281,12 @@ describe('CachedTableReads', () => {
     ]);
   });
 
-  it('rejects table invalidation when Workers Cache returns a failed purge result', async () => {
-    const { entrypoint } = createCachedTableReadsHarness(createEnv(), {
-      purgeResultShouldFail: true
-    });
-
-    await expect(entrypoint.invalidateTable('demo', 'users')).rejects.toThrow();
-  });
-
-  it('purges table and encoded row tags when invalidating a row', async () => {
+  it('purges table and encoded row tags for a row target', async () => {
     const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
 
-    await entrypoint.invalidateRow('demo', 'users', 'row/1:alpha,beta?sheet#frag%space value');
+    await entrypoint.purge([
+      { kind: 'row', projectSlug: 'demo', tableSlug: 'users', rowId: 'row/1:alpha,beta?sheet#frag%space value' }
+    ]);
 
     expect(purgeCalls).toEqual([
       {
@@ -1420,7 +302,7 @@ describe('CachedTableReads', () => {
     const longRowId = 'x'.repeat(1025);
     const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
 
-    await entrypoint.invalidateRow('demo', 'users', longRowId);
+    await entrypoint.purge([{ kind: 'row', projectSlug: 'demo', tableSlug: 'users', rowId: longRowId }]);
 
     expect(purgeCalls).toEqual([
       {
@@ -1428,11 +310,67 @@ describe('CachedTableReads', () => {
       }
     ]);
   });
+
+  it('sends the tags of several targets in one purge request, once each', async () => {
+    const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
+
+    await entrypoint.purge([
+      { kind: 'project', projectSlug: 'alpha' },
+      { kind: 'row', projectSlug: 'alpha', tableSlug: 'users', rowId: '1' },
+      { kind: 'row', projectSlug: 'alpha', tableSlug: 'users', rowId: '2' },
+      { kind: 'project', projectSlug: 'alpha' }
+    ]);
+
+    expect(purgeCalls).toEqual([
+      {
+        tags: ['project:alpha', 'table:alpha:users', 'row:alpha:users:1', 'row:alpha:users:2']
+      }
+    ]);
+  });
+
+  it('splits more than 100 tags into purge requests of at most 100', async () => {
+    const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
+    const targets = Array.from({ length: 250 }, (_, index) => ({ kind: 'project' as const, projectSlug: `project-${index}` }));
+
+    await entrypoint.purge(targets);
+
+    expect(purgeCalls.map((call) => call.tags?.length)).toEqual([100, 100, 50]);
+    expect(purgeCalls.flatMap((call) => call.tags ?? [])).toEqual(targets.map((target) => `project:${target.projectSlug}`));
+  });
+
+  it('makes no purge request when there is nothing to purge', async () => {
+    const { entrypoint, purgeCalls } = createCachedTableReadsHarness();
+
+    await entrypoint.purge([]);
+
+    expect(purgeCalls).toEqual([]);
+  });
+
+  it('rejects when Workers Cache returns a failed purge result', async () => {
+    const { entrypoint } = createCachedTableReadsHarness(createEnv(), {
+      purgeResultShouldFail: true
+    });
+
+    await expect(entrypoint.purge([{ kind: 'table', projectSlug: 'demo', tableSlug: 'users' }])).rejects.toThrow(
+      'Workers Cache purge was unsuccessful: 1000: Workers Cache purge was rejected for test.'
+    );
+  });
+
+  it('stops after the first rejected purge request instead of spending more of the purge budget', async () => {
+    const { entrypoint, purgeCalls } = createCachedTableReadsHarness(createEnv(), {
+      workersCache: new WorkersCacheEmulator({ purgeBurst: 1 })
+    });
+    const targets = Array.from({ length: 250 }, (_, index) => ({ kind: 'project' as const, projectSlug: `project-${index}` }));
+
+    await expect(entrypoint.purge(targets)).rejects.toThrow('Workers Cache purge was unsuccessful: 429');
+
+    expect(purgeCalls).toHaveLength(2);
+  });
 });
 
 describe('api routes', () => {
   beforeEach(() => {
-    __resetRecentApiKeyTouchesForTests();
+    __resetGatewayStateForTests();
   });
 
   it('applies no-store to default-gateway dynamic and privileged routes', async () => {
@@ -1842,78 +780,12 @@ describe('api routes', () => {
         resourceState: 'update'
       })
     }));
-    expect(env.__controlPlaneRequests).toContainEqual(expect.objectContaining({
+    expect(env.__controlPlaneRequests).not.toContainEqual(expect.objectContaining({
       type: 'control.projects.list'
     }));
     expectCachedReadPurgeCalls(env, [
       ['project:demo']
     ]);
-  });
-
-  it('returns a controlled service unavailable error when an accepted Drive notification gets an unexpected project list response', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const app = createApp();
-    const path = '/v1/system/google/drive/notifications';
-
-    try {
-      const response = await app.request(
-        path,
-        {
-          method: 'POST',
-          headers: {
-            'x-goog-channel-id': 'channel-1',
-            'x-goog-resource-id': 'resource-1',
-            'x-goog-resource-state': 'update',
-            'x-goog-message-number': '2',
-            'x-goog-channel-token': 'drive-secret'
-          }
-        },
-        createEnv({ controlProjectsListUnexpectedResponse: true })
-      );
-
-      expect(response.status).toBe(503);
-      const responseBody: unknown = await response.json();
-      expect(responseBody).toEqual({
-        error: {
-          code: 'SERVICE_UNAVAILABLE',
-          message: 'Unexpected control plane projects list response.',
-          details: null
-        }
-      });
-
-      const requestId = response.headers.get('x-request-id');
-      expect(requestId).toEqual(expect.any(String));
-      if (requestId === null) {
-        throw new Error('Expected the response to include a request ID.');
-      }
-      const matchingEvents = errorSpy.mock.calls.flatMap(([errorLog]) => {
-        if (typeof errorLog !== 'string') {
-          return [];
-        }
-        try {
-          const event: unknown = JSON.parse(errorLog);
-          const identity = z.object({
-            event: z.literal('request.error'),
-            path: z.literal(path),
-            requestId: z.literal(requestId)
-          }).safeParse(event);
-          return identity.success ? [event] : [];
-        } catch {
-          return [];
-        }
-      });
-      expect(matchingEvents).toHaveLength(1);
-      expect(matchingEvents[0]).toMatchObject({
-        event: 'request.error',
-        method: 'POST',
-        path,
-        requestId,
-        errorName: 'ServiceUnavailableError',
-        errorMessage: 'Unexpected control plane projects list response.'
-      });
-    } finally {
-      errorSpy.mockRestore();
-    }
   });
 
   it('returns a controlled service unavailable error before project lookup when a Drive notification gets an unexpected notify response', async () => {
@@ -2010,6 +882,65 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  it('throttles repeated invalid Google Drive webhook tokens per client address', async () => {
+    const app = createApp();
+    const env = createEnv({ rateLimitFixedWindow: true });
+    env.RATE_LIMIT_MAX_REQUESTS = '100';
+    const budget = 100;
+    const blockedIp = '203.0.113.8';
+    const otherIp = '203.0.113.9';
+    const probes = env as Env & { __rateLimitRequests: Array<{ name: string; key: string }> };
+
+    const notify = (ip: string, token: string) => app.request(
+      '/v1/system/google/drive/notifications',
+      {
+        method: 'POST',
+        headers: {
+          'cf-connecting-ip': ip,
+          'x-goog-channel-id': 'channel-1',
+          'x-goog-resource-id': 'resource-1',
+          'x-goog-resource-state': 'update',
+          'x-goog-channel-token': token
+        }
+      },
+      env
+    );
+
+    for (let attempt = 0; attempt < budget; attempt += 1) {
+      const response = await notify(blockedIp, 'wrong-secret');
+      expect(response.status).toBe(401);
+      await response.arrayBuffer();
+    }
+
+    const limited = await notify(blockedIp, 'wrong-secret');
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get('retry-after')).toMatch(/^[1-9]\d*$/);
+    expect(await limited.json()).toMatchObject({
+      error: {
+        code: 'TOO_MANY_REQUESTS',
+        details: {
+          principal: `system:client:${blockedIp}`,
+          routeFamily: 'system',
+          operationKey: 'webhook-failure'
+        }
+      }
+    });
+
+    const checksAtBlock = probes.__rateLimitRequests.filter((request) => request.key === 'webhook-failure');
+    expect(checksAtBlock).toHaveLength(budget + 1);
+    expect(checksAtBlock.every((request) => request.name === `rate-limit:system:client:${blockedIp}`)).toBe(true);
+
+    const stillLimited = await notify(blockedIp, 'drive-secret');
+    expect(stillLimited.status).toBe(429);
+    expect(stillLimited.headers.get('retry-after')).toMatch(/^[1-9]\d*$/);
+    await stillLimited.arrayBuffer();
+    expect(probes.__rateLimitRequests.filter((request) => request.key === 'webhook-failure')).toHaveLength(budget + 1);
+
+    const otherIpResponse = await notify(otherIp, 'drive-secret');
+    expect(otherIpResponse.status).toBe(204);
+    expect(probes.__rateLimitRequests.filter((request) => request.name === `rate-limit:system:client:${otherIp}`)).toEqual([]);
   });
 
   it('rejects duplicate project creation unless upsert is requested explicitly', async () => {
@@ -2316,7 +1247,7 @@ describe('api routes', () => {
 
   it('reports internal readiness separately from liveness', async () => {
     const app = createApp();
-    const response = await app.request('/ready', {}, createEnv());
+    const response = await app.request('/ready', { headers: { authorization: 'Bearer secret' } }, createEnv());
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
@@ -2405,7 +1336,7 @@ describe('api routes', () => {
 
   it('treats the checked-in placeholder GOOGLE_CLIENT_EMAIL as not configured in /ready', async () => {
     const app = createApp();
-    const response = await app.request('/ready', {}, createEnv({
+    const response = await app.request('/ready', { headers: { authorization: 'Bearer secret' } }, createEnv({
       googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com'
     }));
 
@@ -2431,7 +1362,7 @@ describe('api routes', () => {
 
   it('treats named Google credentials as a healthy readiness source when the default credential is absent', async () => {
     const app = createApp();
-    const response = await app.request('/ready', {}, createEnv({
+    const response = await app.request('/ready', { headers: { authorization: 'Bearer secret' } }, createEnv({
       googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
       googlePrivateKey: '',
       googleCredentialsJson: JSON.stringify({
@@ -2464,7 +1395,7 @@ describe('api routes', () => {
 
   it('accepts documented named Google credential field names in /ready', async () => {
     const app = createApp();
-    const response = await app.request('/ready', {}, createEnv({
+    const response = await app.request('/ready', { headers: { authorization: 'Bearer secret' } }, createEnv({
       googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
       googlePrivateKey: '',
       googleCredentialsJson: JSON.stringify({
@@ -2487,7 +1418,7 @@ describe('api routes', () => {
 
   it('reports invalid named Google credentials distinctly in /ready', async () => {
     const app = createApp();
-    const response = await app.request('/ready', {}, createEnv({
+    const response = await app.request('/ready', { headers: { authorization: 'Bearer secret' } }, createEnv({
       googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
       googlePrivateKey: '',
       googleCredentialsJson: '{"prod":{"client_email":"service@example.com"}}'
@@ -2519,13 +1450,13 @@ describe('api routes', () => {
       '/v1/admin/projects',
       {
         headers: {
-          authorization: 'Bearer sfk_project-admin-key.any-secret'
+          authorization: apiKeys.projectAdmin.authorization
         }
       },
       createEnv()
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
   });
 
   it('creates rows against the table durable object', async () => {
@@ -2537,7 +1468,7 @@ describe('api routes', () => {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         },
         body: JSON.stringify({
           values: {
@@ -2563,7 +1494,7 @@ describe('api routes', () => {
     expect(response.headers.get('x-ratelimit-limit')).toBe('300');
     expect(response.headers.get('x-ratelimit-remaining')).toBe('299');
     expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitOperationKey":"rows.create"'));
-    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitPrincipal":"api-key:project-key"'));
+    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining(`"rateLimitPrincipal":"api-key:${apiKeys.project.id}"`));
   });
 
   it('keeps row mutations on the default route and purges exact cache tags', async () => {
@@ -2693,8 +1624,8 @@ describe('api routes', () => {
     ]);
   });
 
-  it('returns a committed row creation with a warning and structured log when cache invalidation fails', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  it('returns a committed row creation unchanged and only logs when cache invalidation fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const app = createApp();
     const env = createEnv({ cachedReadPurgeShouldFail: true }) as Env & {
       __tableRequests: Array<{ type: string }>;
@@ -2720,7 +1651,7 @@ describe('api routes', () => {
       );
 
       expect(response.status).toBe(201);
-      expect(response.headers.get('x-sheetflare-cache-invalidation')).toBe('failed');
+      expect(response.headers.get('x-sheetflare-cache-invalidation')).toBeNull();
       expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
       expect(response.headers.get('cache-tag')).toBeNull();
       const requestId = response.headers.get('x-request-id');
@@ -2739,13 +1670,13 @@ describe('api routes', () => {
       expectCachedReadPurgeCalls(env, [
         ['table:demo:users']
       ]);
-      expect(errorSpy).toHaveBeenCalledTimes(1);
-      const errorLog = errorSpy.mock.calls[0]?.[0];
-      expect(errorLog).toEqual(expect.any(String));
-      if (typeof errorLog !== 'string') {
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const warnLog = warnSpy.mock.calls[0]?.[0];
+      expect(warnLog).toEqual(expect.any(String));
+      if (typeof warnLog !== 'string') {
         throw new Error('Expected cache invalidation failure to emit a JSON log line.');
       }
-      const event: unknown = JSON.parse(errorLog);
+      const event: unknown = JSON.parse(warnLog);
       expect(event).toEqual({
         event: 'cache.invalidation.failed',
         method: 'POST',
@@ -2755,7 +1686,7 @@ describe('api routes', () => {
         errorMessage: 'Workers Cache purge failed for test.'
       });
     } finally {
-      errorSpy.mockRestore();
+      warnSpy.mockRestore();
     }
   });
 
@@ -2791,16 +1722,15 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(401);
-    expect(env.__projectRequests).toContain('project.access.get');
-    expect(env.__projectRequests).not.toContain('project.table.resolve');
+    expect(env.__projectRequests).toEqual(['project.table.resolve']);
   });
 
   it('does not leak missing project existence on anonymous read routes', async () => {
     const app = createApp();
-    const env = createEnv({ projectAccessStatus: 404 }) as Env & { __projectRequests: string[] };
+    const env = createEnv() as Env & { __projectRequests: string[] };
 
     const response = await app.request(
-      '/v1/projects/demo/tables/users/rows',
+      '/v1/projects/absent/tables/users/rows',
       {},
       env
     );
@@ -2813,8 +1743,7 @@ describe('api routes', () => {
         details: null
       }
     });
-    expect(env.__projectRequests).toContain('project.access.get');
-    expect(env.__projectRequests).not.toContain('project.table.resolve');
+    expect(env.__projectRequests).toEqual(['project.table.resolve']);
   });
 
   it('rejects wrong-project scoped read keys before resolving private table existence', async () => {
@@ -2825,20 +1754,23 @@ describe('api routes', () => {
       '/v1/projects/other/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
     expect(env.__projectRequests).toEqual([]);
   });
 
-  it('preserves internal project access failures instead of rewriting them as unauthorized', async () => {
+  it('preserves internal project lookup failures instead of rewriting them as unauthorized', async () => {
     const app = createApp();
     const response = await app.request('/v1/projects/demo/tables/users/rows', {}, createEnv({
-      projectAccessStatus: 500
+      hooks: {
+        project: ({ body }) =>
+          body.type === 'project.table.resolve' ? new Response('project lookup failed', { status: 500 }) : undefined
+      }
     }));
 
     expect(response.status).toBe(500);
@@ -2869,16 +1801,17 @@ describe('api routes', () => {
     expect(response.headers.get('cache-control')).toBe('private, no-store');
     expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
     expect(response.headers.get('cache-tag')).toBeNull();
-    expect(env.__projectRequests).toContain('project.access.get');
-    expect(env.__projectRequests).toContain('project.table.resolve');
+    expect(env.__projectRequests).toEqual(['project.table.resolve']);
     expect(env.__cachedReadRequests).toHaveLength(1);
     expect(env.__cachedReadRequests[0].authorization).toBeNull();
     expect(env.__cachedReadRequests[0].url).toBe(
       'http://localhost/internal/cache/v1/projects/demo/tables/users/rows'
     );
-    expect(env.__tableRequests[0]).toMatchObject({
-      type: 'table.rows.list'
-    });
+    expect(env.__tableRequests.map((request) => request.type)).toEqual([
+      'table.generation.get',
+      'table.rows.list',
+      'table.cache.get'
+    ]);
   });
 
   it('preserves cached data-read no-store headers without exposing edge cache metadata', async () => {
@@ -2901,7 +1834,7 @@ describe('api routes', () => {
         path,
         {
           headers: {
-            authorization: 'Bearer sfk_project-key.any-secret'
+            authorization: apiKeys.project.authorization
           }
         },
         env
@@ -2931,7 +1864,7 @@ describe('api routes', () => {
         `/v1/projects/demo/tables/users/rows?case=${encodeURIComponent(name)}`,
         {
           headers: {
-            authorization: 'Bearer sfk_project-key.any-secret'
+            authorization: apiKeys.project.authorization
           }
         },
         env
@@ -2945,13 +1878,67 @@ describe('api routes', () => {
     }
   });
 
+  it('returns a cached read body unchanged on a hit and strips unknown fields on a miss', async () => {
+    const app = createApp();
+    const hitBody = '{"data":[],"nextCursor":null,"extra":"kept-on-hit"}';
+    const hitResponse = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          authorization: apiKeys.project.authorization
+        }
+      },
+      createEnv({
+        cachedReadResponseBody: hitBody
+      })
+    );
+
+    expect(hitResponse.status).toBe(200);
+    expect(await hitResponse.text()).toBe(hitBody);
+
+    const missResponse = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          authorization: apiKeys.project.authorization
+        }
+      },
+      createEnv({
+        hooks: {
+          table: ({ body }) => {
+            if (body.type !== 'table.rows.list') {
+              return undefined;
+            }
+
+            return Response.json({
+              type: 'table.rows.list.result',
+              result: {
+                data: [],
+                nextCursor: null,
+                extra: 'stripped-on-miss'
+              }
+            });
+          }
+        }
+      })
+    );
+
+    expect(missResponse.status).toBe(200);
+    const missText = await missResponse.text();
+    expect(missText).not.toContain('stripped-on-miss');
+    expect(JSON.parse(missText)).toEqual({
+      data: [],
+      nextCursor: null
+    });
+  });
+
   it('replaces a downstream cacheable client directive with gateway no-store', async () => {
     const app = createApp();
     const response = await app.request(
       '/v1/projects/demo/tables/users/rows?limit=10',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       createEnv({
@@ -2978,7 +1965,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows?limit=10',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret',
+          authorization: apiKeys.project.authorization,
           origin: 'https://client.example'
         }
       },
@@ -2992,10 +1979,8 @@ describe('api routes', () => {
     const exposedHeaders = response.headers.get('access-control-expose-headers')
       ?.split(',')
       .map((header) => header.trim().toLowerCase());
-    expect(exposedHeaders).toEqual(expect.arrayContaining([
-      'x-sheetflare-cache-status',
-      'x-sheetflare-cache-invalidation'
-    ]));
+    expect(exposedHeaders).toEqual(expect.arrayContaining(['x-sheetflare-cache-status']));
+    expect(exposedHeaders).not.toContain('x-sheetflare-cache-invalidation');
     expect(response.headers.get('vary')).toBe('Origin');
     expect(response.headers.get('x-ratelimit-limit')).toBe('300');
     expect(response.headers.get('x-ratelimit-remaining')).toBe('299');
@@ -3003,7 +1988,7 @@ describe('api routes', () => {
     expect(env.__cachedReadRequests).toHaveLength(1);
     expect(env.__rateLimitRequests).toEqual([
       { name: 'rate-limit:data:client:anonymous', key: 'rows.list' },
-      { name: 'rate-limit:data:api-key:project-key', key: 'rows.list' }
+      { name: `rate-limit:data:api-key:${apiKeys.project.id}`, key: 'rows.list' }
     ]);
   });
 
@@ -3161,7 +2146,7 @@ describe('api routes', () => {
       {
         method: 'POST',
         headers: {
-          authorization: 'Bearer sfk_project-admin-key.any-secret',
+          authorization: apiKeys.projectAdmin.authorization,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -3173,7 +2158,7 @@ describe('api routes', () => {
       createEnv()
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
   });
 
   it('rejects project-scoped key creation that grants scopes the caller does not have', async () => {
@@ -3183,7 +2168,7 @@ describe('api routes', () => {
       {
         method: 'POST',
         headers: {
-          authorization: 'Bearer sfk_project-admin-key.any-secret',
+          authorization: apiKeys.projectAdmin.authorization,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -3195,10 +2180,10 @@ describe('api routes', () => {
       createEnv()
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
     expect(await response.json()).toEqual({
       error: {
-        code: 'UNAUTHORIZED',
+        code: 'FORBIDDEN',
         message: 'API keys can only delegate scopes they already have.',
         details: null
       }
@@ -3212,7 +2197,7 @@ describe('api routes', () => {
       {
         method: 'POST',
         headers: {
-          authorization: 'Bearer sfk_global-key.any-secret',
+          authorization: apiKeys.global.authorization,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -3223,10 +2208,10 @@ describe('api routes', () => {
       createEnv()
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
     expect(await response.json()).toEqual({
       error: {
-        code: 'UNAUTHORIZED',
+        code: 'FORBIDDEN',
         message: 'API keys can only delegate scopes they already have.',
         details: null
       }
@@ -3236,17 +2221,17 @@ describe('api routes', () => {
   it('rejects revoking another project or global key with a project-scoped admin key', async () => {
     const app = createApp();
     const response = await app.request(
-      '/v1/admin/keys/global-key',
+      `/v1/admin/keys/${apiKeys.global.id}`,
       {
         method: 'DELETE',
         headers: {
-          authorization: 'Bearer sfk_project-admin-key.any-secret'
+          authorization: apiKeys.projectAdmin.authorization
         }
       },
       createEnv()
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
   });
 
   it('returns table cache status for admin requests', async () => {
@@ -3271,6 +2256,7 @@ describe('api routes', () => {
         rowCount: 2,
         lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
         lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
+        dataGeneration: 0,
         lastSyncError: null,
         validation: {
           status: 'ok',
@@ -3278,6 +2264,7 @@ describe('api routes', () => {
           issues: [],
           validatedAt: '2026-04-26T00:00:02.000Z'
         },
+        dataGeneration: 0,
         externalChange: {
           pending: false,
           lastChangedAt: null,
@@ -3477,6 +2464,7 @@ describe('api routes', () => {
         rowCount: 3,
         lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
         lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
+        dataGeneration: 0,
         lastSyncError: null,
         validation: {
           status: 'ok',
@@ -3484,6 +2472,7 @@ describe('api routes', () => {
           issues: [],
           validatedAt: '2026-04-26T00:00:03.000Z'
         },
+        dataGeneration: 0,
         externalChange: {
           pending: false,
           lastChangedAt: null,
@@ -3590,7 +2579,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows?filter=%7B%22status%22%3A%7B%22eq%22%3A%22active%22%7D%7D',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       createEnv()
@@ -3617,7 +2606,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows?limit=10',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       createEnv()
@@ -3656,7 +2645,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -3669,7 +2658,7 @@ describe('api routes', () => {
         key: 'rows.list'
       },
       {
-        name: 'rate-limit:data:api-key:project-key',
+        name: `rate-limit:data:api-key:${apiKeys.project.id}`,
         key: 'rows.list'
       }
     ]);
@@ -3686,7 +2675,7 @@ describe('api routes', () => {
       '/v1/admin/projects',
       {
         headers: {
-          authorization: 'Bearer sfk_forged-key.any-secret'
+          authorization: forgedApiKey.authorization
         }
       },
       env
@@ -3709,7 +2698,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -3718,7 +2707,7 @@ describe('api routes', () => {
     expect(response.status).toBe(200);
     expect(env.__rateLimitRequests).toEqual([
       { name: 'rate-limit:data:client:anonymous', key: 'rows.list' },
-      { name: 'rate-limit:data:api-key:project-key', key: 'rows.list' }
+      { name: `rate-limit:data:api-key:${apiKeys.project.id}`, key: 'rows.list' }
     ]);
   });
 
@@ -3733,7 +2722,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -3774,7 +2763,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -3792,7 +2781,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_touch-key.any-secret'
+          authorization: apiKeys.touch.authorization
         }
       },
       env
@@ -3801,7 +2790,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_touch-key.any-secret'
+          authorization: apiKeys.touch.authorization
         }
       },
       env
@@ -3836,7 +2825,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows?limit=10',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -3883,6 +2872,10 @@ describe('api routes', () => {
       type: 'table.rows.list',
       resolvedConfig: expectedResolvedConfig
     });
+    expect(env.__tableRequests.find(({ type }) => type === 'table.generation.get')).toMatchObject({
+      type: 'table.generation.get',
+      resolvedConfig: expectedResolvedConfig
+    });
     expect(env.__tableRequests.find(({ type }) => type === 'table.cache.get')).toMatchObject({
       type: 'table.cache.get',
       resolvedConfig: expectedResolvedConfig
@@ -3917,7 +2910,7 @@ describe('api routes', () => {
       `/v1/projects/demo/tables/users/rows?${firstQuery.toString()}`,
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       firstEnv
@@ -3929,7 +2922,7 @@ describe('api routes', () => {
       `/v1/projects/demo/tables/users/rows?${secondQuery.toString()}`,
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       secondEnv
@@ -3955,6 +2948,7 @@ describe('api routes', () => {
     expect(cacheKeyUrl.searchParams.get('filter')).toBe('{"email":{"eq":"a@example.com"},"status":{"eq":"active"}}');
     expect(cacheKeyUrl.searchParams.get('__sf_auth')).toBe('private');
     expect(cacheKeyUrl.searchParams.get('__sf_config')).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+    expect(cacheKeyUrl.searchParams.get('__sf_gen')).toBe('0');
     expectNoCredentialMaterial(firstRecord.url);
     expectNoCredentialMaterial(firstCacheKey);
   });
@@ -3972,7 +2966,7 @@ describe('api routes', () => {
         `/v1/projects/demo/tables/users/rows?${query.toString()}`,
         {
           headers: {
-            authorization: 'Bearer sfk_project-key.any-secret'
+            authorization: apiKeys.project.authorization
           }
         },
         env
@@ -4008,7 +3002,7 @@ describe('api routes', () => {
         '/v1/projects/demo/tables/users/rows?limit=10',
         {
           headers: {
-            authorization: 'Bearer sfk_project-key.any-secret'
+            authorization: apiKeys.project.authorization
           }
         },
         env
@@ -4063,7 +3057,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/schema',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -4098,7 +3092,17 @@ describe('api routes', () => {
     expect(schemaCacheKeyUrl.searchParams.get('__sf_config')).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
     expectNoCredentialMaterial(env.__cachedReadRequests[0]?.url ?? '');
     expectNoCredentialMaterial(schemaCacheKey);
+    expect(schemaCacheKeyUrl.searchParams.get('__sf_gen')).toBe('0');
+    expect(env.__tableRequests.map((request) => request.type)).toEqual([
+      'table.generation.get',
+      'table.schema.get',
+      'table.cache.get'
+    ]);
     expect(env.__tableRequests[0]).toMatchObject({
+      type: 'table.generation.get',
+      resolvedConfig: defaultCachedTableReadProps.resolvedConfig
+    });
+    expect(env.__tableRequests[1]).toMatchObject({
       type: 'table.schema.get',
       resolvedConfig: defaultCachedTableReadProps.resolvedConfig,
       requestContext: undefined
@@ -4117,7 +3121,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows/row-1',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -4147,7 +3151,17 @@ describe('api routes', () => {
     expect(rowCacheKeyUrl.searchParams.get('__sf_config')).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
     expectNoCredentialMaterial(env.__cachedReadRequests[0]?.url ?? '');
     expectNoCredentialMaterial(rowCacheKey);
+    expect(rowCacheKeyUrl.searchParams.get('__sf_gen')).toBe('0');
+    expect(env.__tableRequests.map((request) => request.type)).toEqual([
+      'table.generation.get',
+      'table.row.get',
+      'table.cache.get'
+    ]);
     expect(env.__tableRequests[0]).toMatchObject({
+      type: 'table.generation.get',
+      resolvedConfig: defaultCachedTableReadProps.resolvedConfig
+    });
+    expect(env.__tableRequests[1]).toMatchObject({
       type: 'table.row.get',
       resolvedConfig: defaultCachedTableReadProps.resolvedConfig,
       requestContext: undefined
@@ -4184,6 +3198,24 @@ describe('api routes', () => {
     expect(document.components?.securitySchemes?.bearerAuth).toBeDefined();
   });
 
+  it('documents the revoke-key not-found response and the shared-spreadsheet credential conflict', async () => {
+    const response = await createApp().request('/doc', {}, createEnv());
+    const operation = z.object({
+      responses: z.record(z.string(), z.object({ description: z.string() }))
+    });
+    const document = z.object({
+      paths: z.object({
+        '/v1/admin/keys/{id}': z.object({ delete: operation }),
+        '/v1/admin/projects': z.object({ post: operation })
+      })
+    }).parse(await response.json());
+
+    expect(document.paths['/v1/admin/keys/{id}'].delete.responses['404']?.description).toContain('does not exist');
+    const conflict = document.paths['/v1/admin/projects'].post.responses['409']?.description;
+    expect(conflict).toContain('upsert=true');
+    expect(conflict).toContain('credential ref');
+  });
+
   it('serves the interactive docs page', async () => {
     const app = createApp();
     const response = await app.request('/docs', {}, createEnv());
@@ -4212,6 +3244,21 @@ describe('hosted admin UI', () => {
               'content-type': 'text/html; charset=utf-8',
               'cache-control': 'public, max-age=0, must-revalidate',
               etag: '"admin-index"'
+            }
+          });
+        }
+        if (path === '/admin/assets/index-abc123.js') {
+          return new Response('console.log("admin-asset")', {
+            headers: {
+              'content-type': 'text/javascript; charset=utf-8',
+              'cache-control': 'public, max-age=0, must-revalidate'
+            }
+          });
+        }
+        if (path === '/admin/assets/index.html') {
+          return new Response('<!doctype html><title>Asset HTML</title>', {
+            headers: {
+              'content-type': 'text/html; charset=utf-8'
             }
           });
         }
@@ -4283,7 +3330,7 @@ describe('hosted admin UI', () => {
     expect(await adminResponse.json()).toMatchObject({ error: { code: 'SERVICE_UNAVAILABLE' } });
     expect(assetPaths).toEqual([]);
 
-    const readyResponse = await app.request('/ready', {}, env);
+    const readyResponse = await app.request('/ready', { headers: { authorization: 'Bearer secret' } }, env);
     const ready = z.object({ ok: z.boolean(), checks: z.object({ adminUi: z.string() }), notes: z.array(z.string()) }).parse(await readyResponse.json());
     expect(ready.ok).toBe(true);
     expect(ready.checks.adminUi).toBe(status);
@@ -4292,7 +3339,7 @@ describe('hosted admin UI', () => {
 
   it('reports an enabled admin UI in readiness', async () => {
     const { env } = createAdminEnv('enabled');
-    const response = await createApp().request('/ready', {}, env);
+    const response = await createApp().request('/ready', { headers: { authorization: 'Bearer secret' } }, env);
 
     expect(await response.json()).toMatchObject({ checks: { adminUi: 'enabled' } });
   });
@@ -4304,6 +3351,32 @@ describe('hosted admin UI', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.json()).toEqual({ serverCredential: false });
+  });
+
+  it('caches hashed admin assets immutably and leaves other admin responses uncached', async () => {
+    const { env } = createAdminEnv('enabled');
+    const app = createApp();
+
+    const entry = await app.request('/admin/', {}, env);
+    expect(entry.status).toBe(200);
+    expect(entry.headers.get('cache-control')).toBe('no-store');
+
+    const asset = await app.request('/admin/assets/index-abc123.js', {}, env);
+    expect(asset.status).toBe(200);
+    expect(asset.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    expect(await asset.text()).toContain('admin-asset');
+
+    const assetHtml = await app.request('/admin/assets/index.html', {}, env);
+    expect(assetHtml.status).toBe(200);
+    expect(assetHtml.headers.get('cache-control')).toBe('no-store');
+
+    const missing = await app.request('/admin/assets/missing-abc123.js', {}, env);
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get('cache-control')).toBe('no-store');
+
+    const session = await app.request('/__sheetflare/admin-session', {}, env);
+    expect(session.status).toBe(200);
+    expect(session.headers.get('cache-control')).toBe('no-store');
   });
 
   it.each([

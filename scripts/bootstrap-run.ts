@@ -1,15 +1,17 @@
 import {
   assertPresent,
+  isEnvFlagEnabled,
   logStep,
   logSuccess,
   readJsonEnv,
-  redactSecret,
   requestJson,
   requireAdminCredential,
   requireEnv,
   shouldShowSecrets
 } from './lib/runtime';
 import { parseBootstrapConfig, type BootstrapConfig } from './lib/bootstrap-config';
+import { assertRotationCanHandOffKeys, bootstrapApiKeys } from './lib/bootstrap-keys';
+import { finishBootstrapKeys } from './lib/bootstrap-result';
 
 type ProjectResponse = {
   project: {
@@ -24,22 +26,16 @@ type TableResponse = {
   };
 };
 
-type ApiKeyResponse = {
-  apiKey: string;
-  record: {
-    id: string;
-    name: string;
-    projectSlug: string | null;
-    scopes: string[];
-  };
-};
-
 async function main() {
   const baseUrl = requireEnv('SHEETFLARE_BASE_URL', 'Set SHEETFLARE_BASE_URL to the deployed API Worker URL.');
   const bearer = requireAdminCredential();
   const config = parseBootstrapConfig(readJsonEnv<BootstrapConfig>('SHEETFLARE_BOOTSTRAP_CONFIG_JSON'));
-
-  const createdKeys: ApiKeyResponse[] = [];
+  const rotateKeys = isEnvFlagEnabled('SHEETFLARE_BOOTSTRAP_ROTATE_KEYS');
+  assertRotationCanHandOffKeys({
+    rotate: rotateKeys,
+    showSecrets: shouldShowSecrets(),
+    capturedBySetup: process.env.SHEETFLARE_BOOTSTRAP_RESULT_MODE === 'full'
+  });
 
   for (const project of config.projects) {
     logStep(`Ensuring project ${project.slug}`);
@@ -74,40 +70,23 @@ async function main() {
     }
   }
 
-  for (const apiKey of config.apiKeys ?? []) {
-    logStep(`Creating key ${apiKey.name}`);
-    const apiKeyResponse = await requestJson<ApiKeyResponse>({
-      baseUrl,
-      path: '/v1/admin/keys',
-      method: 'POST',
-      bearer,
-      expectedStatus: 201,
-      body: apiKey
-    });
-    const createdKey = assertPresent(apiKeyResponse.data, 'API key creation returned an empty response body.');
-    createdKeys.push(createdKey);
-    logSuccess(`Key created: ${createdKey.record.id}`);
-  }
-
-  const output = {
+  await finishBootstrapKeys({
     projects: config.projects.map((project) => ({
       slug: project.slug,
       tables: (project.tables ?? []).map((table) => table.tableSlug)
     })),
-    apiKeys: createdKeys
-  };
-
-  console.log(JSON.stringify({
-    ...output,
-    apiKeys: output.apiKeys.map((apiKey) => ({
-      ...apiKey,
-      apiKey: shouldShowSecrets() ? apiKey.apiKey : redactSecret(apiKey.apiKey)
-    }))
-  }, null, 2));
-
-  if (process.env.SHEETFLARE_BOOTSTRAP_RESULT_MODE === 'full') {
-    console.log(`__SHEETFLARE_BOOTSTRAP_RESULT__=${JSON.stringify(output)}`);
-  }
+    showSecrets: shouldShowSecrets(),
+    includeResultMarker: process.env.SHEETFLARE_BOOTSTRAP_RESULT_MODE === 'full',
+    writeLine: (line) => {
+      console.log(line);
+    },
+    loadKeys: () => bootstrapApiKeys({
+      baseUrl,
+      bearer,
+      apiKeys: config.apiKeys ?? [],
+      rotate: rotateKeys
+    })
+  });
 }
 
 void main().catch((error: unknown) => {

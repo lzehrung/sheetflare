@@ -55,21 +55,39 @@ That means:
 3. Create a user-managed service account.
 4. Create a key only if your org policy allows service-account keys.
 
-Example `gcloud` flow:
+Example `gcloud` flow for a staging credential. It applies the key with `npm run setup:staging`, which targets `sheetflare.staging.setup.json` and `apps/api/wrangler.staging.jsonc`. For production, set `$serviceAccountName = "sheetflare-prod"` and run `npm run setup -- --apply-secrets` instead; that command writes the **production** Worker's secrets.
 
 ```powershell
 $projectId = "YOUR_GCP_PROJECT_ID"
 $serviceAccountName = "sheetflare-staging"
+$serviceAccountEmail = "$serviceAccountName@$projectId.iam.gserviceaccount.com"
+$keyPath = Join-Path $env:TEMP "$serviceAccountName-key.json"
 
 gcloud config set project $projectId
-gcloud services enable sheets.googleapis.com
+gcloud services enable sheets.googleapis.com drive.googleapis.com
 
 gcloud iam service-accounts create $serviceAccountName `
   --description="Dedicated service account for Sheetflare staging" `
   --display-name="Sheetflare Staging"
 
-gcloud iam service-accounts keys create "$env:TEMP\$serviceAccountName-key.json" `
-  --iam-account="$serviceAccountName@$projectId.iam.gserviceaccount.com"
+try {
+  gcloud iam service-accounts keys create $keyPath --iam-account=$serviceAccountEmail
+  $env:GOOGLE_APPLICATION_CREDENTIALS = $keyPath
+  npm run setup:staging -- --apply-secrets
+}
+finally {
+  Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
+  Remove-Item Env:GOOGLE_APPLICATION_CREDENTIALS -ErrorAction SilentlyContinue
+}
+```
+
+Both APIs are required. `sheets.googleapis.com` serves row reads and writes; `drive.googleapis.com` serves Drive watch registration (`npm run ops:watch:drive`) and the automatic reindexing that depends on it. Enabling only the Sheets API leaves watch registration failing.
+
+The `finally` block deletes the private key file even when setup fails, so it never lingers in `%TEMP%`. Deleting the file does not revoke the key: it still exists in Google Cloud. If the apply-secrets run failed and you will not retry with this key, revoke it so no unused credential stays valid:
+
+```powershell
+gcloud iam service-accounts keys list --iam-account=$serviceAccountEmail
+gcloud iam service-accounts keys delete KEY_ID --iam-account=$serviceAccountEmail
 ```
 
 Setup now automates that same sequence when you opt into Google provisioning:
@@ -180,7 +198,7 @@ If it reports that you are not authenticated, run:
 npx wrangler login
 ```
 
-One shared credential manual fallback:
+One shared credential manual fallback (production config; for staging use `--config apps/api/wrangler.staging.jsonc`):
 
 ```powershell
 npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
@@ -188,6 +206,8 @@ npx wrangler secret put GOOGLE_DRIVE_WEBHOOK_SECRET --config apps/api/wrangler.j
 ```
 
 Then set `GOOGLE_CLIENT_EMAIL` as a normal Worker variable through your deploy system. `GOOGLE_DRIVE_WEBHOOK_SECRET` is required when you enable automatic Drive-watch reindexing and should be treated as Worker secret material. If you are using the standard onboarding flow, prefer `npm run setup` or `npm run setup -- --apply-secrets` instead of editing checked repo defaults directly.
+
+Each Drive watch carries the webhook secret it was registered with, and the Worker rejects notifications whose token no longer matches. Changing `GOOGLE_DRIVE_WEBHOOK_SECRET` therefore silently stops automatic reindexing until watches are registered again. `npm run setup -- --apply-secrets` mints a new webhook secret unless you export `GOOGLE_DRIVE_WEBHOOK_SECRET`, so after applying secrets it re-registers watches itself when it knows the API URL (from `.sheetflare.setup.local.json` or `SHEETFLARE_BASE_URL`) and an admin credential (`SHEETFLARE_ADMIN_CREDENTIAL`, or the bootstrap token it just applied). When it cannot, it prints a warning naming what is missing. After any manual secret change, run `npm run ops:watch:drive`.
 
 Multiple named credentials manual fallback:
 

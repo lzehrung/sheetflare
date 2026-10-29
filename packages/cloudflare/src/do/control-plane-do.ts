@@ -1,4 +1,4 @@
-import { AppError, ServiceUnavailableError } from '@sheetflare/contracts';
+import { AppError, ConflictError, NotFoundError, ServiceUnavailableError } from '@sheetflare/contracts';
 import type {
   AdminListSpreadsheetWatchRetryAdviceResult,
   AdminListSpreadsheetWatchesResult,
@@ -12,12 +12,14 @@ import type {
   ControlPlaneDoResponse,
   ProjectDoResponse,
   ProjectSummary,
+  SpreadsheetWatchNotifyResult,
   TableConfig,
   TableDoResponse,
   TableRequestContext
 } from '@sheetflare/contracts';
 import { controlPlaneDoRequestSchema } from '@sheetflare/contracts';
 import { GoogleSheetsService } from '@sheetflare/google-sheets';
+import { z } from 'zod';
 import type { CloudflareEnv } from '../types';
 import { doRpc, durableObjectErrorResponse, parseDurableObjectRpcRequest } from '../rpc';
 import { resolveGoogleCredential } from '../google-credentials';
@@ -60,6 +62,7 @@ type SpreadsheetWatchRow = {
   last_reindex_started_at: string | null;
   last_reindex_completed_at: string | null;
   last_reindex_error: string | null;
+  reindex_failure_count: number;
   updated_at: string;
 };
 
@@ -73,6 +76,16 @@ type SpreadsheetWatchTombstoneRow = {
   expiration_at: string | null;
   stopped_at: string;
   updated_at: string;
+};
+
+type PendingWatchStopRow = {
+  channel_id: string;
+  resource_id: string;
+  spreadsheet_id: string;
+  google_credential_ref: string;
+  expiration_at: string | null;
+  attempt_count: number;
+  next_attempt_at: string;
 };
 
 function getProjectStub(env: CloudflareEnv, projectSlug: string) {
@@ -90,6 +103,25 @@ const watchRenewRetryMs = 5 * 60 * 1000;
 const watchRenewConfigRetryMs = 60 * 60 * 1000;
 const watchRenewQuotaRetryGraceMs = 15 * 60 * 1000;
 const watchRetryAdviceGraceMs = 15 * 60 * 1000;
+const watchStopRetryBaseMs = 60 * 1000;
+const watchStopRetryMaxMs = 60 * 60 * 1000;
+const reindexRetryMinBaseMs = 30 * 1000;
+const reindexRetryMaxMs = 60 * 60 * 1000;
+
+// A reservation only has to outlive the create request that made it. One its ProjectDO never released, because the
+// request or the Durable Object died first, stops holding the spreadsheet after this long.
+const projectReservationTtlMs = 5 * 60 * 1000;
+
+// Stored watch and reindex errors are shown through the admin API, so they hold contract messages only. Upstream text
+// and unexpected exception messages are kept in the matching log event.
+const unexpectedReindexErrorMessage = 'Reindex failed unexpectedly. See the drive.reindex.failed log event for details.';
+const unexpectedWatchErrorMessage = 'Watch renewal failed unexpectedly. See the drive.watch.renew.failed log event for details.';
+const driveWatchQuotaErrorMessage = 'Google Drive rate limit exceeded for creating file subscriptions.';
+
+// GoogleSheetsService sets this flag and omits Google's message. Detection uses only the flag.
+const driveWatchQuotaErrorDetailsSchema = z.object({
+  driveSubscriptionQuotaExceeded: z.literal(true)
+});
 
 export class ControlPlaneDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
@@ -120,6 +152,17 @@ export class ControlPlaneDO {
         throw error;
       }
     }
+
+    // A project being created holds its spreadsheet and credential ref here, from the control.project.reserve that
+    // precedes its first write until the control.project.upsert that registers it.
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS project_reservations (
+        slug TEXT PRIMARY KEY,
+        spreadsheet_id TEXT NOT NULL,
+        google_credential_ref TEXT NOT NULL,
+        reserved_at TEXT NOT NULL
+      )
+    `);
 
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS api_keys (
@@ -153,6 +196,7 @@ export class ControlPlaneDO {
         last_reindex_started_at TEXT,
         last_reindex_completed_at TEXT,
         last_reindex_error TEXT,
+        reindex_failure_count INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL
       )
     `);
@@ -163,6 +207,19 @@ export class ControlPlaneDO {
         expiration_at TEXT,
         stopped_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      )
+    `);
+
+    // Channels whose watch was removed but whose Google stop has not succeeded yet; the alarm retries them.
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS spreadsheet_watch_pending_stops (
+        channel_id TEXT PRIMARY KEY,
+        resource_id TEXT NOT NULL,
+        spreadsheet_id TEXT NOT NULL,
+        google_credential_ref TEXT NOT NULL,
+        expiration_at TEXT,
+        attempt_count INTEGER NOT NULL,
+        next_attempt_at TEXT NOT NULL
       )
     `);
 
@@ -180,6 +237,7 @@ export class ControlPlaneDO {
     this.ensureSpreadsheetWatchColumn('expiration_duration_ms', 'INTEGER');
     this.ensureSpreadsheetWatchColumn('last_message_number', 'TEXT');
     this.ensureSpreadsheetWatchColumn('last_watch_error', 'TEXT');
+    this.ensureSpreadsheetWatchColumn('reindex_failure_count', 'INTEGER NOT NULL DEFAULT 0');
   }
 
   private ensureSpreadsheetWatchColumn(columnName: string, definition: string) {
@@ -223,6 +281,18 @@ export class ControlPlaneDO {
         this.upsertProjectSummary(body.summary);
         return {
           type: 'control.project.upsert.result',
+          result: { ok: true }
+        };
+      case 'control.project.reserve':
+        this.reserveProject(body);
+        return {
+          type: 'control.project.reserve.result',
+          result: { ok: true }
+        };
+      case 'control.project.release':
+        this.releaseProjectReservation(body.projectSlug);
+        return {
+          type: 'control.project.release.result',
           result: { ok: true }
         };
       case 'control.project.delete':
@@ -310,29 +380,117 @@ export class ControlPlaneDO {
   }
 
   private upsertProjectSummary(summary: ProjectSummary) {
-    this.ctx.storage.sql.exec(
+    this.ctx.storage.transactionSync(() => {
+      this.pruneExpiredProjectReservations();
+      const registered = this.selectOptionalRow<Pick<RegistryRow, 'spreadsheet_id' | 'google_credential_ref'>>(
+        `SELECT spreadsheet_id, google_credential_ref FROM project_registry WHERE slug = ?`,
+        summary.slug
+      );
+
+      // The reservation that precedes a registration has already checked its pairing, so this check backs up a
+      // registration whose reservation expired or was never made. A project keeps updating under the pairing it is
+      // registered with, which keeps a registry written before the credential ref rule updatable until an operator
+      // aligns its refs.
+      if (
+        !registered
+        || registered.spreadsheet_id !== summary.spreadsheetId
+        || registered.google_credential_ref !== summary.googleCredentialRef
+      ) {
+        this.assertSpreadsheetCredentialRefCompatible(summary.slug, summary.spreadsheetId, summary.googleCredentialRef);
+      }
+
+      this.ctx.storage.sql.exec(
+        `
+        INSERT INTO project_registry (slug, name, spreadsheet_id, google_credential_ref, table_count, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(slug) DO UPDATE SET
+          name = excluded.name,
+          spreadsheet_id = excluded.spreadsheet_id,
+          google_credential_ref = excluded.google_credential_ref,
+          table_count = excluded.table_count,
+          updated_at = excluded.updated_at
+        `,
+        summary.slug,
+        summary.name,
+        summary.spreadsheetId,
+        summary.googleCredentialRef,
+        summary.tableCount,
+        summary.updatedAt
+      );
+
+      // The registry entry holds the claim from here on.
+      this.releaseProjectReservation(summary.slug);
+    });
+  }
+
+  private reserveProject(input: Extract<ControlPlaneDoRequest, { type: 'control.project.reserve' }>) {
+    // The check and the reservation run in one synchronous transaction, so no other request can reserve or register
+    // the spreadsheet between them.
+    this.ctx.storage.transactionSync(() => {
+      this.pruneExpiredProjectReservations();
+      this.assertSpreadsheetCredentialRefCompatible(input.projectSlug, input.spreadsheetId, input.googleCredentialRef);
+      this.ctx.storage.sql.exec(
+        `
+        INSERT INTO project_reservations (slug, spreadsheet_id, google_credential_ref, reserved_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(slug) DO UPDATE SET
+          spreadsheet_id = excluded.spreadsheet_id,
+          google_credential_ref = excluded.google_credential_ref,
+          reserved_at = excluded.reserved_at
+        `,
+        input.projectSlug,
+        input.spreadsheetId,
+        input.googleCredentialRef,
+        new Date().toISOString()
+      );
+
+      if (input.revokeApiKeys) {
+        this.revokeProjectApiKeys(input.projectSlug);
+      }
+    });
+  }
+
+  // A spreadsheet has one Drive watch, created with one credential, so projects that share a spreadsheet must share its
+  // credential ref. A project that is still being created counts like a registered one. Any ref already on the
+  // spreadsheet is accepted, which lets operators converge registries written before this rule existed.
+  private assertSpreadsheetCredentialRefCompatible(projectSlug: string, spreadsheetId: string, googleCredentialRef: string) {
+    const claimedGoogleCredentialRefs = this.selectRows<{ google_credential_ref: string }>(
       `
-      INSERT INTO project_registry (slug, name, spreadsheet_id, google_credential_ref, table_count, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(slug) DO UPDATE SET
-        name = excluded.name,
-        spreadsheet_id = excluded.spreadsheet_id,
-        google_credential_ref = excluded.google_credential_ref,
-        table_count = excluded.table_count,
-        updated_at = excluded.updated_at
+      SELECT google_credential_ref FROM project_registry WHERE spreadsheet_id = ? AND slug <> ?
+      UNION
+      SELECT google_credential_ref FROM project_reservations WHERE spreadsheet_id = ? AND slug <> ?
+      ORDER BY google_credential_ref ASC
       `,
-      summary.slug,
-      summary.name,
-      summary.spreadsheetId,
-      summary.googleCredentialRef,
-      summary.tableCount,
-      summary.updatedAt
+      spreadsheetId,
+      projectSlug,
+      spreadsheetId,
+      projectSlug
+    ).map((row) => row.google_credential_ref);
+
+    if (claimedGoogleCredentialRefs.length > 0 && !claimedGoogleCredentialRefs.includes(googleCredentialRef)) {
+      throw new ConflictError(
+        `Spreadsheet ${spreadsheetId} is already registered with Google credential ref "${claimedGoogleCredentialRefs[0]}". Projects that share a spreadsheet must use the same credential ref.`,
+        {
+          spreadsheetId,
+          googleCredentialRef,
+          registeredGoogleCredentialRefs: claimedGoogleCredentialRefs
+        }
+      );
+    }
+  }
+
+  private pruneExpiredProjectReservations() {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM project_reservations WHERE reserved_at <= ?`,
+      new Date(Date.now() - projectReservationTtlMs).toISOString()
     );
   }
 
-  private async deleteProjectSummary(projectSlug: string) {
-    const revokedAt = new Date().toISOString();
+  private releaseProjectReservation(projectSlug: string) {
+    this.ctx.storage.sql.exec(`DELETE FROM project_reservations WHERE slug = ?`, projectSlug);
+  }
 
+  private revokeProjectApiKeys(projectSlug: string) {
     this.ctx.storage.sql.exec(
       `
       UPDATE api_keys
@@ -340,9 +498,13 @@ export class ControlPlaneDO {
       WHERE project_slug = ?
         AND revoked_at IS NULL
       `,
-      revokedAt,
+      new Date().toISOString(),
       projectSlug
     );
+  }
+
+  private async deleteProjectSummary(projectSlug: string) {
+    this.revokeProjectApiKeys(projectSlug);
     this.ctx.storage.sql.exec(
       `
       DELETE FROM project_registry
@@ -350,11 +512,9 @@ export class ControlPlaneDO {
       `,
       projectSlug
     );
+    this.releaseProjectReservation(projectSlug);
 
-    const activeSpreadsheetIds = new Set(
-      this.getSpreadsheetRegistrations().map((registration) => registration.spreadsheetId)
-    );
-    await this.removeObsoleteSpreadsheetWatches(activeSpreadsheetIds);
+    await this.removeObsoleteSpreadsheetWatches();
     await this.scheduleNextAlarm();
   }
 
@@ -383,6 +543,8 @@ export class ControlPlaneDO {
     for (const watch of dueWatches) {
       await this.reindexSpreadsheetWatch(watch);
     }
+
+    await this.retryPendingWatchStops(new Date(nowMs).toISOString());
 
     await this.scheduleNextAlarm();
   }
@@ -476,8 +638,13 @@ export class ControlPlaneDO {
   }
 
   private revokeApiKey(apiKeyId: string, revokedAt: string) {
+    if (!this.selectOptionalRow<{ id: string }>(`SELECT id FROM api_keys WHERE id = ?`, apiKeyId)) {
+      throw new NotFoundError(`API key ${apiKeyId} was not found.`);
+    }
+
+    // Revoking again keeps the first timestamp so the audit trail shows when access actually ended.
     this.ctx.storage.sql.exec(
-      `UPDATE api_keys SET revoked_at = ? WHERE id = ?`,
+      `UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`,
       revokedAt,
       apiKeyId
     );
@@ -511,13 +678,12 @@ export class ControlPlaneDO {
       ? defaultWatchDurationMs
       : Math.max(expirationMs - Date.now(), minWatchRenewLeadMs);
     const registrations = this.getSpreadsheetRegistrations();
-    const activeSpreadsheetIds = new Set(registrations.map((registration) => registration.spreadsheetId));
     const existingWatches = new Map(
       this.listSpreadsheetWatches().map((watch) => [watch.spreadsheet_id, watch] as const)
     );
     const results = [];
 
-    await this.removeObsoleteSpreadsheetWatches(activeSpreadsheetIds);
+    await this.removeObsoleteSpreadsheetWatches();
 
     for (const registration of registrations) {
       const existing = existingWatches.get(registration.spreadsheetId) ?? null;
@@ -570,7 +736,7 @@ export class ControlPlaneDO {
       );
 
       if (existing && !createdWatch.stoppedExistingWatch) {
-        await this.stopExistingSpreadsheetWatch(existing);
+        await this.stopRetiredWatchChannel(existing);
       }
 
       results.push(this.mapSpreadsheetWatch(this.requireSpreadsheetWatch(registration.spreadsheetId), registration.projectSlugs));
@@ -618,7 +784,7 @@ export class ControlPlaneDO {
     messageNumber: string | null,
     changedAt: string,
     channelExpiration: string | null
-  ) {
+  ): Promise<SpreadsheetWatchNotifyResult> {
     const watch = this.selectOptionalRow<SpreadsheetWatchRow>(
       `SELECT * FROM spreadsheet_watches WHERE channel_id = ?`,
       channelId
@@ -626,18 +792,33 @@ export class ControlPlaneDO {
     const nextMessageNumber = normalizeMessageNumber(messageNumber);
 
     if (!watch || watch.resource_id !== resourceId) {
+      // Expected for channels that were replaced or stopped and still deliver until they expire; a steady stream for a
+      // current channel points at a watch the control plane lost track of.
+      console.warn(JSON.stringify({
+        event: 'drive.notification.rejected',
+        channelId,
+        resourceId,
+        resourceState,
+        messageNumber,
+        reason: watch ? 'resource-mismatch' : 'unknown-channel'
+      }));
       return {
         accepted: false,
         spreadsheetId: null,
-        debounceUntil: null
+        debounceUntil: null,
+        changed: false,
+        projectSlugs: []
       };
     }
 
+    const projectSlugs = this.getProjectSlugsForSpreadsheet(watch.spreadsheet_id);
     if (this.shouldIgnoreNotification(watch, messageNumber)) {
       return {
         accepted: true,
         spreadsheetId: watch.spreadsheet_id,
-        debounceUntil: watch.debounce_until
+        debounceUntil: watch.debounce_until,
+        changed: false,
+        projectSlugs
       };
     }
 
@@ -663,7 +844,9 @@ export class ControlPlaneDO {
       return {
         accepted: true,
         spreadsheetId: watch.spreadsheet_id,
-        debounceUntil: null
+        debounceUntil: null,
+        changed: false,
+        projectSlugs
       };
     }
 
@@ -695,7 +878,9 @@ export class ControlPlaneDO {
     return {
       accepted: true,
       spreadsheetId: watch.spreadsheet_id,
-      debounceUntil
+      debounceUntil,
+      changed: true,
+      projectSlugs
     };
   }
 
@@ -810,7 +995,7 @@ export class ControlPlaneDO {
     );
   }
 
-  private async stopExistingSpreadsheetWatch(watch: SpreadsheetWatchRow) {
+  private async stopExistingSpreadsheetWatch(watch: Pick<SpreadsheetWatchRow, 'google_credential_ref' | 'channel_id' | 'resource_id'>) {
     try {
       await this.getSheetsClient(watch.google_credential_ref).stopDriveChannel(watch.channel_id, watch.resource_id);
     } catch (error) {
@@ -822,21 +1007,107 @@ export class ControlPlaneDO {
     }
   }
 
-  private async removeObsoleteSpreadsheetWatches(activeSpreadsheetIds: ReadonlySet<string>) {
+  // Watches whose spreadsheet no longer belongs to any project. Removal must not depend on Google, so the channels are
+  // stopped best-effort and failed stops are left to the alarm.
+  private async removeObsoleteSpreadsheetWatches() {
+    const registeredSpreadsheetIds = this.getProjectSlugsBySpreadsheetId();
     for (const watch of this.listSpreadsheetWatches()) {
-      if (activeSpreadsheetIds.has(watch.spreadsheet_id)) {
+      if (registeredSpreadsheetIds.has(watch.spreadsheet_id)) {
         continue;
       }
 
-      await this.stopExistingSpreadsheetWatch(watch);
       this.recordSpreadsheetWatchTombstone(watch);
+      this.deleteSpreadsheetWatch(watch.spreadsheet_id);
+      await this.stopRetiredWatchChannel(watch);
+    }
+  }
+
+  // Stopping a channel the control plane no longer tracks is cleanup, so a Google failure must not fail the operation
+  // that retired it. The stop is queued before it is attempted and retried from the alarm until Google accepts it or
+  // the channel expires on its own.
+  private async stopRetiredWatchChannel(watch: SpreadsheetWatchRow) {
+    const pendingStop: PendingWatchStopRow = {
+      channel_id: watch.channel_id,
+      resource_id: watch.resource_id,
+      spreadsheet_id: watch.spreadsheet_id,
+      google_credential_ref: watch.google_credential_ref,
+      expiration_at: watch.expiration_at,
+      attempt_count: 0,
+      next_attempt_at: new Date().toISOString()
+    };
+    this.ctx.storage.sql.exec(
+      `
+      INSERT INTO spreadsheet_watch_pending_stops (
+        channel_id, resource_id, spreadsheet_id, google_credential_ref, expiration_at, attempt_count, next_attempt_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(channel_id) DO NOTHING
+      `,
+      pendingStop.channel_id,
+      pendingStop.resource_id,
+      pendingStop.spreadsheet_id,
+      pendingStop.google_credential_ref,
+      pendingStop.expiration_at,
+      pendingStop.attempt_count,
+      pendingStop.next_attempt_at
+    );
+    await this.attemptPendingWatchStop(pendingStop);
+  }
+
+  private async retryPendingWatchStops(now: string) {
+    // A channel past its expiration has already stopped delivering notifications; there is nothing left to stop.
+    this.ctx.storage.sql.exec(
+      `
+      DELETE FROM spreadsheet_watch_pending_stops
+      WHERE expiration_at IS NOT NULL
+        AND expiration_at <= ?
+      `,
+      now
+    );
+
+    const dueStops = this.selectRows<PendingWatchStopRow>(
+      `
+      SELECT *
+      FROM spreadsheet_watch_pending_stops
+      WHERE next_attempt_at <= ?
+      ORDER BY next_attempt_at ASC, channel_id ASC
+      `,
+      now
+    );
+    for (const pendingStop of dueStops) {
+      await this.attemptPendingWatchStop(pendingStop);
+    }
+  }
+
+  private async attemptPendingWatchStop(pendingStop: PendingWatchStopRow) {
+    try {
+      await this.stopExistingSpreadsheetWatch(pendingStop);
+      this.ctx.storage.sql.exec(
+        `DELETE FROM spreadsheet_watch_pending_stops WHERE channel_id = ?`,
+        pendingStop.channel_id
+      );
+    } catch (error) {
+      const attempt = pendingStop.attempt_count + 1;
+      const nextAttemptAt = new Date(
+        Date.now() + getBackoffDelayMs(attempt, watchStopRetryBaseMs, watchStopRetryMaxMs)
+      ).toISOString();
       this.ctx.storage.sql.exec(
         `
-        DELETE FROM spreadsheet_watches
-        WHERE spreadsheet_id = ?
+        UPDATE spreadsheet_watch_pending_stops
+        SET attempt_count = ?, next_attempt_at = ?
+        WHERE channel_id = ?
         `,
-        watch.spreadsheet_id
+        attempt,
+        nextAttemptAt,
+        pendingStop.channel_id
       );
+      console.error(JSON.stringify({
+        event: 'drive.watch.stop.failed',
+        spreadsheetId: pendingStop.spreadsheet_id,
+        channelId: pendingStop.channel_id,
+        attempt,
+        nextAttemptAt,
+        ...describeErrorForLog(error)
+      }));
     }
   }
 
@@ -888,12 +1159,12 @@ export class ControlPlaneDO {
   private async renewSpreadsheetWatch(watch: SpreadsheetWatchRow) {
     const webhookToken = this.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim();
     if (!watch.webhook_url?.trim()) {
-      this.recordWatchError(watch.spreadsheet_id, 'Spreadsheet watch is missing its stored webhook URL.');
+      this.recordWatchRenewalFailure(watch, 'Spreadsheet watch is missing its stored webhook URL.', null);
       return;
     }
 
     if (!webhookToken) {
-      this.recordWatchError(watch.spreadsheet_id, 'GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.');
+      this.recordWatchRenewalFailure(watch, 'GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.', null);
       return;
     }
 
@@ -932,11 +1203,12 @@ export class ControlPlaneDO {
         now,
         watch.spreadsheet_id
       );
-
-      await this.stopExistingSpreadsheetWatch(watch);
     } catch (error) {
-      this.recordWatchError(watch.spreadsheet_id, describeWatchError(error));
+      this.recordWatchRenewalFailure(watch, describeWatchError(error), error);
+      return;
     }
+
+    await this.stopRetiredWatchChannel(watch);
   }
 
   private async markSpreadsheetTablesExternallyDirty(spreadsheetId: string, changedAt: string, debounceUntil: string) {
@@ -968,27 +1240,37 @@ export class ControlPlaneDO {
       watch.spreadsheet_id
     );
 
-    try {
-      for (const projectSlug of this.getProjectSlugsForSpreadsheet(watch.spreadsheet_id)) {
-        const tables = await this.listProjectTables(projectSlug);
-        for (const table of tables) {
+    // Each table is reindexed on its own, so one failing table neither stops the tables after it nor hides their
+    // failures from the log.
+    const failures: Array<{ projectSlug: string; tableSlug: string | null; error: unknown }> = [];
+    for (const projectSlug of this.getProjectSlugsForSpreadsheet(watch.spreadsheet_id)) {
+      const tables = await this.listProjectTables(projectSlug).catch((error: unknown) => {
+        failures.push({ projectSlug, tableSlug: null, error });
+        return [];
+      });
+      for (const table of tables) {
+        try {
           await doRpc<TableDoResponse>(getTableStub(this.env, projectSlug, table.tableSlug), {
             type: 'table.reindex',
             projectSlug,
             tableSlug: table.tableSlug,
             requestContext: this.buildSystemRequestContext('control.spreadsheet-watch.alarm', 'external-change')
           });
+        } catch (error) {
+          failures.push({ projectSlug, tableSlug: table.tableSlug, error });
         }
       }
+    }
 
+    const [firstFailure] = failures;
+    if (!firstFailure) {
       const completedAt = new Date().toISOString();
       this.ctx.storage.sql.exec(
         `
         UPDATE spreadsheet_watches
-        SET pending_changed_at = NULL,
-            debounce_until = NULL,
-            last_reindex_completed_at = ?,
+        SET last_reindex_completed_at = ?,
             last_reindex_error = NULL,
+            reindex_failure_count = 0,
             updated_at = ?
         WHERE spreadsheet_id = ?
         `,
@@ -996,21 +1278,70 @@ export class ControlPlaneDO {
         completedAt,
         watch.spreadsheet_id
       );
-    } catch (error) {
-      const retryAt = new Date(Date.now() + Math.max(watch.debounce_seconds, 30) * 1000).toISOString();
+      // Clear only the change this reindex started from. A notification recorded meanwhile may describe edits the
+      // reindex did not read, so it stays pending and the alarm is re-armed for its debounce.
       this.ctx.storage.sql.exec(
         `
         UPDATE spreadsheet_watches
-        SET debounce_until = ?,
-            last_reindex_error = ?,
-            updated_at = ?
+        SET pending_changed_at = NULL,
+            debounce_until = NULL
         WHERE spreadsheet_id = ?
+          AND pending_changed_at = ?
         `,
-        retryAt,
-        error instanceof Error ? error.message : String(error),
-        new Date().toISOString(),
-        watch.spreadsheet_id
+        watch.spreadsheet_id,
+        watch.pending_changed_at
       );
+      return;
+    }
+
+    const current = this.getSpreadsheetWatch(watch.spreadsheet_id);
+    if (!current) {
+      return;
+    }
+
+    // Consecutive failures back off exponentially from the debounce, so a broken table is not re-read every few
+    // seconds forever. A notification recorded during the reindex keeps its own, earlier debounce.
+    const attempt = current.reindex_failure_count + 1;
+    const retryDelayMs = getBackoffDelayMs(
+      attempt,
+      Math.max(watch.debounce_seconds * 1000, reindexRetryMinBaseMs),
+      reindexRetryMaxMs
+    );
+    const nextAttemptAt = current.pending_changed_at === watch.pending_changed_at
+      ? new Date(Date.now() + retryDelayMs).toISOString()
+      : current.debounce_until;
+    const failedTarget = firstFailure.tableSlug === null
+      ? firstFailure.projectSlug
+      : `${firstFailure.projectSlug}/${firstFailure.tableSlug}`;
+    const failureMessage = firstFailure.error instanceof AppError
+      ? firstFailure.error.message
+      : unexpectedReindexErrorMessage;
+    this.ctx.storage.sql.exec(
+      `
+      UPDATE spreadsheet_watches
+      SET debounce_until = ?,
+          reindex_failure_count = ?,
+          last_reindex_error = ?,
+          updated_at = ?
+      WHERE spreadsheet_id = ?
+      `,
+      nextAttemptAt,
+      attempt,
+      `${failedTarget}: ${failureMessage}`,
+      new Date().toISOString(),
+      watch.spreadsheet_id
+    );
+
+    for (const failure of failures) {
+      console.error(JSON.stringify({
+        event: 'drive.reindex.failed',
+        spreadsheetId: watch.spreadsheet_id,
+        projectSlug: failure.projectSlug,
+        tableSlug: failure.tableSlug,
+        attempt,
+        nextAttemptAt,
+        ...describeErrorForLog(failure.error)
+      }));
     }
   }
 
@@ -1062,9 +1393,10 @@ export class ControlPlaneDO {
   }
 
   private async scheduleNextAlarm() {
-    const nextDebounceAtMs = this.getNextDebounceAlarmAtMs();
-    const nextRenewalAtMs = this.getNextRenewalAlarmAtMs();
-    const nextAlarmAtMs = this.getEarlierAlarmAtMs(nextDebounceAtMs, nextRenewalAtMs);
+    const nextAlarmAtMs = this.getEarlierAlarmAtMs(
+      this.getEarlierAlarmAtMs(this.getNextDebounceAlarmAtMs(), this.getNextRenewalAlarmAtMs()),
+      this.getNextPendingWatchStopAtMs()
+    );
 
     if (nextAlarmAtMs === null) {
       await this.ctx.storage.deleteAlarm();
@@ -1072,6 +1404,19 @@ export class ControlPlaneDO {
     }
 
     await this.ctx.storage.setAlarm(nextAlarmAtMs);
+  }
+
+  private getNextPendingWatchStopAtMs() {
+    const next = this.selectOptionalRow<{ next_attempt_at: string }>(
+      `
+      SELECT next_attempt_at
+      FROM spreadsheet_watch_pending_stops
+      ORDER BY next_attempt_at ASC
+      LIMIT 1
+      `
+    );
+
+    return next ? Date.parse(next.next_attempt_at) : null;
   }
 
   private parseDriveNotificationExpiration(value: string | null) {
@@ -1110,7 +1455,7 @@ export class ControlPlaneDO {
       return renewalDueAtMs;
     }
 
-    if (isDriveWatchSubscriptionQuotaMessage(watch.last_watch_error)) {
+    if (watch.last_watch_error === driveWatchQuotaErrorMessage) {
       return Math.max(renewalDueAtMs, expirationAtMs + watchRenewQuotaRetryGraceMs);
     }
 
@@ -1183,8 +1528,7 @@ export class ControlPlaneDO {
     return Math.min(left, right);
   }
 
-  private recordWatchError(spreadsheetId: string, message: string) {
-    const now = new Date().toISOString();
+  private recordWatchRenewalFailure(watch: SpreadsheetWatchRow, message: string, error: unknown) {
     this.ctx.storage.sql.exec(
       `
       UPDATE spreadsheet_watches
@@ -1192,9 +1536,17 @@ export class ControlPlaneDO {
       WHERE spreadsheet_id = ?
       `,
       message,
-      now,
-      spreadsheetId
+      new Date().toISOString(),
+      watch.spreadsheet_id
     );
+    console.error(JSON.stringify({
+      event: 'drive.watch.renew.failed',
+      spreadsheetId: watch.spreadsheet_id,
+      channelId: watch.channel_id,
+      expirationAt: watch.expiration_at,
+      lastWatchError: message,
+      ...(error === null ? {} : describeErrorForLog(error))
+    }));
   }
 
   private recordSpreadsheetWatchTombstone(watch: Pick<SpreadsheetWatchRow, 'spreadsheet_id' | 'expiration_at'>) {
@@ -1357,39 +1709,15 @@ function isNonRetriableWatchConfigurationError(lastWatchError: string | null) {
 }
 
 function isDriveWatchSubscriptionQuotaError(error: unknown) {
-  if (!(error instanceof AppError) || error.code !== 'BAD_GATEWAY') {
-    return false;
-  }
-
-  const detailsMessage =
-    typeof error.details === 'object'
-    && error.details !== null
-    && 'message' in error.details
-    && typeof error.details.message === 'string'
-      ? error.details.message
-      : '';
-
-  return isDriveWatchSubscriptionQuotaMessage(detailsMessage);
+  return error instanceof AppError && driveWatchQuotaErrorDetailsSchema.safeParse(error.details).success;
 }
 
 function describeWatchError(error: unknown) {
-  if (!(error instanceof AppError)) {
-    return error instanceof Error ? error.message : String(error);
+  if (isDriveWatchSubscriptionQuotaError(error)) {
+    return driveWatchQuotaErrorMessage;
   }
 
-  const detailsMessage =
-    typeof error.details === 'object'
-    && error.details !== null
-    && 'message' in error.details
-    && typeof error.details.message === 'string'
-      ? error.details.message
-      : null;
-
-  return detailsMessage ? `${error.message} ${detailsMessage}` : error.message;
-}
-
-function isDriveWatchSubscriptionQuotaMessage(message: string | null) {
-  return message?.includes('Rate limit exceeded for creating file subscriptions.') ?? false;
+  return error instanceof AppError ? error.message : unexpectedWatchErrorMessage;
 }
 
 function getActualWatchDurationMs(expirationAt: string | null, fallbackDurationMs: number) {
@@ -1419,4 +1747,19 @@ function getSpreadsheetWatchSafeRetryAt(tombstone: SpreadsheetWatchTombstoneRow)
   }
 
   return new Date(Math.max(...referenceTimes) + watchRetryAdviceGraceMs).toISOString();
+}
+
+// Delay before retry `attempt` (1-based): `baseMs`, doubling with each consecutive failure, capped at `maxMs`.
+function getBackoffDelayMs(attempt: number, baseMs: number, maxMs: number) {
+  return Math.min(maxMs, baseMs * 2 ** Math.max(attempt - 1, 0));
+}
+
+// Log fields for a failure. Logs are internal, so they keep the raw message and details that stored errors omit.
+function describeErrorForLog(error: unknown) {
+  return {
+    errorName: error instanceof Error ? error.name : 'UnknownError',
+    errorCode: error instanceof AppError ? error.code : null,
+    errorMessage: error instanceof Error ? error.message : String(error),
+    errorDetails: error instanceof AppError ? error.details ?? null : null
+  };
 }

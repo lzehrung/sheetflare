@@ -46,4 +46,16 @@ describe('readLoadConfig', () => {
       'SHEETFLARE_LOAD_INDEXED_LIST_REQUESTS must be a positive integer when provided.'
     );
   });
+
+  it('has no synthetic-principal knobs, because the Worker rate-limits by cf-connecting-ip and ignores x-forwarded-for', () => {
+    const config = readLoadConfig({
+      ...baseEnv,
+      SHEETFLARE_LOAD_RATE_LIMIT_PRINCIPAL_COUNT: '25',
+      SHEETFLARE_LOAD_RATE_LIMIT_REQUESTS_PER_PRINCIPAL: '3'
+    });
+
+    expect(config).toHaveProperty('rateLimitSamePrincipalRequests', 400);
+    expect(config).not.toHaveProperty('rateLimitPrincipalCount');
+    expect(config).not.toHaveProperty('rateLimitRequestsPerPrincipal');
+  });
 });

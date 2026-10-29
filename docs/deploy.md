@@ -33,7 +33,7 @@ npm run setup:staging
 
 Use `npm run setup -- --advanced` only when the safe defaults do not fit. Use the rest of this guide for CI, recovery, and manual fallback—not for a normal first deployment.
 
-For reruns from an existing setup config:
+For reruns from an existing production setup config:
 
 ```powershell
 npm run setup -- --apply-secrets
@@ -43,11 +43,18 @@ npm run setup -- --smoke
 npm run setup -- --verify
 ```
 
-- `--apply-secrets` applies Worker secrets only.
+These commands use `sheetflare.setup.json` and `apps/api/wrangler.jsonc`, so they change **production**. For staging, run the same flags through `npm run setup:staging -- <flag>` (for example `npm run setup:staging -- --apply-secrets`), which selects `sheetflare.staging.setup.json` and the staging Wrangler config. `--apply-secrets` replaces the bootstrap token and webhook secret on whichever Worker it targets.
+
+- `--apply-secrets` applies Worker secrets only. It mints a new bootstrap admin token and Drive webhook secret unless you export `ADMIN_BEARER_TOKEN` or `GOOGLE_DRIVE_WEBHOOK_SECRET`. A minted token is printed once. Because a new webhook secret orphans existing Drive watches, the run re-registers them when it knows the API URL (`.sheetflare.setup.local.json` or `SHEETFLARE_BASE_URL`) and an admin credential (`SHEETFLARE_ADMIN_CREDENTIAL`, or the token it just applied). `wrangler secret put` deploys that secret immediately, so setup still re-registers after a later step fails (for example bootstrap) instead of leaving channels on the old token. It registers at most once. If it cannot re-register, or re-registration fails, it warns and tells you to run `npm run ops:watch:drive`, then reports the original failure.
 - `--deploy` deploys the API Worker, including the hosted admin UI unless `adminUi` is `disabled`.
-- `--smoke` accepts a scoped admin API key or bootstrap credential through `SHEETFLARE_ADMIN_CREDENTIAL` or an interactive prompt; setup does not persist either credential.
-- `--verify` and `npm run doctor` check the resolved Google credential, Worker `/ready`, the hosted admin UI state, and Drive watches. Verify-only runs do not require Wrangler authentication.
+- `--bootstrap` upserts projects and tables, then creates the configured API keys. A key whose name already has an active key is skipped with a warning, so reruns never stack duplicate privileged keys. `--bootstrap --rotate-keys` deliberately replaces them: it creates all replacements first, then revokes every prior active key with those names through `DELETE /v1/admin/keys/{id}`. The key that authorized the run is revoked last, so earlier revocations still authenticate. Setup always sets `SHEETFLARE_BOOTSTRAP_ROTATE_KEYS` to `true` or `false` from `--rotate-keys`, so a value left in the environment cannot turn rotation on by itself. `--rotate-keys` requires `--bootstrap`. Running `npm run ops:bootstrap` directly rotates with `SHEETFLARE_BOOTSTRAP_ROTATE_KEYS=true`, and refuses unless `SHEETFLARE_SHOW_SECRETS=true`, because the new keys would otherwise be redacted after the old ones are revoked. If a later key request fails, bootstrap still prints the keys it already created and exits non-zero; setup hands those secrets off and then reports the failure.
+- `--smoke` accepts a scoped admin API key or bootstrap credential through `SHEETFLARE_ADMIN_CREDENTIAL` or an interactive prompt; setup does not persist either credential. When bootstrap skipped existing keys, supply their values through `SHEETFLARE_PRIVATE_READ_KEY` and `SHEETFLARE_MUTATION_KEY` too (or rotate).
+- `--verify` and `npm run doctor` check the resolved Google credential, Worker `/ready`, the hosted admin UI state, and Drive watches. Verify-only runs do not require Wrangler authentication. Anonymous `/ready` returns only `{ ok, service }`; `checks` and `notes` need an admin credential (the bootstrap token or a global key with `admin:projects`, supplied as `SHEETFLARE_ADMIN_CREDENTIAL`). Without one the doctor warns that readiness details are unavailable, and a key without global scope gets a 403 with the same guidance.
 - `.sheetflare.setup.local.json` stores the deployed `apiUrl` and resolved Google service-account email, not admin credentials.
+
+### Credential Handoff
+
+Setup prints every credential it minted once, in a block headed `SAVE THESE CREDENTIALS NOW`: the bootstrap admin token (only when setup generated it) and each API key bootstrap created. The block appears at the end of the run, including a failed run, so credentials minted before a failure are not lost. That includes keys from a bootstrap process that exits non-zero after printing its result marker. Setup never writes them to `sheetflare.setup.json` or `.sheetflare.setup.local.json` and cannot show them again. Credentials you supplied through the environment are not echoed. Output from a non-interactive run (CI logs, redirected files) contains this block, so treat it as secret. There is no flag to hide or reveal it.
 
 Use the rest of this document for CI, token scopes, Worker deployment, and post-deploy verification.
 
@@ -112,7 +119,7 @@ Wrangler-based CI needs:
 
 Scope the token to the target Cloudflare account and grant `Workers Scripts Write` for `wrangler deploy` and `wrangler secret put`. `CLOUDFLARE_ACCOUNT_ID` is an identifier rather than secret material, but it may remain a repository secret for workflow simplicity.
 
-This repository's staging Worker deployment also uses `SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY` and `SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN`.
+This repository's staging Worker deployment also uses `SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY` and `SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN`. The `Deploy Staging` workflow checks all four secrets right after installing dependencies, before it validates or deploys anything, and names each missing one in its failure; see [contributor-staging.md](../contributor-staging.md) for where the values come from. Each Deploy Staging run writes both values to the Worker, so update the matching GitHub secret whenever setup mints a new token or key ([keep them in sync](../contributor-staging.md#keep-the-github-secrets-and-the-worker-in-sync)).
 
 ## Pre-Deploy Checklist
 
@@ -148,7 +155,7 @@ npm run deploy:api:raw
 npm run deploy:staging:api:raw
 ```
 
-To invoke Wrangler directly outside setup:
+To invoke Wrangler directly outside setup (these target **production**; for staging use `--config apps/api/wrangler.staging.jsonc`):
 
 ```powershell
 npm --workspace @sheetflare/api run build
@@ -210,7 +217,7 @@ The API Worker serves the admin UI at `https://<your-worker>/admin/` from its ow
 - **Authorization**: the admin pages are static files. Every action calls the same authenticated `/v1/admin/*` routes as the CLI, with the same scopes and rate limits.
 - **Headers**: admin responses carry a strict CSP (`connect-src 'self'`), frame denial, `nosniff`, `no-referrer`, `noindex`, and `Cache-Control: no-store`.
 - **Switch**: `"adminUi": "enabled" | "disabled"` in `sheetflare.setup.json` (default `enabled`). `disabled` deploys no admin assets, and `/admin/` returns `404`. Setup configs that set the legacy `deploy.admin` to `false` default to `disabled`.
-- **Status**: `/ready` reports `checks.adminUi` as `enabled`, `disabled`, `invalid`, or `assets-missing`. `npm run doctor` compares it with setup config. `invalid` and `assets-missing` make `/admin/` return `503`; rerun `npm run setup -- --deploy` to fix them.
+- **Status**: `/ready` reports `checks.adminUi` as `enabled`, `disabled`, `invalid`, or `assets-missing` to admin-credentialed callers only; anonymous `/ready` returns `{ ok, service }`. `npm run doctor` compares it with setup config. `invalid` and `assets-missing` make `/admin/` return `503`; rerun `npm run setup -- --deploy` to fix them.
 
 Optional hardening: serve the Worker on a custom domain and add a [Cloudflare Access self-hosted application](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) for the `/admin` path, so only your identity provider's users can load the pages. Do not protect `/v1/*`, because API clients need it. Access for [`workers.dev`](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/) protects the whole Worker URL, API included, so set `workers_dev` to `false` once the custom domain serves traffic.
 
@@ -257,7 +264,9 @@ npm run dev:admin
 
 Use a scoped admin API key for routine work; use the bootstrap token only as break-glass. The startup log states whether a server-side credential is in use, never its value. Restart the server after changing the variable.
 
-The proxy attaches a credential only to requests that carry the admin UI's `x-sheetflare-admin-request` marker and come from `http://127.0.0.1:4173`. Requests from other browser origins, including other localhost ports, reach the Worker unauthenticated. Local processes that can reach port `4173` act with the server credential, the same trust boundary as the environment variable itself.
+The proxy forwards an explicit caller credential, such as one entered in the browser, when the request carries the admin UI marker `x-sheetflare-admin-request`. `SHEETFLARE_ADMIN_CREDENTIAL` is delegated to every local process able to reach `127.0.0.1:4173`: that process can send the marker together with `Sec-Fetch-Site: same-origin` and receive the server credential. The marker and Fetch Metadata checks only block cross-origin web pages. They do not show that a request came from a browser. On a shared or untrusted machine, leave the server credential unset and enter a credential in the browser instead.
+
+Requests from other browser origins, including other localhost ports, reach the Worker unauthenticated.
 
 Sheetflare never writes credentials to browser storage, setup state, or the URL. The credential field supports password managers. Any local process can bind `127.0.0.1:4173` while Sheetflare is stopped, so fill a saved credential only on a page you opened after starting `npm run dev:admin` yourself.
 
@@ -298,6 +307,8 @@ $env:SHEETFLARE_SMOKE_UPDATE_VALUES_JSON = '{"name":"Smoke Row Updated"}'
 ```
 
 The smoke row will be created with a generated ID and deleted automatically.
+
+Smoke compares a configured number with its read-back after removing `,`, spaces, and one leading or trailing `$`, `€`, `£`, or `¥`, so `1234` matches `1,234` or `$1,234.00`; percentages and decimal commas are not matched, so use plain number formatting for smoke columns.
 
 If you also want anonymous `public-read` coverage, add:
 

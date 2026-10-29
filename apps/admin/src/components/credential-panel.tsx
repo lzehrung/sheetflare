@@ -2,8 +2,9 @@ import type { FormEvent } from 'react';
 import type { AdminAccess } from '../auth';
 
 type CredentialPanelProps = {
-  credentialStatus: 'required' | 'checking' | 'configured' | 'rejected' | 'error';
+  credentialStatus: 'required' | 'checking' | 'configured' | 'project-scoped' | 'rejected' | 'error';
   credentialSource: AdminAccess['source'] | null;
+  projectScopeSlug: string | null;
   draftCredential: string;
   onDraftCredentialChange: (value: string) => void;
   onSave: () => void;
@@ -21,6 +22,8 @@ function getCredentialBadgeLabel(status: CredentialPanelProps['credentialStatus'
       return 'Checking';
     case 'configured':
       return 'Configured';
+    case 'project-scoped':
+      return 'Project key';
     case 'rejected':
       return 'Rejected';
     case 'error':
@@ -42,6 +45,7 @@ function getCredentialSourceMessage(source: CredentialPanelProps['credentialSour
 export function CredentialPanel({
   credentialStatus,
   credentialSource,
+  projectScopeSlug,
   draftCredential,
   onDraftCredentialChange,
   onSave,
@@ -63,6 +67,11 @@ export function CredentialPanel({
         <div>
           <h2>Operator Access</h2>
           <p className="muted compact">{getCredentialSourceMessage(credentialSource)}</p>
+          {projectScopeSlug ? (
+            <p className="muted compact">
+              This is a project-scoped key limited to <code>{projectScopeSlug}</code>. Project registry, global keys, and spreadsheet watches need a global admin key.
+            </p>
+          ) : null}
         </div>
         <span className="badge">{getCredentialBadgeLabel(credentialStatus)}</span>
       </div>

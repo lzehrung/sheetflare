@@ -128,7 +128,18 @@ export const tableCacheStatusSchema = z.object({
   lastSyncCompletedAt: z.string().datetime().nullable(),
   lastSyncError: z.string().nullable(),
   validation: tableValidationSummarySchema,
-  externalChange: tableExternalChangeSchema
+  externalChange: tableExternalChangeSchema,
+  dataGeneration: z.number().int().nonnegative()
+});
+
+/**
+ * Cheap freshness token for a table cache. `dataGeneration` only ever increases and changes
+ * whenever a read could return different data or staleness, so callers can key cached reads by it.
+ */
+export const tableDataGenerationSchema = z.object({
+  dataGeneration: z.number().int().nonnegative(),
+  lastSyncCompletedAt: z.string().datetime().nullable(),
+  cacheTtlSeconds: z.number().int().nonnegative()
 });
 
 export const listRowsQuerySchema = z.object({
@@ -176,5 +187,6 @@ export type TableValidationIssue = z.infer<typeof tableValidationIssueSchema>;
 export type TableValidationSummary = z.infer<typeof tableValidationSummarySchema>;
 export type TableExternalChange = z.infer<typeof tableExternalChangeSchema>;
 export type TableCacheStatus = z.infer<typeof tableCacheStatusSchema>;
+export type TableDataGeneration = z.infer<typeof tableDataGenerationSchema>;
 export type ListRowsQuery = z.infer<typeof listRowsQuerySchema>;
 export type ListRowsResult = z.infer<typeof listRowsResultSchema>;

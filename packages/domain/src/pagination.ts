@@ -63,6 +63,8 @@ export type CursorValue =
 
 export interface QueryCursorPayload {
   fingerprint: string;
+  /** Cache content revision the page was read from; cursors from other revisions are stale. */
+  revision: number;
   sortField: string;
   sortDirection: 'asc' | 'desc';
   rowId: string;
@@ -91,6 +93,7 @@ const cursorValueSchema = z.discriminatedUnion('kind', [
 
 const queryCursorPayloadSchema = z.object({
   fingerprint: z.string(),
+  revision: z.number().int().safe().nonnegative(),
   sortField: z.string().min(1),
   sortDirection: z.enum(['asc', 'desc']),
   rowId: z.string().min(1),
@@ -165,7 +168,8 @@ export function encodeQueryCursor(cursor: QueryCursorPayload): string {
 export function decodeQueryCursor(
   cursor: string | null | undefined,
   expectedFingerprint: string,
-  expectedSort: QuerySortSpec
+  expectedSort: QuerySortSpec,
+  expectedRevision: number
 ): QueryCursorPayload | null {
   if (!cursor) return null;
 
@@ -188,6 +192,15 @@ export function decodeQueryCursor(
     parsed.sortDirection !== expectedSort.direction
   ) {
     throw new BadRequestError('Pagination cursor does not match the current query.');
+  }
+
+  // Keyset cursors skip or repeat rows when rows move between pages, so a cursor is only valid
+  // for the cache revision that produced it.
+  if (parsed.revision !== expectedRevision) {
+    throw new BadRequestError(
+      'Pagination cursor is stale because the table data changed after it was issued. Restart pagination without a cursor.',
+      { reason: 'stale-cursor' }
+    );
   }
 
   return parsed;

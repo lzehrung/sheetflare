@@ -27,15 +27,22 @@ class SqlStorageHarness {
 
   exec(sql: string, ...parameters: Array<string | number | boolean | null>) {
     const trimmed = sql.trimStart();
-    const statement = this.database.prepare(sql);
+    const statement = this.database.prepare<Array<string | number | boolean | null>, SqlRow>(sql);
 
     if (/^(SELECT|WITH)\b/i.test(trimmed)) {
-      return new SqlResult(statement.all(...parameters) as SqlRow[]);
+      return new SqlResult(statement.all(...parameters));
     }
 
     statement.run(...parameters);
     return new SqlResult([]);
   }
+}
+
+function listTableNames(database: Database.Database) {
+  const rows = database
+    .prepare<[], { name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+    .all();
+  return rows.map((row) => row.name);
 }
 
 function createDurableObjectState() {
@@ -58,10 +65,21 @@ function createDurableObjectState() {
       deleteAlarm() {
         alarmTimestamp = null;
         return Promise.resolve();
+      },
+      // Matches workerd for compatibility dates from 2026-02-24: the whole database and any alarm are removed.
+      deleteAll() {
+        for (const name of listTableNames(database)) {
+          database.exec(`DROP TABLE "${name}"`);
+        }
+        alarmTimestamp = null;
+        return Promise.resolve();
       }
     },
     getAlarmTimestamp() {
       return alarmTimestamp;
+    },
+    getTableNames() {
+      return listTableNames(database);
     }
   };
 }
@@ -121,6 +139,21 @@ class LocalDurableObjectNamespace<TEnv> {
 
   getAlarm(name: string) {
     return this.instances.get(name)?.__state.getAlarmTimestamp() ?? null;
+  }
+
+  /** Tables persisted by the named instance; an instance that was never addressed has none. */
+  getStoredTableNames(name: string) {
+    return this.instances.get(name)?.__state.getTableNames() ?? [];
+  }
+
+  /** Runs SQL against the named instance's storage, e.g. to seed rows written by an earlier release. */
+  runSql(name: string, query: string, ...parameters: Array<string | number | boolean | null>) {
+    const entry = this.instances.get(name);
+    if (!entry) {
+      throw new Error(`Durable object ${name} has not been created.`);
+    }
+
+    return entry.__state.storage.sql.exec(query, ...parameters).toArray();
   }
 }
 
