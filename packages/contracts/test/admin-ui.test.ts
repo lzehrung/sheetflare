@@ -14,6 +14,14 @@ describe('buildAdminUiHeaders', () => {
     });
   });
 
+  it('keeps the default cache policy unless an immutable asset asks for it', () => {
+    expect(buildAdminUiHeaders({ cache: 'no-store' })['Cache-Control']).toBe('no-store');
+    expect(buildAdminUiHeaders({ cache: 'immutable' })['Cache-Control']).toBe('public, max-age=31536000, immutable');
+    expect(buildAdminUiHeaders({ cache: 'immutable', hotReloadOrigin: 'ws://127.0.0.1:4173' })['Content-Security-Policy']).toContain(
+      "connect-src 'self' ws://127.0.0.1:4173"
+    );
+  });
+
   it('adds only the hot-reload origin for local development', () => {
     const hosted = buildAdminUiHeaders();
     const local = buildAdminUiHeaders({ hotReloadOrigin: 'ws://127.0.0.1:4173' });

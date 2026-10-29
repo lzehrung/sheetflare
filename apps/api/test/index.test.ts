@@ -4,6 +4,7 @@ import type { Env } from '../src/env';
 import {
   __getRecentApiKeyTouchCacheSizeForTests,
   __resetGatewayStateForTests,
+  __timingSafeEqualSecretForTests,
   __touchApiKeyIfNeededForTests,
   createApp
 } from '../src/index';
@@ -22,6 +23,14 @@ import {
   getOnlyCachedReadRequest,
   requireCacheKey
 } from './support/harness';
+
+describe('timingSafeEqualSecret', () => {
+  it('matches equal secrets and rejects unequal or different-length secrets', async () => {
+    expect(await __timingSafeEqualSecretForTests('drive-secret', 'drive-secret')).toBe(true);
+    expect(await __timingSafeEqualSecretForTests('drive-secret', 'Drive-secret')).toBe(false);
+    expect(await __timingSafeEqualSecretForTests('drive-secret', 'drive-secret-longer')).toBe(false);
+  });
+});
 
 describe('CachedTableReads', () => {
   it('sets client-safe and Workers Cache headers for list rows', async () => {
@@ -875,6 +884,65 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  it('throttles repeated invalid Google Drive webhook tokens per client address', async () => {
+    const app = createApp();
+    const env = createEnv({ rateLimitFixedWindow: true });
+    env.RATE_LIMIT_MAX_REQUESTS = '100';
+    const budget = 100;
+    const blockedIp = '203.0.113.8';
+    const otherIp = '203.0.113.9';
+    const probes = env as Env & { __rateLimitRequests: Array<{ name: string; key: string }> };
+
+    const notify = (ip: string, token: string) => app.request(
+      '/v1/system/google/drive/notifications',
+      {
+        method: 'POST',
+        headers: {
+          'cf-connecting-ip': ip,
+          'x-goog-channel-id': 'channel-1',
+          'x-goog-resource-id': 'resource-1',
+          'x-goog-resource-state': 'update',
+          'x-goog-channel-token': token
+        }
+      },
+      env
+    );
+
+    for (let attempt = 0; attempt < budget; attempt += 1) {
+      const response = await notify(blockedIp, 'wrong-secret');
+      expect(response.status).toBe(401);
+      await response.arrayBuffer();
+    }
+
+    const limited = await notify(blockedIp, 'wrong-secret');
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get('retry-after')).toMatch(/^[1-9]\d*$/);
+    expect(await limited.json()).toMatchObject({
+      error: {
+        code: 'TOO_MANY_REQUESTS',
+        details: {
+          principal: `system:client:${blockedIp}`,
+          routeFamily: 'system',
+          operationKey: 'webhook-failure'
+        }
+      }
+    });
+
+    const checksAtBlock = probes.__rateLimitRequests.filter((request) => request.key === 'webhook-failure');
+    expect(checksAtBlock).toHaveLength(budget + 1);
+    expect(checksAtBlock.every((request) => request.name === `rate-limit:system:client:${blockedIp}`)).toBe(true);
+
+    const stillLimited = await notify(blockedIp, 'drive-secret');
+    expect(stillLimited.status).toBe(429);
+    expect(stillLimited.headers.get('retry-after')).toMatch(/^[1-9]\d*$/);
+    await stillLimited.arrayBuffer();
+    expect(probes.__rateLimitRequests.filter((request) => request.key === 'webhook-failure')).toHaveLength(budget + 1);
+
+    const otherIpResponse = await notify(otherIp, 'drive-secret');
+    expect(otherIpResponse.status).toBe(204);
+    expect(probes.__rateLimitRequests.filter((request) => request.name === `rate-limit:system:client:${otherIp}`)).toEqual([]);
   });
 
   it('rejects duplicate project creation unless upsert is requested explicitly', async () => {
@@ -1808,6 +1876,60 @@ describe('api routes', () => {
       expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
       expect(response.headers.get('cache-tag')).toBeNull();
     }
+  });
+
+  it('returns a cached read body unchanged on a hit and strips unknown fields on a miss', async () => {
+    const app = createApp();
+    const hitBody = '{"data":[],"nextCursor":null,"extra":"kept-on-hit"}';
+    const hitResponse = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          authorization: apiKeys.project.authorization
+        }
+      },
+      createEnv({
+        cachedReadResponseBody: hitBody
+      })
+    );
+
+    expect(hitResponse.status).toBe(200);
+    expect(await hitResponse.text()).toBe(hitBody);
+
+    const missResponse = await app.request(
+      '/v1/projects/demo/tables/users/rows',
+      {
+        headers: {
+          authorization: apiKeys.project.authorization
+        }
+      },
+      createEnv({
+        hooks: {
+          table: ({ body }) => {
+            if (body.type !== 'table.rows.list') {
+              return undefined;
+            }
+
+            return Response.json({
+              type: 'table.rows.list.result',
+              result: {
+                data: [],
+                nextCursor: null,
+                extra: 'stripped-on-miss'
+              }
+            });
+          }
+        }
+      })
+    );
+
+    expect(missResponse.status).toBe(200);
+    const missText = await missResponse.text();
+    expect(missText).not.toContain('stripped-on-miss');
+    expect(JSON.parse(missText)).toEqual({
+      data: [],
+      nextCursor: null
+    });
   });
 
   it('replaces a downstream cacheable client directive with gateway no-store', async () => {
@@ -3080,6 +3202,21 @@ describe('hosted admin UI', () => {
             }
           });
         }
+        if (path === '/admin/assets/index-abc123.js') {
+          return new Response('console.log("admin-asset")', {
+            headers: {
+              'content-type': 'text/javascript; charset=utf-8',
+              'cache-control': 'public, max-age=0, must-revalidate'
+            }
+          });
+        }
+        if (path === '/admin/assets/index.html') {
+          return new Response('<!doctype html><title>Asset HTML</title>', {
+            headers: {
+              'content-type': 'text/html; charset=utf-8'
+            }
+          });
+        }
         return new Response(null, { status: 404 });
       }
     };
@@ -3169,6 +3306,32 @@ describe('hosted admin UI', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.json()).toEqual({ serverCredential: false });
+  });
+
+  it('caches hashed admin assets immutably and leaves other admin responses uncached', async () => {
+    const { env } = createAdminEnv('enabled');
+    const app = createApp();
+
+    const entry = await app.request('/admin/', {}, env);
+    expect(entry.status).toBe(200);
+    expect(entry.headers.get('cache-control')).toBe('no-store');
+
+    const asset = await app.request('/admin/assets/index-abc123.js', {}, env);
+    expect(asset.status).toBe(200);
+    expect(asset.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    expect(await asset.text()).toContain('admin-asset');
+
+    const assetHtml = await app.request('/admin/assets/index.html', {}, env);
+    expect(assetHtml.status).toBe(200);
+    expect(assetHtml.headers.get('cache-control')).toBe('no-store');
+
+    const missing = await app.request('/admin/assets/missing-abc123.js', {}, env);
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get('cache-control')).toBe('no-store');
+
+    const session = await app.request('/__sheetflare/admin-session', {}, env);
+    expect(session.status).toBe(200);
+    expect(session.headers.get('cache-control')).toBe('no-store');
   });
 
   it.each([

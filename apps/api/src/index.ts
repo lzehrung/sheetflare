@@ -95,6 +95,7 @@ type AppVariables = {
     operationKey: string;
   };
   retryAfterSeconds?: number;
+  preserveAdminAssetCache?: boolean;
 };
 
 type AppContext = Context<{ Bindings: Env; Variables: AppVariables }>;
@@ -232,6 +233,15 @@ function jsonContent(schema: z.ZodTypeAny) {
   };
 }
 
+// A string-typed media type makes zod-openapi accept a raw Response, so a cache hit can pass its body through.
+function cachedReadJsonContent(schema: z.ZodTypeAny): { [mediaType: string]: { schema: z.ZodTypeAny } } {
+  return {
+    'application/json': {
+      schema
+    }
+  };
+}
+
 function parseDurableRpcErrorResponse(error: DurableRpcError) {
   try {
     const parsed = JSON.parse(error.responseText) as {
@@ -316,6 +326,17 @@ const principalCache = new Map<string, CachedPrincipal>();
 const readinessProbeTtlMs = 10_000;
 type ReadinessProbe = { outcome: { ok: true } | { ok: false; error: unknown }; expiresAtMs: number };
 let readinessProbe: ReadinessProbe | null = null;
+const webhookFailureOperationKey = 'webhook-failure';
+const maxWebhookFailureBlocks = 10_000;
+type WebhookFailureBlock = {
+  principal: string;
+  routeFamily: string;
+  operationKey: string;
+  maxRequests: number;
+  windowSeconds: number;
+  resetAtMs: number;
+};
+const webhookFailureBlocks = new Map<string, WebhookFailureBlock>();
 const corsAllowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
 const corsAllowedHeaders = 'Authorization, Content-Type';
 const cacheStatusHeaderName = 'x-sheetflare-cache-status';
@@ -630,7 +651,11 @@ function readAuthorization(header: string | undefined): PresentedAuthorization {
 async function resolveRateLimitPrincipal(c: AppContext) {
   const presented = readAuthorization(c.req.header('authorization'));
   const bootstrapAdminCredential = getBootstrapAdminCredential(c.env);
-  if (presented.kind === 'bearer' && bootstrapAdminCredential && presented.credential === bootstrapAdminCredential) {
+  if (
+    presented.kind === 'bearer'
+    && bootstrapAdminCredential
+    && await timingSafeEqualSecret(presented.credential, bootstrapAdminCredential)
+  ) {
     return 'bootstrap-admin';
   }
 
@@ -700,6 +725,120 @@ async function enforceRateLimit(c: AppContext) {
 async function hashCredentialMaterial(value: string) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+// Compare SHA-256 digests so the loop runs for a fixed length even when the secrets differ in length.
+function timingSafeEqualBytes(left: Uint8Array, right: Uint8Array) {
+  const length = Math.max(left.length, right.length);
+  let mismatch = left.length ^ right.length;
+  for (let index = 0; index < length; index += 1) {
+    const leftByte = index < left.length ? left[index] ?? 0 : 0;
+    const rightByte = index < right.length ? right[index] ?? 0 : 0;
+    mismatch |= leftByte ^ rightByte;
+  }
+  return mismatch === 0;
+}
+
+async function timingSafeEqualSecret(left: string, right: string) {
+  const encoder = new TextEncoder();
+  const [leftDigest, rightDigest] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(left)),
+    crypto.subtle.digest('SHA-256', encoder.encode(right))
+  ]);
+  return timingSafeEqualBytes(new Uint8Array(leftDigest), new Uint8Array(rightDigest));
+}
+
+function readWebhookFailureBlock(clientKey: string, nowMs: number) {
+  const block = webhookFailureBlocks.get(clientKey);
+  if (block === undefined) {
+    return null;
+  }
+  if (block.resetAtMs <= nowMs) {
+    webhookFailureBlocks.delete(clientKey);
+    return null;
+  }
+  return block;
+}
+
+function rememberWebhookFailureBlock(clientKey: string, block: WebhookFailureBlock) {
+  evictForInsert(webhookFailureBlocks, maxWebhookFailureBlocks, (entry) => entry.resetAtMs <= Date.now());
+  webhookFailureBlocks.set(clientKey, block);
+}
+
+function throwWebhookFailureLimit(c: AppContext, block: WebhookFailureBlock): never {
+  c.set('rateLimit', {
+    limit: block.maxRequests,
+    remaining: 0,
+    resetAtMs: block.resetAtMs
+  });
+  c.set('rateLimitContext', {
+    principal: block.principal,
+    routeFamily: block.routeFamily,
+    operationKey: block.operationKey
+  });
+  throw createRateLimitError(c, {
+    principal: block.principal,
+    routeFamily: block.routeFamily,
+    operationKey: block.operationKey,
+    maxRequests: block.maxRequests,
+    windowSeconds: block.windowSeconds,
+    resetAtMs: block.resetAtMs
+  });
+}
+
+async function assertWebhookToken(c: AppContext, webhookToken: string, providedToken: string | undefined) {
+  const clientKey = getRateLimitPrincipal(c);
+  const blocked = readWebhookFailureBlock(clientKey, Date.now());
+  if (blocked) {
+    throwWebhookFailureLimit(c, blocked);
+  }
+
+  const matches = await timingSafeEqualSecret(providedToken ?? '', webhookToken);
+  if (matches) {
+    return;
+  }
+
+  const config = getRateLimitConfiguration(c.env);
+  const principal = `system:${clientKey}`;
+  const routeFamily = 'system';
+  const response = await doRpc<RateLimitDoResponse>(getRateLimitStub(c.env, `${routeFamily}:${clientKey}`), {
+    type: 'rate-limit.check',
+    key: webhookFailureOperationKey,
+    limit: config.maxRequests,
+    windowSeconds: config.windowSeconds
+  });
+  const { result } = response;
+  c.set('rateLimit', {
+    limit: config.maxRequests,
+    remaining: result.remaining,
+    resetAtMs: result.resetAtMs
+  });
+  c.set('rateLimitContext', {
+    principal,
+    routeFamily,
+    operationKey: webhookFailureOperationKey
+  });
+
+  if (!result.allowed) {
+    rememberWebhookFailureBlock(clientKey, {
+      principal,
+      routeFamily,
+      operationKey: webhookFailureOperationKey,
+      maxRequests: config.maxRequests,
+      windowSeconds: config.windowSeconds,
+      resetAtMs: result.resetAtMs
+    });
+    throw createRateLimitError(c, {
+      principal,
+      routeFamily,
+      operationKey: webhookFailureOperationKey,
+      maxRequests: config.maxRequests,
+      windowSeconds: config.windowSeconds,
+      resetAtMs: result.resetAtMs
+    });
+  }
+
+  throw new UnauthorizedError('Invalid Google Drive webhook token.');
 }
 
 async function touchApiKeyIfNeeded(env: Env, apiKeyId: string, requestId?: string) {
@@ -901,7 +1040,7 @@ async function identifyCaller(c: AppContext): Promise<AuthContext> {
   }
 
   const bootstrapAdminCredential = getBootstrapAdminCredential(c.env);
-  if (bootstrapAdminCredential && presented.credential === bootstrapAdminCredential) {
+  if (bootstrapAdminCredential && await timingSafeEqualSecret(presented.credential, bootstrapAdminCredential)) {
     c.set('authPrincipal', 'bootstrap-admin');
     return { kind: 'bootstrap-admin' };
   }
@@ -1477,7 +1616,7 @@ const listRowsRoute = createRoute({
   responses: {
     200: {
       description: 'List cached rows',
-      content: jsonContent(listRowsResultSchema)
+      content: cachedReadJsonContent(listRowsResultSchema)
     },
     400: badRequestResponse,
     ...protectedRouteErrorResponses,
@@ -1496,7 +1635,7 @@ const getSchemaRoute = createRoute({
   responses: {
     200: {
       description: 'Get inferred table schema',
-      content: jsonContent(getSchemaResultSchema)
+      content: cachedReadJsonContent(getSchemaResultSchema)
     },
     ...protectedRouteErrorResponses,
     404: notFoundResponse
@@ -1651,7 +1790,7 @@ const getRowRoute = createRoute({
   responses: {
     200: {
       description: 'Get one row by managed ID',
-      content: jsonContent(getRowResultSchema)
+      content: cachedReadJsonContent(getRowResultSchema)
     },
     ...protectedRouteErrorResponses,
     404: notFoundResponse
@@ -1798,11 +1937,13 @@ function noStoreJsonResponse(body: unknown, status = 200, headers: Record<string
   });
 }
 
-function applyDefaultGatewayCacheSafetyHeaders(response: Response) {
-  const cacheControl = response.headers.get('cache-control');
-  const hasNoStore = cacheControl?.split(',').some((directive) => directive.trim().toLowerCase() === 'no-store');
-  if (!hasNoStore) {
-    response.headers.set('cache-control', 'no-store');
+function applyDefaultGatewayCacheSafetyHeaders(response: Response, preserveCacheControl = false) {
+  if (!preserveCacheControl) {
+    const cacheControl = response.headers.get('cache-control');
+    const hasNoStore = cacheControl?.split(',').some((directive) => directive.trim().toLowerCase() === 'no-store');
+    if (!hasNoStore) {
+      response.headers.set('cache-control', 'no-store');
+    }
   }
   response.headers.delete('cloudflare-cdn-cache-control');
   response.headers.delete('cache-tag');
@@ -1995,10 +2136,21 @@ async function cachedTableReadSuccessResponse(
   resolvedConfig: ResolvedTableConfigSnapshot
 ) {
   const result = await runCachedTableRead(env, operation, resolvedConfig);
+  const parsed = parseCachedTableReadResult(operation, result);
   const cacheStatus = await getCachedTableReadCacheStatus(env, operation, resolvedConfig);
-  return Response.json(result, {
+  return Response.json(parsed, {
     headers: cachedTableReadSuccessHeaders(operation, cacheStatus)
   });
+}
+
+function parseCachedTableReadResult(operation: CachedTableReadOperation, result: unknown) {
+  if (operation.kind === 'listRows') {
+    return listRowsResultSchema.parse(result);
+  }
+  if (operation.kind === 'getRow') {
+    return getRowResultSchema.parse(result);
+  }
+  return getSchemaResultSchema.parse(result);
 }
 
 function compareStableJsonKeys(left: string, right: string) {
@@ -2115,41 +2267,30 @@ async function fetchCachedTableRead(c: AppContext, pathname: string, options: Ca
   });
 }
 
-async function parseCachedTableReadResponse<TSchema extends z.ZodType>(
-  c: AppContext,
-  response: Response,
-  schema: TSchema
-): Promise<z.infer<TSchema>> {
+function passThroughCachedReadResponse(response: Response) {
+  const headers = new Headers();
+  const contentType = response.headers.get('content-type');
+  if (contentType) {
+    headers.set('content-type', contentType);
+  }
   const cacheControl = response.headers.get('cache-control');
   if (cacheControl) {
-    c.header('cache-control', cacheControl);
+    headers.set('cache-control', cacheControl);
   }
-
   const cacheStatus = response.headers.get('cf-cache-status')?.trim();
   if (cacheStatus) {
-    c.header(cacheStatusHeaderName, cacheStatus);
+    headers.set(cacheStatusHeaderName, cacheStatus);
+  }
+  const retryAfter = response.headers.get('retry-after');
+  if (retryAfter) {
+    headers.set('retry-after', retryAfter);
   }
 
-  const body: unknown = await response.json();
-  if (response.ok) {
-    return schema.parse(body);
-  }
-
-  const errorBody = errorResponseSchema.parse(body);
-  const retryAfterSeconds = Number.parseInt(response.headers.get('retry-after') ?? '', 10);
-  if (Number.isFinite(retryAfterSeconds)) {
-    c.set('retryAfterSeconds', retryAfterSeconds);
-  }
-  throw new AppError(errorBody.error.message, errorBody.error.code, response.status, errorBody.error.details);
-}
-
-async function fetchCachedTableReadJson<TSchema extends z.ZodType>(
-  c: AppContext,
-  schema: TSchema,
-  pathname: string,
-  options: CachedTableReadFetchOptions
-): Promise<z.infer<TSchema>> {
-  return parseCachedTableReadResponse(c, await fetchCachedTableRead(c, pathname, options), schema);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
 }
 
 const maxPurgeCacheTagLength = 1024;
@@ -2277,6 +2418,7 @@ export class CachedTableReads extends WorkerEntrypoint<Env, CachedTableReadProps
 }
 
 const adminUiHeaders = buildAdminUiHeaders();
+const immutableAdminAssetHeaders = buildAdminUiHeaders({ cache: 'immutable' });
 
 type AdminUiStatus = 'enabled' | 'disabled' | 'invalid' | 'assets-missing';
 
@@ -2309,10 +2451,33 @@ async function serveAdminUi(c: AppContext): Promise<Response> {
 
   const assetResponse = await c.env.ASSETS.fetch(c.req.raw);
   const response = new Response(assetResponse.body, assetResponse);
-  for (const [name, value] of Object.entries(adminUiHeaders)) {
+  const immutableAsset = shouldCacheAdminAssetImmutably(c.req.path, assetResponse);
+  const headers = immutableAsset ? immutableAdminAssetHeaders : adminUiHeaders;
+  for (const [name, value] of Object.entries(headers)) {
     response.headers.set(name, value);
   }
+  if (immutableAsset) {
+    c.set('preserveAdminAssetCache', true);
+  }
   return response;
+}
+
+function isHtmlContentType(contentType: string | null) {
+  if (contentType === null) {
+    return false;
+  }
+  const mediaType = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+  return mediaType === 'text/html';
+}
+
+function shouldCacheAdminAssetImmutably(path: string, assetResponse: Response) {
+  if (assetResponse.status !== 200 && assetResponse.status !== 304) {
+    return false;
+  }
+  if (!path.startsWith('/admin/assets/')) {
+    return false;
+  }
+  return !isHtmlContentType(assetResponse.headers.get('content-type'));
 }
 
 function createApp() {
@@ -2329,7 +2494,7 @@ function createApp() {
       applyCorsHeaders(c.res, c.req.raw, c.env);
     }
 
-    applyDefaultGatewayCacheSafetyHeaders(c.res);
+    applyDefaultGatewayCacheSafetyHeaders(c.res, c.get('preserveAdminAssetCache') === true);
     c.res.headers.set('x-request-id', c.get('requestId'));
     const rateLimit = c.get('rateLimit');
     const rateLimitContext = c.get('rateLimitContext');
@@ -2689,9 +2854,8 @@ function createApp() {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
     const tableAccess = await authorizeTableRead(c, params.project, params.table);
     const query = parseListRowsQuery(c);
-    return c.json(await fetchCachedTableReadJson(
+    return passThroughCachedReadResponse(await fetchCachedTableRead(
       c,
-      listRowsResultSchema,
       `${cachedTableReadBasePath(params.project, params.table)}/rows`,
       { tableAccess, query }
     ));
@@ -2700,9 +2864,8 @@ function createApp() {
   app.openapi(getSchemaRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
     const tableAccess = await authorizeTableRead(c, params.project, params.table);
-    return c.json(await fetchCachedTableReadJson(
+    return passThroughCachedReadResponse(await fetchCachedTableRead(
       c,
-      getSchemaResultSchema,
       `${cachedTableReadBasePath(params.project, params.table)}/schema`,
       { tableAccess }
     ));
@@ -2846,9 +3009,7 @@ function createApp() {
       throw new BadRequestError('Missing required Google Drive notification headers.');
     }
 
-    if (providedToken !== webhookToken) {
-      throw new UnauthorizedError('Invalid Google Drive webhook token.');
-    }
+    await assertWebhookToken(c, webhookToken, providedToken);
 
     c.set('authPrincipal', 'system:google-drive');
     const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
@@ -2874,9 +3035,8 @@ function createApp() {
   app.openapi(getRowRoute, async (c) => {
     const params = parsePathParams(c, rowParamsSchema);
     const tableAccess = await authorizeTableRead(c, params.project, params.table);
-    return c.json(await fetchCachedTableReadJson(
+    return passThroughCachedReadResponse(await fetchCachedTableRead(
       c,
-      getRowResultSchema,
       `${cachedTableReadBasePath(params.project, params.table)}/rows/${encodeURIComponent(params.id)}`,
       { tableAccess }
     ));
@@ -3023,6 +3183,7 @@ const app = createApp();
 function resetGatewayStateForTests() {
   recentApiKeyTouches.clear();
   principalCache.clear();
+  webhookFailureBlocks.clear();
   readinessProbe = null;
 }
 
@@ -3044,6 +3205,7 @@ export {
   verifyApiKeyCredential as __verifyApiKeyCredentialForTests,
   resetGatewayStateForTests as __resetGatewayStateForTests,
   getRecentApiKeyTouchCacheSizeForTests as __getRecentApiKeyTouchCacheSizeForTests,
-  getPrincipalCacheSizeForTests as __getPrincipalCacheSizeForTests
+  getPrincipalCacheSizeForTests as __getPrincipalCacheSizeForTests,
+  timingSafeEqualSecret as __timingSafeEqualSecretForTests
 };
 export default app;
