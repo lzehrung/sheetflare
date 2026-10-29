@@ -203,7 +203,7 @@ Important fields:
 - `lastSyncError`
 - `validation`
 
-`lastSyncStartedAt` and `validation` change only on a full rebuild from Google Sheets. A successful create or update refreshes the cache in place and sets `lastSyncCompletedAt` to the mutation time, which also restarts the TTL clock. A delete does the same only when the cache was fresh and the header layout is unchanged; otherwise it triggers a full rebuild, which sets all of these normally. Point mutations do not recompute `validation`.
+`lastSyncStartedAt` and `validation` change only on a full rebuild from Google Sheets. A successful create or update refreshes the cache in place and sets `lastSyncCompletedAt` to the mutation time, which also restarts the TTL clock. A delete does the same only when the cache was fresh, the header layout is unchanged, and nothing else changed the cached rows while the delete was in flight (a sync or point read that ran meanwhile may already have seen the sheet without the row, and shifting its row numbers again would corrupt them); otherwise it triggers a full rebuild, which sets all of these normally. Point mutations do not recompute `validation`.
 
 Interpretation:
 
