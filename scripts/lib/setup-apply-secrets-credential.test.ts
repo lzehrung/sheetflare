@@ -7,10 +7,11 @@ import { createDefaultSetupConfig } from './setup-config';
 const oldBootstrapToken = 'old-bootstrap-token';
 const spreadsheetId = '<SPREADSHEET_ID>';
 
-const boundary = vi.hoisted(() => ({
-  commands: [] as Array<{ args: string[]; input: string | null; envCredential: string | null }>,
-  bearers: [] as string[]
-}));
+const boundary = vi.hoisted(() => {
+  const commands: Array<{ args: string[]; input: string | null; envCredential: string | null }> = [];
+  const bearers: string[] = [];
+  return { commands, bearers };
+});
 
 vi.mock('./process', async () => {
   const actual = await vi.importActual<typeof import('./process')>('./process');

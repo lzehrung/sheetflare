@@ -33,6 +33,19 @@ describe('findUnpersistedValues', () => {
     expect(findUnpersistedValues({ count: '7', active: 'true' }, { count: 7, active: true })).toEqual([]);
   });
 
+  it('accepts a configured boolean that Sheets reads back as its formatted TRUE/FALSE text', () => {
+    expect(findUnpersistedValues({ active: 'TRUE', archived: 'FALSE' }, { active: true, archived: false })).toEqual([]);
+  });
+
+  it('still flags a configured boolean that reads back as the opposite formatted value', () => {
+    expect(findUnpersistedValues({ active: 'FALSE' }, { active: true })).toHaveLength(1);
+  });
+
+  it('compares a configured string "TRUE" as a string, not as a boolean', () => {
+    expect(findUnpersistedValues({ label: 'TRUE' }, { label: 'TRUE' })).toEqual([]);
+    expect(findUnpersistedValues({ label: 'true' }, { label: 'TRUE' })).toHaveLength(1);
+  });
+
   it('does not coerce structurally different values', () => {
     expect(findUnpersistedValues({ tags: 'a,b' }, { tags: ['a', 'b'] })).toHaveLength(1);
   });
