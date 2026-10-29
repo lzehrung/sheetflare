@@ -90,6 +90,8 @@ Project-scoped admin keys with `admin:keys` can create keys only for their own p
 
 Project deletion is destructive for Sheetflare-managed control-plane state only. It clears configured table caches before removing project metadata, revokes API keys scoped to that project, and stops Google Drive watches for spreadsheets no remaining projects use. It does not delete the upstream Google spreadsheet. Delete requests are idempotent, so retrying an already-completed delete returns success.
 
+Requests that create or delete a project, or create or delete one of its tables, run one at a time per project in arrival order. A table request sent while the project is being deleted waits for the delete to finish and cannot put the project back in the registry.
+
 For Google credential setup details, use [google-service-accounts.md](./google-service-accounts.md).
 
 ## Bootstrap A New Spreadsheet-Backed Project
@@ -308,7 +310,7 @@ Operational notes:
 - `npm run ops:watch:drive:retry-advice` shows the current helper view of whether a spreadsheet is still cooling down and the earliest conservative retry time
 - Workers Logs are enabled in both Wrangler configs. When a watch or reindex misbehaves, filter for these structured events: `drive.reindex.failed`, `drive.watch.renew.failed`, `drive.watch.stop.failed`, and `drive.notification.rejected`
 - a Google quota rejection is stored in `lastWatchError` as `Google Drive rate limit exceeded for creating file subscriptions.`
-- projects that share one spreadsheet must use the same Google credential ref; creating a project returns 409 when the spreadsheet is registered, or is being created by another project, under a different ref. A failed create releases its claim at once; a create that crashed mid-way releases it after 5 minutes, or immediately when you delete that project slug
+- projects that share one spreadsheet must use the same Google credential ref; creating a project returns 409 when the spreadsheet is registered, or is being created by another project, under a different ref. A create that fails leaves no project behind, and an upsert that fails leaves the project as it was, so either can be repeated. The failed request's claim on the spreadsheet can last up to 5 minutes, and ends at once when you delete that project slug. If the Durable Object restarts after writing a project but before registering it, repeat the create with `?upsert=true` to register it
 - reindex failures back off exponentially per watch: 30 seconds minimum, 1 hour cap; failed watch stops are retried from the control-plane alarm
 - Google Drive watch behavior is documented at:
   - https://developers.google.com/workspace/drive/api/guides/push

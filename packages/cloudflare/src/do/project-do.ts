@@ -2,8 +2,10 @@ import {
   type AdminInspectSpreadsheetTabResult,
   type AdminListSpreadsheetTabsResult,
   type AdminGetProjectResult,
+  AppError,
   BadRequestError,
   ConflictError,
+  type ControlPlaneDoRequest,
   type ControlPlaneDoResponse,
   type CreateProjectInput,
   type CreateTableInput,
@@ -81,6 +83,14 @@ function normalizeFieldNames(values: readonly string[]) {
 
 export class ProjectDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
+
+  // Lifecycle requests (creating or deleting a project or a table) read the project, wait on Google or the control
+  // plane, and then write and register the result. Other requests run during those waits, so the lifecycle requests are
+  // queued here and run one at a time in arrival order. Otherwise two creates of one slug both find it absent, and a
+  // table request can register a project again while a delete is removing it. Reads are not queued. A queued
+  // operation must not call another one, which would wait for itself.
+  private lifecycleQueue: Promise<unknown> = Promise.resolve();
+
   // Anonymous reads address a ProjectDO for any valid slug. Tables are created by the first project write, so a
   // Durable Object for an unknown slug answers NOT_FOUND without persisting storage.
   private hasSchema: boolean;
@@ -171,12 +181,19 @@ export class ProjectDO {
     }
   }
 
+  private runLifecycleOperation<Result>(operation: () => Promise<Result>): Promise<Result> {
+    const result = this.lifecycleQueue.then(operation);
+    // A failed operation must not stop the ones queued behind it.
+    this.lifecycleQueue = result.catch(() => undefined);
+    return result;
+  }
+
   private async handle(body: ProjectDoRequest): Promise<ProjectDoResponse> {
     switch (body.type) {
       case 'project.create':
         return {
           type: 'project.create.result',
-          result: await this.createProject(body.input, body.allowExisting ?? false)
+          result: await this.runLifecycleOperation(() => this.createProject(body.input, body.allowExisting ?? false))
         };
       case 'project.get':
         return {
@@ -186,17 +203,19 @@ export class ProjectDO {
       case 'project.table.create':
         return {
           type: 'project.table.create.result',
-          result: await this.createTable(body.projectSlug, body.input, body.allowExisting ?? false)
+          result: await this.runLifecycleOperation(
+            () => this.createTable(body.projectSlug, body.input, body.allowExisting ?? false)
+          )
         };
       case 'project.table.delete':
         return {
           type: 'project.table.delete.result',
-          result: await this.deleteTable(body.projectSlug, body.tableSlug)
+          result: await this.runLifecycleOperation(() => this.deleteTable(body.projectSlug, body.tableSlug))
         };
       case 'project.delete':
         return {
           type: 'project.delete.result',
-          result: await this.deleteProject(body.projectSlug)
+          result: await this.runLifecycleOperation(() => this.deleteProject(body.projectSlug))
         };
       case 'project.table.list':
         return {
@@ -260,26 +279,65 @@ export class ProjectDO {
       });
     }
 
-    // Other requests run while the control plane answers, so the existence check that guards the write is repeated. A
-    // conflict here means another create for this slug wrote first and holds the reservation, so it is not released.
-    const existing = this.findProjectToCreate(input.slug, allowExisting);
     try {
       this.writeProject(input, googleCredentialRef, now);
     } catch (error) {
       if (reservesSpreadsheet) {
-        await this.releaseReservation(input.slug);
+        await this.endReservation(input.slug, { type: 'control.project.release', projectSlug: input.slug });
       }
 
       throw error;
     }
 
-    // Registering the project ends its reservation. If registering fails, the reservation keeps the spreadsheet
-    // claimed, and repeating the create with allowExisting registers the project.
-    await this.syncRegistry(input.slug);
+    // Registering the project ends its reservation. If registering fails, the write is taken back: a project left
+    // readable but unregistered would hold its spreadsheet only until the reservation lapses, after which another
+    // project could take the spreadsheet under another credential ref and repeating this create would fail against it.
+    try {
+      await this.syncRegistry(input.slug);
+    } catch (error) {
+      await this.takeBackProject(input.slug, previous, error);
+      throw error;
+    }
+
     return {
       data: await this.getProject(input.slug),
-      created: existing === null
+      created: previous === null
     };
+  }
+
+  // Puts the project back as it was before this create wrote it. A project this create made has no tables, because
+  // table requests wait behind it. An error from the control plane means it rejected the registration and applied
+  // nothing, so the reservation is left to keep the spreadsheet for a repeated create until it expires. Without an
+  // answer the registration may have been applied, so the registry is brought back in step with what is stored: a
+  // project that did not exist is unregistered, and one that did is registered as it was. Either call also ends the
+  // reservation.
+  private async takeBackProject(projectSlug: string, previous: ProjectRow | null, registrationError: unknown) {
+    if (previous === null) {
+      this.ctx.storage.sql.exec(`DELETE FROM project WHERE slug = ?`, projectSlug);
+    } else {
+      this.ctx.storage.sql.exec(
+        `UPDATE project SET name = ?, spreadsheet_id = ?, google_credential_ref = ?, default_auth_mode = ?, updated_at = ? WHERE slug = ?`,
+        previous.name,
+        previous.spreadsheet_id,
+        previous.google_credential_ref,
+        previous.default_auth_mode,
+        previous.updated_at,
+        projectSlug
+      );
+    }
+
+    if (registrationError instanceof AppError) {
+      return;
+    }
+
+    if (previous === null) {
+      await this.endReservation(projectSlug, { type: 'control.project.delete', projectSlug });
+    } else {
+      await this.endReservation(projectSlug, {
+        type: 'control.project.upsert',
+        summary: this.getProjectSummary(projectSlug)
+      });
+    }
   }
 
   private writeProject(input: CreateProjectInput, googleCredentialRef: string, now: string) {
@@ -306,15 +364,13 @@ export class ProjectDO {
     );
   }
 
-  // Best effort: the write error that led here is the one the caller needs, so a failed release is logged and does not
-  // replace it. A reservation left behind expires on its own, and a retried create or a delete of the slug replaces or
-  // removes it sooner.
-  private async releaseReservation(projectSlug: string) {
+  // Ends a failed create's reservation with the control-plane call that fits what the create left behind. Best effort:
+  // the error that led here is the one the caller needs, so a failed call is logged and does not replace it. A
+  // reservation left behind expires on its own, and a retried create or a delete of the slug replaces or removes it
+  // sooner.
+  private async endReservation(projectSlug: string, request: ControlPlaneDoRequest) {
     try {
-      await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), {
-        type: 'control.project.release',
-        projectSlug
-      });
+      await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(this.env), request);
     } catch (error) {
       console.error(JSON.stringify({
         event: 'project.reservation.release.failed',

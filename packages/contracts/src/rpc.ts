@@ -69,6 +69,8 @@ export const controlPlaneDoRequestSchema = z.discriminatedUnion('type', [
   // credential ref that the project is not registered with yet is checked like a reservation and rejected with CONFLICT
   // when other projects, registered or being created, use the spreadsheet under a different ref. That backs up a
   // reservation that expired or was never made. Updating the pairing a project is registered with always succeeds.
+  // ProjectDO also sends it to restore the registration of a project whose update did not complete, when the answer to
+  // the update was lost and the control plane may have applied it.
   z.object({
     type: z.literal('control.project.upsert'),
     summary: z.object({
@@ -99,6 +101,10 @@ export const controlPlaneDoRequestSchema = z.discriminatedUnion('type', [
     type: z.literal('control.project.release'),
     projectSlug: projectSlugSchema
   }),
+  // Removes a project from the registry, ends its reservation, revokes the API keys bound to its slug and stops Drive
+  // watches that no remaining project uses. It is idempotent. ProjectDO sends it to delete a project, and to unregister
+  // a project whose create did not complete when the answer to its registration was lost and the control plane may
+  // have applied it.
   z.object({
     type: z.literal('control.project.delete'),
     projectSlug: projectSlugSchema
