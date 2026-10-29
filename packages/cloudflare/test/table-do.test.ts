@@ -2203,7 +2203,7 @@ describe('TableDO', () => {
         }
       }
     });
-    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+    expect(sheet.requestedRanges).not.toContain("'Users'!A2:A");
     expect(sheet.requestedRanges.filter((range) => range === "'Users'!1:1")).toHaveLength(1);
     expect(sheet.requestedRanges).not.toContain("'Users'");
   });
@@ -2434,7 +2434,7 @@ describe('TableDO', () => {
       }
     });
     expect(sheet.requestedRanges).not.toContain("'Users'");
-    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+    expect(sheet.requestedRanges).not.toContain("'Users'!A2:A");
     expect(sheet.requestedRanges.filter((range) => range === "'Users'!1:1")).toHaveLength(1);
 
     const listed = await doRpc<TableDoResponse>(
@@ -3225,7 +3225,7 @@ describe('TableDO', () => {
     ).rejects.toBeInstanceOf(BadRequestError);
   });
 
-  it('rejects updates when a cached row id has become duplicated upstream', async () => {
+  it('rejects updates when a cached row id has become duplicated upstream and a change was signaled', async () => {
     const sheet: SheetState = {
       rows: [
         ['_id', 'name'],
@@ -3279,6 +3279,12 @@ describe('TableDO', () => {
       ['row-1', 'Ada'],
       ['row-1', 'Duplicate']
     ];
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: '2026-10-28T00:00:00.000Z',
+      debounceUntil: null
+    }, 'table.external-change.record.result');
 
     await expect(
       doRpc<TableDoResponse>(
@@ -5579,5 +5585,47 @@ describe('TableDO', () => {
       rowCount: 1,
       lastSyncCompletedAt: before.lastSyncCompletedAt
     });
+  });
+
+  it('verifies fresh point updates and deletes without reading the whole managed id column', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    sheet.requestedRanges = [];
+    await updateUser(env, 'row-2', { name: 'Bea Smith' });
+    await deleteUser(env, 'row-3');
+    expect(sheet.requestedRanges).not.toContain("'Users'!A2:A");
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-1', 'Ada'],
+      ['row-2', 'Bea Smith']
+    ]);
+
+    sheet.rows = [
+      ['_id', 'name'],
+      ['row-2', 'Bea Smith'],
+      ['row-1', 'Ada']
+    ];
+    sheet.requestedRanges = [];
+    const moved = await updateUser(env, 'row-1', { name: 'Ada Lovelace' });
+
+    expect(moved.data.rowNumber).toBe(3);
+    expect(sheet.requestedRanges).toContain("'Users'!A2:A");
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-2', 'Bea Smith'],
+      ['row-1', 'Ada Lovelace']
+    ]);
   });
 });

@@ -675,14 +675,16 @@ export class TableDO {
       throw new ForbiddenError(`Updates are disabled for ${projectSlug}/${tableSlug}.`);
     }
 
-    await this.ensureMutationValidationReady(config, requestContext);
+    const cacheState = await this.ensureMutationValidationReady(config, requestContext);
     const sheets = this.getSheetsClient(config);
     const layout = await sheets.getHeaderLayout(config);
     const headers = layout.headers;
     const normalizedPatch = normalizePartialRowValues(patch);
     assertManagedIdFieldIsNotWritten(normalizedPatch, config.idColumn);
     assertWritableFields(normalizedPatch, config.readOnlyFields);
-    const existingRow = await this.resolveRowById(config, rowId, { layout });
+    // A fresh cache was verified by its last sync, so the cached row-number hint only needs a
+    // single-row ID check; on a miss or a stale cache, findRowById scans the ID column.
+    const existingRow = await this.resolveRowById(config, rowId, { layout, verifyUnique: cacheState.staleReason !== 'fresh' });
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
@@ -727,7 +729,7 @@ export class TableDO {
     const sheets = this.getSheetsClient(config);
     const layout = await sheets.getHeaderLayout(config);
     const headers = layout.headers;
-    const existingRow = await this.resolveRowById(config, rowId, { layout });
+    const existingRow = await this.resolveRowById(config, rowId, { layout, verifyUnique: cacheState.staleReason !== 'fresh' });
     if (!existingRow) {
       throw new NotFoundError(`Row ${rowId} was not found.`);
     }
