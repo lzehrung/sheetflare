@@ -113,8 +113,9 @@ const dataGenerationMetaKey = 'data.generation';
 // Google call too: a change in between means the cache may already hold the delete, so it rebuilds
 // instead of shifting row numbers again (see removeRow).
 const contentRevisionMetaKey = 'cache.contentRevision';
-// externalChangeGeneration advances on every recorded external change (Drive notification or an
-// unconfirmed write). A sync clears the pending change only if no newer one arrived after it began.
+// externalChangeGeneration advances on every recorded external change (a Drive notification, an
+// unconfirmed write, or a delete that has to rebuild the cache). A sync clears the pending change only
+// if no newer one arrived after it began.
 const externalChangeGenerationMetaKey = 'externalChange.generation';
 const monotonicCounterMetaKeys = [dataGenerationMetaKey, contentRevisionMetaKey, externalChangeGenerationMetaKey];
 const readConfigSignatureMetaKey = 'config.readSignature';
@@ -134,6 +135,13 @@ function canServeExternalChangeCache(externalChange: TableExternalChange) {
 
   const debounceUntilMs = Date.parse(externalChange.debounceUntil);
   return !Number.isNaN(debounceUntilMs) && debounceUntilMs > Date.now();
+}
+
+// A pending change without a debounce window says the cache has to resync before anything is served from
+// it: a write overlapped a sync or could not be confirmed, or a delete could not lower the cached row
+// numbers and is rebuilding the cache.
+function requiresResyncBeforeServing(externalChange: TableExternalChange) {
+  return externalChange.pending && externalChange.debounceUntil === null;
 }
 
 function assertWritableFields(
@@ -778,9 +786,10 @@ export class TableDO {
 
     const cacheNeedsRebuild = await this.runExclusiveWrite(() => this.removeRow(config, rowId, requestContext));
     if (cacheNeedsRebuild) {
-      // Rebuilding reads the whole sheet, so it runs after the write lock is released: the next
-      // write does not wait for it. A write that lands meanwhile supersedes the rebuild, which then
-      // leaves the cache stale for the next read to rebuild (see performSync).
+      // Rebuilding reads the whole sheet, so it runs after the write lock is released and the lock is
+      // never held for it. removeRow marked the cache as needing this rebuild, so every request that
+      // would use the cache, reads and the next write alike, joins it (see syncCache) instead of running
+      // against rows whose numbers the delete did not lower, and none of them supersedes it.
       await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
     }
 
@@ -792,7 +801,8 @@ export class TableDO {
 
   // Deletes the row from Google and repairs the cache. Returns true when the cache could not be
   // repaired in place and has to be rebuilt from Google: it was stale, the sheet layout changed, or
-  // its rows changed while the delete was in flight.
+  // its rows changed while the delete was in flight. In that case the cache is marked as needing the
+  // rebuild before this returns, so before the write lock is released.
   private async removeRow(config: ResolvedTableConfig, rowId: string, requestContext?: TableRequestContext | null): Promise<boolean> {
     const cacheState = await this.ensurePointOperationReady(config, requestContext);
     const cachedHeaders = this.getMeta('headers');
@@ -838,6 +848,13 @@ export class TableDO {
     }
 
     this.noteCacheContentChanged();
+    // The rows below the deleted one still hold the row numbers they had before it (or a mix of
+    // before and after), the cache can still look fresh, and a sync in flight reports status
+    // "syncing", which getStaleReason does not count as stale. Until the rebuild promotes a snapshot
+    // the cache therefore has to be recorded like an undebounced external change: requests that would
+    // use it resync first, which joins the rebuild. The mark outlives a rebuild that fails, so a
+    // retry in flight is not mistaken for fresh either.
+    this.recordPendingExternalChange(new Date().toISOString(), null);
     return true;
   }
 
@@ -901,11 +918,14 @@ export class TableDO {
   }
 
   private recordPendingExternalChange(changedAt: string, debounceUntil: string | null) {
+    const previous = this.getExternalChangeState();
     this.setExternalChangeState({
-      ...this.getExternalChangeState(),
+      ...previous,
       pending: true,
       lastChangedAt: changedAt,
-      debounceUntil
+      // A Drive notification that arrives while the cache must resync first carries a debounce window,
+      // and it must not make that cache servable again.
+      debounceUntil: requiresResyncBeforeServing(previous) ? null : debounceUntil
     });
     this.incrementCounter(externalChangeGenerationMetaKey);
     this.incrementCounter(dataGenerationMetaKey);
@@ -1181,8 +1201,9 @@ export class TableDO {
     return (await this.lookupRowById(config, rowId, options))?.row ?? null;
   }
 
-  // Finds a row by managed ID and repairs its cached copy. The result also carries the managed IDs
-  // beside the row, which a delete uses to confirm afterwards that it removed this row.
+  // Finds a row by managed ID and repairs its cached copy, unless the cache is waiting for a rebuild. The
+  // result also carries the managed IDs beside the row, which a delete uses to confirm afterwards that it
+  // removed this row.
   private async lookupRowById(
     config: ResolvedTableConfig,
     rowId: string,
@@ -1191,8 +1212,12 @@ export class TableDO {
     const cached = this.getCachedRow(rowId);
     const rowNumberHint = cached?.rowNumber ?? this.lookupRowNumber(rowId);
     const result = await this.getSheetsClient(config).findRowById(config, rowId, rowNumberHint, options);
+    // A delete can mark the cache for a rebuild while this lookup waits on Google. The rebuild replaces every
+    // cached row, and repairing one now would move the content revision under it, so the rebuild would be
+    // superseded and dropped. The caller still gets the row Google just returned.
+    const repairsCache = !requiresResyncBeforeServing(this.getExternalChangeState());
     if (!result) {
-      if (cached || rowNumberHint !== null) {
+      if (repairsCache && (cached || rowNumberHint !== null)) {
         this.deleteRowIndex(rowId);
         this.deleteCachedRow(rowId);
         this.noteCacheContentChanged();
@@ -1211,7 +1236,7 @@ export class TableDO {
     const cacheIsCurrent = cached !== null
       && cached.rowNumber === result.row.rowNumber
       && JSON.stringify(cached.values) === JSON.stringify(result.row.values);
-    if (!cacheIsCurrent) {
+    if (!cacheIsCurrent && repairsCache) {
       this.upsertRowIndex(rowId, result.row.rowNumber);
       this.upsertCachedRow(result.row);
       this.upsertCachedCells(config, result.row);
