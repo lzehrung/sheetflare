@@ -5162,4 +5162,46 @@ describe('TableDO', () => {
       ['row-1', '2026-02-28', '2026-02-28T10:00:00Z']
     ]);
   });
+
+  it('never returns raw Google error text in TableDO error responses or cache status', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sentinel = 'SENSITIVE_UPSTREAM_TEXT project 123456789012';
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    let rejectReads = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (rejectReads && String(input).includes('/values/')) {
+        return Response.json({ error: { code: 403, message: sentinel, status: 'PERMISSION_DENIED' } }, { status: 403 });
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    rejectReads = true;
+
+    const response = await getUsersTableStub(env).fetch('https://do.internal/rpc', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'table.rows.list', ...usersTable, query: {} })
+    });
+    const body = await response.text();
+
+    expect(response.status).toBe(502);
+    expect(body).not.toContain('SENSITIVE_UPSTREAM_TEXT');
+    expect(JSON.parse(body)).toEqual({
+      error: {
+        code: 'BAD_GATEWAY',
+        message: 'Google Sheets authentication or permission check failed.',
+        details: { status: 403, googleStatus: 'PERMISSION_DENIED' }
+      }
+    });
+    expect(JSON.stringify(await getUsersCacheStatus(env))).not.toContain('SENSITIVE_UPSTREAM_TEXT');
+  });
 });
