@@ -1,7 +1,13 @@
 import { expect } from 'vitest';
 import { exports as workerExports } from 'cloudflare:workers';
+import type { ZodType } from 'zod';
 import {
+  controlPlaneDoRequestSchema,
+  projectDoRequestSchema,
+  rateLimitDoRequestSchema,
   resolvedTableConfigSnapshotSchema,
+  tableDoRequestSchema,
+  toErrorResponse,
   type ControlPlaneDoResponse,
   type TableDoResponse
 } from '@sheetflare/contracts';
@@ -24,6 +30,24 @@ export type FakeDurableObjectHook = (
 ) => Response | undefined | Promise<Response | undefined>;
 
 type StubHandler = (request: Request) => Response | Promise<Response>;
+
+/**
+ * Answers like a Durable Object's RPC boundary does for a payload the shared schema rejects, so a gateway that builds
+ * a bad payload sees the same 400 it would see in production.
+ */
+function rejectInvalidRpc(schema: ZodType, body: unknown) {
+  const parsed = schema.safeParse(body);
+  if (parsed.success) {
+    return undefined;
+  }
+
+  const { status, body: errorBody } = toErrorResponse(parsed.error);
+  return Response.json(errorBody, { status });
+}
+
+function notFoundResponse(message: string) {
+  return Response.json({ error: { code: 'NOT_FOUND', message, details: null } }, { status: 404 });
+}
 
 export type CachedReadRequestRecord = {
   url: string;
@@ -159,6 +183,10 @@ export function createEnv(options?: {
       type: body.type,
       body
     });
+    const invalidRequest = rejectInvalidRpc(controlPlaneDoRequestSchema, body);
+    if (invalidRequest) {
+      return invalidRequest;
+    }
     const hookResponse = await options?.hooks?.controlPlane?.({ name, body });
     if (hookResponse) {
       return hookResponse;
@@ -397,6 +425,10 @@ export function createEnv(options?: {
     };
     projectRequests.push(body.type);
     durableObjectRequests.push(body.type);
+    const invalidRequest = rejectInvalidRpc(projectDoRequestSchema, body);
+    if (invalidRequest) {
+      return invalidRequest;
+    }
     const hookResponse = await options?.hooks?.project?.({ name, body });
     if (hookResponse) {
       return hookResponse;
@@ -477,6 +509,10 @@ export function createEnv(options?: {
     }
 
     if (body.type === 'project.access.get') {
+      if (body.projectSlug !== 'demo') {
+        return notFoundResponse(`Project ${body.projectSlug} was not found.`);
+      }
+
       if (options?.projectAccessStatus === 404) {
         return Response.json(
           {
@@ -506,6 +542,14 @@ export function createEnv(options?: {
     }
 
     if (body.type === 'project.table.resolve') {
+      if (body.projectSlug !== 'demo') {
+        return notFoundResponse(`Project ${body.projectSlug} was not found.`);
+      }
+
+      if (body.tableSlug !== 'users') {
+        return notFoundResponse(`Table demo/${body.tableSlug} was not found.`);
+      }
+
       return Response.json({
         type: 'project.table.resolve.result',
         result: {
@@ -645,6 +689,10 @@ export function createEnv(options?: {
       requestContext: body.requestContext
     });
     durableObjectRequests.push(body.type);
+    const invalidRequest = rejectInvalidRpc(tableDoRequestSchema, body);
+    if (invalidRequest) {
+      return invalidRequest;
+    }
     const hookResponse = await options?.hooks?.table?.({ name, body });
     if (hookResponse) {
       return hookResponse;
@@ -875,6 +923,10 @@ export function createEnv(options?: {
   const rateLimit = new FakeDurableObjectNamespace((name) => async (request) => {
     const body = (await request.json()) as { key: string; limit: number; windowSeconds: number };
     rateLimitRequests.push({ name, key: body.key });
+    const invalidRequest = rejectInvalidRpc(rateLimitDoRequestSchema, body);
+    if (invalidRequest) {
+      return invalidRequest;
+    }
     const hookResponse = await options?.hooks?.rateLimit?.({ name, body });
     if (hookResponse) {
       return hookResponse;

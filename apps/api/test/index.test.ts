@@ -1390,7 +1390,7 @@ describe('api routes', () => {
       createEnv()
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
   });
 
   it('creates rows against the table durable object', async () => {
@@ -1696,7 +1696,7 @@ describe('api routes', () => {
       env
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
     expect(env.__projectRequests).toEqual([]);
   });
 
@@ -2038,7 +2038,7 @@ describe('api routes', () => {
       createEnv()
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
   });
 
   it('rejects project-scoped key creation that grants scopes the caller does not have', async () => {
@@ -2060,10 +2060,10 @@ describe('api routes', () => {
       createEnv()
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
     expect(await response.json()).toEqual({
       error: {
-        code: 'UNAUTHORIZED',
+        code: 'FORBIDDEN',
         message: 'API keys can only delegate scopes they already have.',
         details: null
       }
@@ -2088,10 +2088,10 @@ describe('api routes', () => {
       createEnv()
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
     expect(await response.json()).toEqual({
       error: {
-        code: 'UNAUTHORIZED',
+        code: 'FORBIDDEN',
         message: 'API keys can only delegate scopes they already have.',
         details: null
       }
@@ -2111,7 +2111,7 @@ describe('api routes', () => {
       createEnv()
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
   });
 
   it('returns table cache status for admin requests', async () => {

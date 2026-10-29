@@ -40,6 +40,7 @@ import {
   rowParamsSchema,
   tableConfigSchema,
   BadRequestError,
+  ForbiddenError,
   NotFoundError,
   ServiceUnavailableError,
   toErrorResponse,
@@ -98,6 +99,7 @@ type AppVariables = {
     routeFamily: string;
     operationKey: string;
   };
+  retryAfterSeconds?: number;
 };
 
 type AppContext = Context<{ Bindings: Env; Variables: AppVariables }>;
@@ -266,7 +268,7 @@ function parseDurableRpcErrorResponse(error: DurableRpcError) {
 }
 
 const unauthorizedResponse = {
-  description: 'Unauthorized',
+  description: 'Unauthorized. The credential is missing, malformed, unknown, or revoked.',
   content: jsonContent(errorResponseSchema)
 } as const;
 
@@ -276,8 +278,22 @@ const badRequestResponse = {
 } as const;
 
 const forbiddenResponse = {
-  description: 'Forbidden',
+  description: 'Forbidden. The credential is valid but lacks the required scope or project access.',
   content: jsonContent(errorResponseSchema)
+} as const;
+
+const rateLimitedResponse = {
+  description: 'Too many requests. Wait the number of seconds in the Retry-After header before retrying.',
+  headers: z.object({
+    'Retry-After': z.string().openapi({ description: 'Seconds until the rate limit window resets.', example: '30' })
+  }),
+  content: jsonContent(errorResponseSchema)
+} as const;
+
+const protectedRouteErrorResponses = {
+  401: unauthorizedResponse,
+  403: forbiddenResponse,
+  429: rateLimitedResponse
 } as const;
 
 const notFoundResponse = {
@@ -299,6 +315,7 @@ const corsExposedHeaders = [
   'X-RateLimit-Limit',
   'X-RateLimit-Remaining',
   'X-RateLimit-Reset',
+  'Retry-After',
   cacheStatusHeaderName,
   cacheInvalidationHeaderName
 ].join(', ');
@@ -398,44 +415,33 @@ function createCorsPreflightResponse(request: Request, env: Env) {
   });
 }
 
+// Keys are minted as `sfk_<uuid>.<64 hex characters>` by ControlPlaneDO.createApiKey. Any other shape cannot be a real
+// key, so it is rejected here instead of reaching the control plane and its RPC validation errors.
+const apiKeyPattern = /^sfk_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([0-9a-f]{64})$/;
+
 function parseApiKey(value: string) {
-  if (!value.startsWith('sfk_')) {
-    throw new UnauthorizedError('Invalid API key.');
-  }
-
-  const separatorIndex = value.indexOf('.');
-  if (separatorIndex === -1) {
-    throw new UnauthorizedError('Invalid API key.');
-  }
-
-  return {
-    apiKeyId: value.slice(4, separatorIndex),
-    secret: value.slice(separatorIndex + 1)
-  };
+  const match = apiKeyPattern.exec(value);
+  const apiKeyId = match?.[1];
+  const secret = match?.[2];
+  return apiKeyId !== undefined && secret !== undefined ? { apiKeyId, secret } : null;
 }
 
 async function verifyApiKeyCredential(env: Env, credential: string): Promise<ApiKeyPrincipal | null> {
-  if (!credential.startsWith('sfk_')) {
-    return null;
-  }
-
-  let parsed: ReturnType<typeof parseApiKey>;
-  try {
-    parsed = parseApiKey(credential);
-  } catch {
+  const apiKey = parseApiKey(credential);
+  if (!apiKey) {
     return null;
   }
 
   const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
     type: 'control.api-key.verify',
-    apiKeyId: parsed.apiKeyId,
-    hash: await hashCredentialMaterial(parsed.secret)
+    apiKeyId: apiKey.apiKeyId,
+    hash: await hashCredentialMaterial(apiKey.secret)
   });
+  if (response.type !== 'control.api-key.verify.result') {
+    throw new ServiceUnavailableError('Unexpected control plane api key verify response.');
+  }
 
-  return (response as {
-    type: 'control.api-key.verify.result';
-    result: { record: ApiKeyPrincipal | null };
-  }).result.record;
+  return response.result.record;
 }
 
 async function verifyApiKeyCredentialCached(c: AppContext, credential: string): Promise<ApiKeyPrincipal | null> {
@@ -580,17 +586,54 @@ function getRateLimitOperationKey(
   return `${getRateLimitRouteFamily(path)}.${normalizedMethod.toLowerCase()}`;
 }
 
+type PresentedAuthorization =
+  | { kind: 'none' }
+  | { kind: 'bearer'; credential: string }
+  | { kind: 'unusable'; message: string };
+
+// RFC 9110: the authentication scheme is case-insensitive and separated from the credential by whitespace.
+function readAuthorization(header: string | undefined): PresentedAuthorization {
+  if (!header) {
+    return { kind: 'none' };
+  }
+
+  const match = /^(\S+)\s*([\s\S]*)$/.exec(header.trim());
+  const scheme = match?.[1] ?? '';
+  const credential = match?.[2]?.trim() ?? '';
+  if (scheme.toLowerCase() !== 'bearer') {
+    return { kind: 'unusable', message: 'Unsupported authorization scheme.' };
+  }
+
+  return credential ? { kind: 'bearer', credential } : { kind: 'unusable', message: 'Unauthorized' };
+}
+
 async function resolveRateLimitPrincipal(c: AppContext) {
-  const authorization = c.req.header('authorization');
-  if (authorization?.startsWith('Bearer ')) {
-    const credential = authorization.slice('Bearer '.length).trim();
-    const bootstrapAdminCredential = getBootstrapAdminCredential(c.env);
-    if (bootstrapAdminCredential && credential === bootstrapAdminCredential) {
-      return 'bootstrap-admin';
-    }
+  const presented = readAuthorization(c.req.header('authorization'));
+  const bootstrapAdminCredential = getBootstrapAdminCredential(c.env);
+  if (presented.kind === 'bearer' && bootstrapAdminCredential && presented.credential === bootstrapAdminCredential) {
+    return 'bootstrap-admin';
   }
 
   return getRateLimitPrincipal(c);
+}
+
+function createRateLimitError(
+  c: AppContext,
+  details: {
+    principal: string;
+    routeFamily: string;
+    operationKey: string;
+    maxRequests: number;
+    windowSeconds: number;
+    resetAtMs: number;
+  }
+) {
+  const { resetAtMs, ...publicDetails } = details;
+  c.set('retryAfterSeconds', Math.max(1, Math.ceil((resetAtMs - Date.now()) / 1000)));
+  return new TooManyRequestsError('Rate limit exceeded.', {
+    ...publicDetails,
+    resetAt: new Date(resetAtMs).toISOString()
+  });
 }
 
 async function enforceRateLimit(c: AppContext) {
@@ -609,10 +652,7 @@ async function enforceRateLimit(c: AppContext) {
     windowSeconds: config.windowSeconds
   });
 
-  const result = (response as {
-    type: 'rate-limit.check.result';
-    result: { allowed: boolean; remaining: number; resetAtMs: number };
-  }).result;
+  const { result } = response;
 
   c.set('rateLimit', {
     limit: config.maxRequests,
@@ -626,13 +666,13 @@ async function enforceRateLimit(c: AppContext) {
   });
 
   if (!result.allowed) {
-    throw new TooManyRequestsError('Rate limit exceeded.', {
+    throw createRateLimitError(c, {
       principal,
       routeFamily,
       operationKey,
       maxRequests: config.maxRequests,
       windowSeconds: config.windowSeconds,
-      resetAt: new Date(result.resetAtMs).toISOString()
+      resetAtMs: result.resetAtMs
     });
   }
 }
@@ -698,10 +738,7 @@ async function enforceVerifiedApiKeyRateLimit(c: AppContext, apiKeyId: string) {
     windowSeconds: config.windowSeconds
   });
 
-  const result = (response as {
-    type: 'rate-limit.check.result';
-    result: { allowed: boolean; remaining: number; resetAtMs: number };
-  }).result;
+  const { result } = response;
 
   c.set('rateLimit', {
     limit: config.maxRequests,
@@ -716,13 +753,13 @@ async function enforceVerifiedApiKeyRateLimit(c: AppContext, apiKeyId: string) {
   c.set('verifiedApiKeyRateLimitApplied', true);
 
   if (!result.allowed) {
-    throw new TooManyRequestsError('Rate limit exceeded.', {
+    throw createRateLimitError(c, {
       principal,
       routeFamily,
       operationKey,
       maxRequests: config.maxRequests,
       windowSeconds: config.windowSeconds,
-      resetAt: new Date(result.resetAtMs).toISOString()
+      resetAtMs: result.resetAtMs
     });
   }
 }
@@ -805,28 +842,23 @@ function buildTableRequestContext(c: AppContext, route: string) {
 }
 
 async function authenticateRequest(c: AppContext): Promise<AuthContext> {
-  const authorization = c.req.header('authorization');
-  if (!authorization) {
+  const presented = readAuthorization(c.req.header('authorization'));
+  if (presented.kind === 'none') {
     c.set('authPrincipal', 'anonymous');
     return { kind: 'anonymous' };
   }
 
-  if (!authorization.startsWith('Bearer ')) {
-    throw new UnauthorizedError('Unsupported authorization scheme.');
-  }
-
-  const credential = authorization.slice('Bearer '.length).trim();
-  if (!credential) {
-    throw new UnauthorizedError();
+  if (presented.kind === 'unusable') {
+    throw new UnauthorizedError(presented.message);
   }
 
   const bootstrapAdminCredential = getBootstrapAdminCredential(c.env);
-  if (bootstrapAdminCredential && credential === bootstrapAdminCredential) {
+  if (bootstrapAdminCredential && presented.credential === bootstrapAdminCredential) {
     c.set('authPrincipal', 'bootstrap-admin');
     return { kind: 'bootstrap-admin' };
   }
 
-  const record = await verifyApiKeyCredentialCached(c, credential);
+  const record = await verifyApiKeyCredentialCached(c, presented.credential);
   if (!record) {
     throw new UnauthorizedError('Invalid API key.');
   }
@@ -845,13 +877,24 @@ function hasScope(record: ApiKeyPrincipal, scope: ApiScope) {
   return record.scopes.includes(scope);
 }
 
+const wrongProjectMessage = 'This API key is scoped to a different project.';
+
+// Missing or invalid credentials are 401; a valid credential that lacks access is 403.
+function missingScopeError(scope: ApiScope) {
+  return new ForbiddenError(`This API key does not have the "${scope}" scope.`);
+}
+
 function assertAdminScope(auth: AuthContext, scope: ApiScope) {
   if (auth.kind === 'bootstrap-admin') {
     return;
   }
 
-  if (auth.kind !== 'api-key' || !hasScope(auth.record, scope)) {
+  if (auth.kind !== 'api-key') {
     throw new UnauthorizedError();
+  }
+
+  if (!hasScope(auth.record, scope)) {
+    throw missingScopeError(scope);
   }
 }
 
@@ -859,7 +902,7 @@ function assertGlobalAdminScope(auth: AuthContext, scope: ApiScope) {
   assertAdminScope(auth, scope);
 
   if (auth.kind === 'api-key' && auth.record.projectSlug) {
-    throw new UnauthorizedError('This operation requires a global admin key.');
+    throw new ForbiddenError('This operation requires a global admin key.');
   }
 }
 
@@ -873,11 +916,11 @@ function assertProjectScope(auth: AuthContext, scope: ApiScope, projectSlug: str
   }
 
   if (!hasScope(auth.record, scope)) {
-    throw new UnauthorizedError();
+    throw missingScopeError(scope);
   }
 
   if (auth.record.projectSlug && auth.record.projectSlug !== projectSlug) {
-    throw new UnauthorizedError();
+    throw new ForbiddenError(wrongProjectMessage);
   }
 }
 
@@ -887,7 +930,7 @@ function assertCredentialProjectBoundary(auth: AuthContext, projectSlug: string)
   }
 
   if (auth.record.projectSlug && auth.record.projectSlug !== projectSlug) {
-    throw new UnauthorizedError();
+    throw new ForbiddenError(wrongProjectMessage);
   }
 }
 
@@ -899,7 +942,7 @@ function assertApiKeyCanDelegateScopes(auth: AuthContext, requestedScopes: reado
   const callerScopes = new Set(auth.record.scopes);
   const unauthorizedScopes = requestedScopes.filter((scope) => !callerScopes.has(scope));
   if (unauthorizedScopes.length > 0) {
-    throw new UnauthorizedError('API keys can only delegate scopes they already have.');
+    throw new ForbiddenError('API keys can only delegate scopes they already have.');
   }
 }
 
@@ -924,23 +967,42 @@ async function loadProjectAccess(c: { env: Env }, projectSlug: string) {
   }).result.data;
 }
 
-async function requirePublicReadProject(c: { env: Env }, projectSlug: string) {
+// Callers without a read grant may only read public-read projects. Private, missing, and unknown projects all fail
+// the same way, so the response never reveals which projects exist.
+async function requirePublicReadProject(c: { env: Env }, projectSlug: string, auth: AuthContext) {
+  const deny = () => (auth.kind === 'api-key' ? missingScopeError('table:read') : new UnauthorizedError());
   try {
     const projectAccess = await loadProjectAccess(c, projectSlug);
     if (projectAccess.defaultAuthMode !== 'public-read') {
-      throw new UnauthorizedError();
+      throw deny();
     }
   } catch (error) {
     if (error instanceof NotFoundError) {
-      throw new UnauthorizedError();
+      throw deny();
     }
 
     if (error instanceof DurableRpcError && error.status === 404) {
-      throw new UnauthorizedError();
+      throw deny();
     }
 
     throw error;
   }
+}
+
+function grantsTableRead(auth: AuthContext) {
+  return auth.kind === 'bootstrap-admin' || (auth.kind === 'api-key' && hasScope(auth.record, 'table:read'));
+}
+
+// Scope and project access are decided before the table is resolved, so a caller who may not read a table cannot
+// learn from the response whether it exists.
+async function authorizeTableRead(c: AppContext, projectSlug: string, tableSlug: string) {
+  const auth = await authenticateRequest(c);
+  assertCredentialProjectBoundary(auth, projectSlug);
+  if (!grantsTableRead(auth)) {
+    await requirePublicReadProject(c, projectSlug, auth);
+  }
+
+  return loadProjectTable(c, projectSlug, tableSlug);
 }
 
 async function loadProjectTable(c: { env: Env }, projectSlug: string, tableSlug: string) {
@@ -1087,6 +1149,25 @@ function normalizeRequestError(error: unknown) {
   return error;
 }
 
+// A Durable Object answers a payload its shared RPC schema rejects with one of these 400s
+// (parseDurableObjectRpcRequest). The gateway built that payload, so the failure is a server bug, not a client mistake.
+function isDurableObjectBoundaryRejection(error: unknown) {
+  return error instanceof BadRequestError && (
+    error.message === 'Request validation failed.'
+    || error.message === 'Malformed JSON in Durable Object RPC request.'
+  );
+}
+
+// Only intentional contract errors reach clients; everything else becomes the generic INTERNAL_ERROR body.
+function toPublicErrorResponse(error: unknown) {
+  if (isDurableObjectBoundaryRejection(error)) {
+    return toErrorResponse(new Error('A Durable Object rejected a gateway-built RPC payload.'));
+  }
+
+  const rpcErrorResponse = error instanceof DurableRpcError ? parseDurableRpcErrorResponse(error) : null;
+  return rpcErrorResponse ?? toErrorResponse(error);
+}
+
 function parseListRowsQuery(c: { req: { query(name: string): string | undefined } }): ListRowsQuery {
   const rawFilter = c.req.query('filter');
   let filter: unknown = undefined;
@@ -1151,7 +1232,7 @@ const adminListProjectsRoute = createRoute({
       description: 'List all projects or get one project by slug',
       content: jsonContent(z.union([adminListProjectsResultSchema, adminGetProjectResultSchema]))
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1181,7 +1262,7 @@ const adminCreateProjectRoute = createRoute({
       content: jsonContent(errorResponseSchema)
     },
     400: badRequestResponse,
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1198,7 +1279,7 @@ const adminDeleteProjectRoute = createRoute({
       description: 'Delete a configured project, or confirm it is already absent, and clear caches for its tables',
       content: jsonContent(deleteProjectResultSchema)
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1215,7 +1296,7 @@ const adminListSpreadsheetTabsRoute = createRoute({
       description: 'List spreadsheet tabs for a project',
       content: jsonContent(adminListSpreadsheetTabsResultSchema)
     },
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1235,7 +1316,7 @@ const adminInspectSpreadsheetTabRoute = createRoute({
       content: jsonContent(adminInspectSpreadsheetTabResultSchema)
     },
     400: badRequestResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1253,7 +1334,7 @@ const adminListTablesRoute = createRoute({
       description: 'List configured tables for a project',
       content: jsonContent(listTablesResultSchema)
     },
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1285,7 +1366,7 @@ const adminCreateTableRoute = createRoute({
       content: jsonContent(errorResponseSchema)
     },
     400: badRequestResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1303,7 +1384,7 @@ const adminDeleteTableRoute = createRoute({
       description: 'Delete a configured table, or confirm it is already absent, and clear its local cache',
       content: jsonContent(deleteTableResultSchema)
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1322,8 +1403,7 @@ const listRowsRoute = createRoute({
       content: jsonContent(listRowsResultSchema)
     },
     400: badRequestResponse,
-    403: forbiddenResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1341,8 +1421,7 @@ const getSchemaRoute = createRoute({
       description: 'Get inferred table schema',
       content: jsonContent(getSchemaResultSchema)
     },
-    403: forbiddenResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1360,7 +1439,7 @@ const getCacheStatusRoute = createRoute({
       description: 'Get table cache status',
       content: jsonContent(getTableCacheStatusResultSchema)
     },
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1378,7 +1457,7 @@ const reindexTableRoute = createRoute({
       description: 'Force a full cache sync from Google Sheets',
       content: jsonContent(reindexTableResultSchema)
     },
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1396,7 +1475,7 @@ const refreshTableCacheRoute = createRoute({
       description: 'Refresh the table cache if it is stale',
       content: jsonContent(refreshTableCacheResultSchema)
     },
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1418,7 +1497,7 @@ const registerSpreadsheetWatchesRoute = createRoute({
       content: jsonContent(adminRegisterSpreadsheetWatchesResultSchema)
     },
     400: badRequestResponse,
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1432,7 +1511,7 @@ const listSpreadsheetWatchesRoute = createRoute({
       description: 'List Google Drive spreadsheet watches',
       content: jsonContent(adminListSpreadsheetWatchesResultSchema)
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1446,7 +1525,7 @@ const listSpreadsheetWatchRetryAdviceRoute = createRoute({
       description: 'List Drive watch retry guidance derived from active watches and recently stopped watches',
       content: jsonContent(adminListSpreadsheetWatchRetryAdviceResultSchema)
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1467,7 +1546,7 @@ const stopSpreadsheetWatchesRoute = createRoute({
       content: jsonContent(adminRegisterSpreadsheetWatchesResultSchema)
     },
     400: badRequestResponse,
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1497,8 +1576,7 @@ const getRowRoute = createRoute({
       description: 'Get one row by managed ID',
       content: jsonContent(getRowResultSchema)
     },
-    403: forbiddenResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1521,8 +1599,7 @@ const createRowRoute = createRoute({
       content: jsonContent(createRowResultSchema)
     },
     400: badRequestResponse,
-    403: forbiddenResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1545,8 +1622,7 @@ const updateRowRoute = createRoute({
       content: jsonContent(updateRowResultSchema)
     },
     400: badRequestResponse,
-    403: forbiddenResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1564,8 +1640,7 @@ const deleteRowRoute = createRoute({
       description: 'Delete a row',
       content: jsonContent(deleteRowResultSchema)
     },
-    403: forbiddenResponse,
-    401: unauthorizedResponse,
+    ...protectedRouteErrorResponses,
     404: notFoundResponse
   }
 });
@@ -1583,7 +1658,7 @@ const listApiKeysRoute = createRoute({
       description: 'List API keys',
       content: jsonContent(adminListApiKeysResultSchema)
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1604,7 +1679,7 @@ const createApiKeyRoute = createRoute({
       content: jsonContent(adminCreateApiKeyResultSchema)
     },
     400: badRequestResponse,
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1621,7 +1696,7 @@ const revokeApiKeyRoute = createRoute({
       description: 'Revoke an API key',
       content: jsonContent(okResultSchema)
     },
-    401: unauthorizedResponse
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -1657,8 +1732,17 @@ function applyDefaultGatewayCacheSafetyHeaders(response: Response) {
 
 function noStoreErrorResponse(error: unknown) {
   const normalizedError = normalizeRequestError(error);
-  const rpcErrorResponse = normalizedError instanceof DurableRpcError ? parseDurableRpcErrorResponse(normalizedError) : null;
-  const { status, body } = rpcErrorResponse ?? toErrorResponse(normalizedError);
+  const { status, body } = toPublicErrorResponse(normalizedError);
+  if (body.error.code === 'INTERNAL_ERROR') {
+    // The gateway only sees the generic body, so the cause is logged here.
+    console.error(JSON.stringify({
+      event: 'cached_table_read.error',
+      errorName: normalizedError instanceof Error ? normalizedError.name : 'UnknownError',
+      errorMessage: normalizedError instanceof Error ? normalizedError.message : String(normalizedError),
+      errorDetails: normalizedError instanceof AppError ? normalizedError.details ?? null : null,
+      errorStack: normalizedError instanceof Error ? normalizedError.stack ?? null : null
+    }));
+  }
   return noStoreJsonResponse(body, status);
 }
 
@@ -2222,8 +2306,7 @@ function createApp() {
         errorStack: normalizedError instanceof Error ? normalizedError.stack ?? null : null
       })
     );
-    const rpcErrorResponse = normalizedError instanceof DurableRpcError ? parseDurableRpcErrorResponse(normalizedError) : null;
-    const { status, body } = rpcErrorResponse ?? toErrorResponse(normalizedError);
+    const { status, body } = toPublicErrorResponse(normalizedError);
     const response = new Response(JSON.stringify(body), {
       status,
       headers: {
@@ -2236,6 +2319,10 @@ function createApp() {
       response.headers.set('x-ratelimit-limit', String(rateLimit.limit));
       response.headers.set('x-ratelimit-remaining', String(rateLimit.remaining));
       response.headers.set('x-ratelimit-reset', new Date(rateLimit.resetAtMs).toISOString());
+    }
+    const retryAfterSeconds = c.get('retryAfterSeconds');
+    if (retryAfterSeconds !== undefined) {
+      response.headers.set('retry-after', String(retryAfterSeconds));
     }
     return response;
   });
@@ -2500,15 +2587,7 @@ function createApp() {
 
   app.openapi(listRowsRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
-    const auth = await authenticateRequest(c);
-    assertCredentialProjectBoundary(auth, params.project);
-    if (auth.kind === 'anonymous') {
-      await requirePublicReadProject(c, params.project);
-    }
-    const tableAccess = await loadProjectTable(c, params.project, params.table);
-    if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
-      assertProjectScope(auth, 'table:read', params.project);
-    }
+    const tableAccess = await authorizeTableRead(c, params.project, params.table);
     const query = parseListRowsQuery(c);
     return c.json(await fetchCachedTableReadJson(
       c,
@@ -2520,15 +2599,7 @@ function createApp() {
 
   app.openapi(getSchemaRoute, async (c) => {
     const params = parsePathParams(c, adminProjectTableParamsSchema);
-    const auth = await authenticateRequest(c);
-    assertCredentialProjectBoundary(auth, params.project);
-    if (auth.kind === 'anonymous') {
-      await requirePublicReadProject(c, params.project);
-    }
-    const tableAccess = await loadProjectTable(c, params.project, params.table);
-    if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
-      assertProjectScope(auth, 'table:read', params.project);
-    }
+    const tableAccess = await authorizeTableRead(c, params.project, params.table);
     return c.json(await fetchCachedTableReadJson(
       c,
       getSchemaResultSchema,
@@ -2702,15 +2773,7 @@ function createApp() {
 
   app.openapi(getRowRoute, async (c) => {
     const params = parsePathParams(c, rowParamsSchema);
-    const auth = await authenticateRequest(c);
-    assertCredentialProjectBoundary(auth, params.project);
-    if (auth.kind === 'anonymous') {
-      await requirePublicReadProject(c, params.project);
-    }
-    const tableAccess = await loadProjectTable(c, params.project, params.table);
-    if (auth.kind !== 'anonymous' && tableAccess.project.defaultAuthMode !== 'public-read') {
-      assertProjectScope(auth, 'table:read', params.project);
-    }
+    const tableAccess = await authorizeTableRead(c, params.project, params.table);
     return c.json(await fetchCachedTableReadJson(
       c,
       getRowResultSchema,
@@ -2791,7 +2854,7 @@ function createApp() {
         : requestedProjectSlug;
 
     if (auth.kind === 'api-key' && auth.record.projectSlug && requestedProjectSlug && requestedProjectSlug !== auth.record.projectSlug) {
-      throw new UnauthorizedError('This key cannot list API keys for another project.');
+      throw new ForbiddenError('This key cannot list API keys for another project.');
     }
 
     const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
@@ -2810,7 +2873,7 @@ function createApp() {
     const input = await parseJsonBody(c, adminCreateApiKeyInputSchema);
     if (auth.kind === 'api-key' && auth.record.projectSlug) {
       if (!input.projectSlug || input.projectSlug !== auth.record.projectSlug) {
-        throw new UnauthorizedError('This key can only create API keys for its own project.');
+        throw new ForbiddenError('This key can only create API keys for its own project.');
       }
     }
     assertApiKeyCanDelegateScopes(auth, input.scopes);
@@ -2837,7 +2900,7 @@ function createApp() {
 
     if (auth.kind === 'api-key' && auth.record.projectSlug) {
       if (!record || record.projectSlug !== auth.record.projectSlug) {
-        throw new UnauthorizedError('This key cannot revoke API keys for another project.');
+        throw new ForbiddenError('This key cannot revoke API keys for another project.');
       }
     }
 
