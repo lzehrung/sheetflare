@@ -108,6 +108,12 @@ function isAdminUiRequest(headers: IncomingHttpHeaders): boolean {
   return fetchSite === undefined || fetchSite === 'same-origin';
 }
 
+// Browsers always send Sec-Fetch-Site and scripts cannot forge it. A local non-browser process can set
+// the admin marker header, so only browser-attested same-origin requests may borrow the server credential.
+function hasSameOriginFetchMetadata(headers: IncomingHttpHeaders): boolean {
+  return headers['sec-fetch-site'] === 'same-origin';
+}
+
 const forwardedRequestHeaderNames: Readonly<Record<string, true>> = {
   accept: true,
   'content-length': true,
@@ -136,7 +142,8 @@ export function rewriteAdminProxyRequest(
   const browserToken = browserAuthorization?.startsWith('Bearer ')
     ? browserAuthorization.slice('Bearer '.length).trim()
     : '';
-  const credential = browserToken.length > 0 ? browserToken : serverCredential;
+  const fallbackCredential = hasSameOriginFetchMetadata(request.headers) ? serverCredential : null;
+  const credential = browserToken.length > 0 ? browserToken : fallbackCredential;
   if (credential !== null) {
     proxyRequest.setHeader('authorization', `Bearer ${credential}`);
   }
