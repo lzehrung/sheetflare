@@ -3,37 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ApiKeyPrincipal } from '@sheetflare/contracts';
 import { App } from './app';
+import { createDeferred, createJsonResponse } from './test-support';
 
 const localStorageState = new Map<string, string>();
 const sessionStorageState = new Map<string, string>();
-
-function createJsonResponse(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'content-type': 'application/json',
-      'x-request-id': 'req-ui'
-    }
-  });
-}
-
-function createDeferred<T>() {
-  let resolvePromise: ((value: T | PromiseLike<T>) => void) | null = null;
-  const promise = new Promise<T>((resolve) => {
-    resolvePromise = resolve;
-  });
-
-  return {
-    promise,
-    resolve(value: T) {
-      if (!resolvePromise) {
-        throw new Error('Deferred promise resolver was not initialized.');
-      }
-
-      resolvePromise(value);
-    }
-  };
-}
 
 function createSpreadsheetWatchStatusResponse(url: string) {
   if (url !== '/v1/admin/system/google/drive/watches') {
@@ -132,6 +105,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: 1,
               updatedAt: '2026-04-26T00:00:00.000Z'
             }
@@ -213,6 +187,7 @@ describe('App', () => {
   });
 
   it('revokes a key and refreshes the status in the UI', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
     let keys: ApiKeyPrincipal[] = [
       {
         id: 'project-key',
@@ -238,6 +213,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: 1,
               updatedAt: '2026-04-26T00:00:00.000Z'
             }
@@ -310,6 +286,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: 1,
               updatedAt: '2026-04-26T00:00:00.000Z'
             },
@@ -317,6 +294,7 @@ describe('App', () => {
               slug: 'prod',
               name: 'Prod',
               spreadsheetId: 'sheet-2',
+              googleCredentialRef: 'default',
               tableCount: 1,
               updatedAt: '2026-04-27T00:00:00.000Z'
             }
@@ -489,6 +467,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: 0,
               updatedAt: '2026-04-26T00:00:00.000Z'
             },
@@ -496,6 +475,7 @@ describe('App', () => {
               slug: 'prod',
               name: 'Prod',
               spreadsheetId: 'sheet-2',
+              googleCredentialRef: 'default',
               tableCount: 0,
               updatedAt: '2026-04-27T00:00:00.000Z'
             }
@@ -595,6 +575,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: 1,
               updatedAt: '2026-04-26T00:00:00.000Z'
             }
@@ -696,6 +677,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: 1,
               updatedAt: '2026-04-26T00:00:00.000Z'
             }
@@ -850,6 +832,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: 0,
               updatedAt: '2026-04-26T00:00:00.000Z'
             }
@@ -903,6 +886,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: 0,
               updatedAt: '2026-04-26T00:00:00.000Z'
             },
@@ -910,6 +894,7 @@ describe('App', () => {
               slug: 'prod',
               name: 'Prod',
               spreadsheetId: 'sheet-2',
+              googleCredentialRef: 'default',
               tableCount: 0,
               updatedAt: '2026-04-27T00:00:00.000Z'
             }
@@ -994,6 +979,7 @@ describe('App', () => {
                   slug: 'demo',
                   name: 'Demo',
                   spreadsheetId: 'sheet-1',
+                  googleCredentialRef: 'default',
                   tableCount: 0,
                   updatedAt: '2026-04-26T00:00:00.000Z'
                 },
@@ -1001,6 +987,7 @@ describe('App', () => {
                   slug: 'prod',
                   name: 'Prod',
                   spreadsheetId: 'sheet-2',
+                  googleCredentialRef: 'default',
                   tableCount: 0,
                   updatedAt: '2026-04-27T00:00:00.000Z'
                 }
@@ -1010,6 +997,7 @@ describe('App', () => {
                   slug: 'demo',
                   name: 'Demo',
                   spreadsheetId: 'sheet-1',
+                  googleCredentialRef: 'default',
                   tableCount: 0,
                   updatedAt: '2026-04-26T00:00:00.000Z'
                 }
@@ -1092,6 +1080,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: 0,
               updatedAt: '2026-04-26T00:00:00.000Z'
             }
@@ -1177,6 +1166,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: 0,
               updatedAt: '2026-04-26T00:00:00.000Z'
             },
@@ -1184,6 +1174,7 @@ describe('App', () => {
               slug: 'prod',
               name: 'Prod',
               spreadsheetId: 'sheet-2',
+              googleCredentialRef: 'default',
               tableCount: 0,
               updatedAt: '2026-04-27T00:00:00.000Z'
             }
@@ -1255,6 +1246,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: projectRegistryCalls > 1 ? 1 : 0,
               updatedAt: '2026-04-26T00:00:00.000Z'
             }
@@ -1422,6 +1414,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: tableDeleted ? 0 : 1,
               updatedAt: '2026-04-26T00:00:00.000Z'
             }
@@ -1542,6 +1535,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: 0,
               updatedAt: '2026-04-26T00:00:00.000Z'
             }
@@ -1612,6 +1606,7 @@ describe('App', () => {
               slug: 'demo',
               name: 'Demo',
               spreadsheetId: 'sheet-1',
+              googleCredentialRef: 'default',
               tableCount: 0,
               updatedAt: '2026-04-26T00:00:00.000Z'
             }

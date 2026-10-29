@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { adminRequestHeaderName, type AdminAccess } from './auth';
-import { deleteProject, deleteTable, inspectSpreadsheetTab, listApiKeys, listProjects, listSpreadsheetTabs, listSpreadsheetWatches, refreshTableCache, revokeApiKey } from './api';
+import { AdminApiError, AdminResponseShapeError, classifyAuthFailure, deleteProject, getProject, deleteTable, inspectSpreadsheetTab, listApiKeys, listProjects, listSpreadsheetTabs, listSpreadsheetWatches, refreshTableCache, revokeApiKey } from './api';
 
 const browserAccess: AdminAccess = { source: 'browser', credential: 'secret' };
 
@@ -324,5 +324,90 @@ describe('admin api helpers', () => {
     await expect(listSpreadsheetWatches(browserAccess)).rejects.toThrow(
       'This operation requires a global admin key. requestId=req-401'
     );
+  });
+
+  describe('typed client errors', () => {
+    function workerError(status: number, code: string, message: string) {
+      return vi.fn(async () => Response.json({ error: { code, message, details: null } }, { status }));
+    }
+
+    it('carries status and code from the Worker error body', async () => {
+      vi.stubGlobal('fetch', workerError(401, 'UNAUTHORIZED', 'Unauthorized'));
+
+      const error = await listProjects(browserAccess).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(AdminApiError);
+      expect(error).toMatchObject({ status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+    });
+
+    it('classifies an invalid or missing credential as rejected', async () => {
+      for (const message of ['Unauthorized', 'Invalid API key.', 'Unsupported authorization scheme.']) {
+        vi.stubGlobal('fetch', workerError(401, 'UNAUTHORIZED', message));
+        const error = await listProjects(browserAccess).catch((caught: unknown) => caught);
+        expect(classifyAuthFailure(error)).toBe('invalid-credential');
+      }
+    });
+
+    it('classifies a valid key without the needed scope or project as insufficient scope', async () => {
+      for (const message of [
+        'This operation requires a global admin key.',
+        'This key cannot list API keys for another project.',
+        'This key can only create API keys for its own project.',
+        'API keys can only delegate scopes they already have.'
+      ]) {
+        vi.stubGlobal('fetch', workerError(401, 'UNAUTHORIZED', message));
+        const error = await listProjects(browserAccess).catch((caught: unknown) => caught);
+        expect(classifyAuthFailure(error)).toBe('insufficient-scope');
+      }
+
+      vi.stubGlobal('fetch', workerError(403, 'FORBIDDEN', 'Forbidden'));
+      const forbidden = await listProjects(browserAccess).catch((caught: unknown) => caught);
+      expect(classifyAuthFailure(forbidden)).toBe('insufficient-scope');
+    });
+
+    it('does not classify non-auth failures or foreign errors', async () => {
+      vi.stubGlobal('fetch', workerError(503, 'SERVICE_UNAVAILABLE', 'Unavailable'));
+      const error = await listProjects(browserAccess).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(AdminApiError);
+      expect(classifyAuthFailure(error)).toBeNull();
+      expect(classifyAuthFailure(new Error('rejected'))).toBeNull();
+    });
+
+    it('treats a bodyless 401 as a rejected credential', async () => {
+      vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
+
+      const error = await listProjects(browserAccess).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ status: 401, message: 'The configured admin credential was rejected.' });
+      expect(classifyAuthFailure(error)).toBe('invalid-credential');
+    });
+  });
+
+  describe('response contract validation', () => {
+    it('rejects a successful response whose shape does not match the contract', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => Response.json({ data: null }, { headers: { 'x-request-id': 'req-skew' } }))
+      );
+
+      const error = await listProjects(browserAccess).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(AdminResponseShapeError);
+      expect(error).toMatchObject({ requestId: 'req-skew' });
+      expect(error instanceof Error ? error.message : '').toContain('/v1/admin/projects (data:');
+    });
+
+    it('rejects a revoke acknowledgement that is not ok: true', async () => {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ok: false })));
+
+      await expect(revokeApiKey(browserAccess, 'key-1')).rejects.toBeInstanceOf(AdminResponseShapeError);
+    });
+
+    it('rejects a project detail response missing its project', async () => {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ tables: [] })));
+
+      await expect(getProject(browserAccess, 'demo')).rejects.toBeInstanceOf(AdminResponseShapeError);
+    });
   });
 });

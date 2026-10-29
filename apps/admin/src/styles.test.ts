@@ -128,6 +128,7 @@ describe('styles.css design tokens', () => {
     { name: 'accent badge', foreground: '--accent', background: '--accent-soft' },
     { name: 'muted badge', foreground: '--muted', background: '--muted-soft' },
     { name: 'health badge', foreground: '--success', background: '--success-soft' },
+    { name: 'destructive scope badge', foreground: '--danger', background: '--danger-soft' },
     { name: 'warning notice', foreground: '--warning-ink', background: '--warning-soft' }
   ])('keeps $name text readable on its tinted background', ({ foreground, background }) => {
     const tinted = over(token(tokens, background), panel);

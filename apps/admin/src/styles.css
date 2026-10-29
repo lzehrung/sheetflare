@@ -9,6 +9,7 @@
   --accent-soft: rgba(158, 55, 17, 0.14);
   --on-accent: #fff7f2;
   --danger: #a33a2b;
+  --danger-soft: rgba(163, 58, 43, 0.12);
   --error: #9f2f16;
   --success: #195b32;
   --success-soft: rgba(25, 91, 50, 0.12);
@@ -306,10 +307,38 @@ body {
   font-size: 1.3rem;
 }
 
+.scopeFieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.scopeFieldset legend {
+  padding: 0;
+  font-weight: 700;
+}
+
 .scopeGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.scopeOption {
+  display: grid;
+  gap: 4px;
+}
+
+.scopeOption .scopeDescription {
+  margin: 0 0 0 28px;
+  font-size: 0.85rem;
+}
+
+.badgeDanger {
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .tableForm {
