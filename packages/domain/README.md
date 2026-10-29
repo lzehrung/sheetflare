@@ -12,6 +12,7 @@ Pure query, pagination, row-normalization, and schema-inference logic.
 ## Important Files
 
 - `src/query.ts`: indexed filter planning and value comparison rules.
+- `src/constraints.ts`: field-rule validation and filter-operand canonicalization (`coerceRowFilter`).
 - `src/pagination.ts`: sort parsing, cursor encoding, and fingerprinting.
 - `src/rows.ts`: key normalization and header filtering.
 - `src/schema.ts`: inferred schema output.
@@ -20,4 +21,5 @@ Pure query, pagination, row-normalization, and schema-inference logic.
 
 - This package should stay side-effect free and easy to test directly.
 - Sort and comparison behavior here must match the SQLite-backed query behavior in `@sheetflare/cloudflare`.
+- Filter operands are canonicalized once in `coerceRowFilter` (field normalization and coercion, `rowNumber` operands to numbers, `id` operands to strings) before the SQL plan or the scan sees them, so both paths compare the same values.
 - If a rule is hard to prove with a narrow unit test, it probably does not belong in this package yet.

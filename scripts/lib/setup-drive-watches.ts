@@ -1,15 +1,24 @@
-import type {
-  AdminListSpreadsheetWatchRetryAdviceResult,
-  AdminListSpreadsheetWatchesResult,
-  SpreadsheetWatch,
-  SpreadsheetWatchRetryAdvice
+import { z } from 'zod';
+import {
+  spreadsheetWatchSchema,
+  type AdminListSpreadsheetWatchRetryAdviceResult,
+  type AdminListSpreadsheetWatchesResult,
+  type SpreadsheetWatch,
+  type SpreadsheetWatchRetryAdvice
 } from '@sheetflare/contracts';
-import { requestJson } from './runtime';
+import { requestJson, ScriptError } from './runtime';
 
-export type DriveWatchRegistration = {
-  spreadsheetId: string;
-  channelId: string;
-};
+export const driveWatchRegistrationSchema = z.object({
+  spreadsheetId: spreadsheetWatchSchema.shape.spreadsheetId,
+  channelId: spreadsheetWatchSchema.shape.channelId,
+  lastWatchError: spreadsheetWatchSchema.shape.lastWatchError
+});
+
+export const driveWatchRegistrationResultSchema = z.object({
+  data: z.array(driveWatchRegistrationSchema)
+});
+
+export type DriveWatchRegistration = z.infer<typeof driveWatchRegistrationSchema>;
 
 type DriveWatchRequestDependencies = {
   sleep?: (delayMs: number) => Promise<void>;
@@ -69,7 +78,7 @@ export async function registerDriveWatches(options: {
   debounceSeconds?: number;
   expirationHours?: number;
 }) {
-  const response = await requestJson<{ data: DriveWatchRegistration[] }>({
+  const response = await requestJson<unknown>({
     baseUrl: options.baseUrl,
     path: '/v1/admin/system/google/drive/watches/register',
     method: 'POST',
@@ -81,7 +90,12 @@ export async function registerDriveWatches(options: {
     expectedStatus: 200
   });
 
-  return response.data?.data ?? [];
+  const parsed = driveWatchRegistrationResultSchema.safeParse(response.data);
+  if (!parsed.success) {
+    throw new ScriptError('Drive watch registration returned a response that does not match the expected shape.');
+  }
+
+  return parsed.data.data;
 }
 
 export async function listDriveWatches(options: {

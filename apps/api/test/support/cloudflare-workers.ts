@@ -61,6 +61,13 @@ const unconfiguredCachedWorkerBinding: CachedWorkerEntrypointBinding = Object.as
   unconfiguredCachedWorkerEntrypoint
 );
 
+// Vitest resolves `cloudflare:workers` to this module (see vitest.config.ts) and has no Workers runtime behind it, so
+// the cached-read binding starts unconfigured and each test installs the entrypoint it wants to exercise.
+//
+// Test support imports this file by path instead of through `cloudflare:workers`. TypeScript resolves that specifier to
+// the ambient module from @cloudflare/workers-types even in tests, and there `exports.CachedTableReads` is the full
+// loopback stub, which a test double cannot be. The path import gives the double the type it really has and still
+// reaches the module instance the gateway sees at run time. Production resolves `cloudflare:workers` to the runtime.
 export const exports: {
   CachedTableReads: CachedWorkerEntrypointBinding;
 } = {

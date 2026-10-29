@@ -1897,6 +1897,426 @@ describe('ControlPlaneDO project removal', () => {
       'control.projects.list.result'
     ).data.map((project) => project.slug).sort()).toEqual(['alpha', 'beta']);
   });
+
+  it('registers the healthy spreadsheet when another spreadsheet has conflicting credential refs', async () => {
+    const watchedSpreadsheetIds: string[] = [];
+    const sheet: SheetState = { rows: [['_id']] };
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const watchMatch = url.match(/\/drive\/v3\/files\/([^/]+)\/watch/);
+      if (watchMatch) {
+        watchedSpreadsheetIds.push(decodeURIComponent(watchMatch[1] ?? ''));
+      }
+      return fallbackFetch(input, init);
+    });
+    const { env, seedRegistryProject } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    // A current upsert cannot create this pair. The rows are what a registry saved before the check still holds.
+    seedRegistryProject('alpha', 'sheet-conflict', 'default');
+    seedRegistryProject('beta', 'sheet-conflict', 'other');
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.project.upsert',
+      summary: {
+        slug: 'gamma',
+        name: 'gamma',
+        spreadsheetId: 'sheet-healthy',
+        googleCredentialRef: 'default',
+        tableCount: 0,
+        updatedAt: '2026-04-29T10:00:00.000Z'
+      }
+    });
+
+    const registered = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.spreadsheet-watches.register',
+        webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+        webhookToken: 'secret-token',
+        debounceSeconds: 30,
+        expirationMs: Date.parse('2026-04-29T10:10:00.000Z')
+      }),
+      'control.spreadsheet-watches.register.result'
+    );
+
+    const conflictMessage = 'Spreadsheet sheet-conflict is registered with conflicting Google credential refs "default", "other". Projects that share a spreadsheet must use the same credential ref.';
+    expect(watchedSpreadsheetIds).toEqual(['sheet-healthy']);
+    expect(registered.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-conflict',
+        projectSlugs: ['alpha', 'beta'],
+        lastWatchError: conflictMessage
+      }),
+      expect.objectContaining({
+        spreadsheetId: 'sheet-healthy',
+        googleCredentialRef: 'default',
+        channelId: 'channel-sheet-healthy',
+        resourceId: 'resource-sheet-healthy',
+        lastWatchError: null,
+        projectSlugs: ['gamma']
+      })
+    ]);
+    expect(expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.spreadsheet-watches.list' }),
+      'control.spreadsheet-watches.list.result'
+    ).data).toEqual(registered.data);
+  });
+
+  it('renews the healthy spreadsheet when another spreadsheet has conflicting credential refs', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+    const watchedSpreadsheetIds: string[] = [];
+    const sheet: SheetState = { rows: [['_id']] };
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const watchMatch = url.match(/\/drive\/v3\/files\/([^/]+)\/watch/);
+      if (watchMatch) {
+        watchedSpreadsheetIds.push(decodeURIComponent(watchMatch[1] ?? ''));
+      }
+      return fallbackFetch(input, init);
+    });
+    const { env, controlPlaneNamespace, seedRegistryProject } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    const projects = [
+      { slug: 'healthy', spreadsheetId: 'sheet-healthy', googleCredentialRef: 'default' },
+      { slug: 'alpha', spreadsheetId: 'sheet-conflict', googleCredentialRef: 'default' }
+    ];
+    for (const project of projects) {
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.project.upsert',
+        summary: {
+          slug: project.slug,
+          name: project.slug,
+          spreadsheetId: project.spreadsheetId,
+          googleCredentialRef: project.googleCredentialRef,
+          tableCount: 0,
+          updatedAt: '2026-04-29T10:00:00.000Z'
+        }
+      });
+    }
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30,
+      expirationMs: Date.parse('2026-04-29T10:10:00.000Z')
+    });
+
+    // Upsert rejects a new conflicting ref. A registry saved before that check can still hold one, and renewal must notice it.
+    seedRegistryProject('beta', 'sheet-conflict', 'other');
+
+    vi.setSystemTime(new Date('2026-04-29T10:05:01.000Z'));
+    await (controlPlaneNamespace as { triggerAlarm(name: string): Promise<void> }).triggerAlarm('control-plane');
+
+    const watches = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.spreadsheet-watches.list' }),
+      'control.spreadsheet-watches.list.result'
+    ).data;
+    expect(watchedSpreadsheetIds).toEqual(['sheet-conflict', 'sheet-healthy', 'sheet-healthy']);
+    expect(watches).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-conflict',
+        channelId: 'channel-sheet-conflict',
+        lastWatchError: 'Spreadsheet sheet-conflict is registered with conflicting Google credential refs "default", "other". Projects that share a spreadsheet must use the same credential ref.',
+        projectSlugs: ['alpha', 'beta']
+      }),
+      expect.objectContaining({
+        spreadsheetId: 'sheet-healthy',
+        channelId: 'channel-sheet-healthy-2',
+        lastWatchError: null,
+        projectSlugs: ['healthy']
+      })
+    ]);
+
+    vi.useRealTimers();
+  });
+
+  it('registers a previously conflicting spreadsheet after its credential refs are aligned', async () => {
+    const stoppedChannelIds: string[] = [];
+    const sheet: SheetState = { rows: [['_id']] };
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/drive/v3/channels/stop')) {
+        const parsed: unknown = JSON.parse(String(init?.body ?? '{}'));
+        if (parsed && typeof parsed === 'object' && 'id' in parsed && typeof parsed.id === 'string') {
+          stoppedChannelIds.push(parsed.id);
+        }
+      }
+      return fallbackFetch(input, init);
+    });
+    const { env, seedRegistryProject } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    seedRegistryProject('alpha', 'sheet-conflict', 'default');
+    seedRegistryProject('beta', 'sheet-conflict', 'other');
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.project.upsert',
+      summary: {
+        slug: 'gamma',
+        name: 'gamma',
+        spreadsheetId: 'sheet-healthy',
+        googleCredentialRef: 'default',
+        tableCount: 0,
+        updatedAt: '2026-04-29T10:00:00.000Z'
+      }
+    });
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30,
+      expirationMs: Date.parse('2026-04-29T10:10:00.000Z')
+    });
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.project.upsert',
+      summary: {
+        slug: 'beta',
+        name: 'beta',
+        spreadsheetId: 'sheet-conflict',
+        googleCredentialRef: 'default',
+        tableCount: 0,
+        updatedAt: '2026-04-29T10:04:00.000Z'
+      }
+    });
+    const registered = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.spreadsheet-watches.register',
+        webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+        webhookToken: 'secret-token',
+        debounceSeconds: 30,
+        expirationMs: Date.parse('2026-04-29T10:10:00.000Z')
+      }),
+      'control.spreadsheet-watches.register.result'
+    );
+
+    expect(stoppedChannelIds).not.toContain('credential-conflict:sheet-conflict');
+    expect(registered.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-conflict',
+        channelId: 'channel-sheet-conflict',
+        googleCredentialRef: 'default',
+        lastWatchError: null,
+        projectSlugs: ['alpha', 'beta']
+      }),
+      expect.objectContaining({
+        spreadsheetId: 'sheet-healthy',
+        channelId: 'channel-sheet-healthy-2',
+        lastWatchError: null,
+        projectSlugs: ['gamma']
+      })
+    ]);
+  });
+
+  const conflictPlaceholderMessage = 'Spreadsheet sheet-conflict is registered with conflicting Google credential refs "default", "other". Projects that share a spreadsheet must use the same credential ref.';
+
+  function createConflictRegistry() {
+    const driveCalls: string[] = [];
+    const fallbackFetch = createSheetsAndDriveFetch({ rows: [['_id']] });
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/drive/v3/files/') && url.includes('/watch')) {
+        driveCalls.push(`watch ${url}`);
+      }
+      if (url.endsWith('/drive/v3/channels/stop')) {
+        driveCalls.push(`stop ${String(init?.body ?? '')}`);
+      }
+      return fallbackFetch(input, init);
+    });
+    const { env, controlPlaneNamespace, seedRegistryProject } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    seedRegistryProject('alpha', 'sheet-conflict', 'default');
+    seedRegistryProject('beta', 'sheet-conflict', 'other');
+    return { driveCalls, env, controlPlane, controlPlaneNamespace };
+  }
+
+  async function registerConflictPlaceholder(controlPlane: {
+    fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  }) {
+    return doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30,
+      expirationMs: Date.parse('2026-04-29T10:10:00.000Z')
+    });
+  }
+
+  it('reports a credential-ref conflict instead of an active watch when only a conflict placeholder exists', async () => {
+    const { controlPlane } = createConflictRegistry();
+    await registerConflictPlaceholder(controlPlane);
+
+    const advice = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.spreadsheet-watches.retry-advice.list'
+      }),
+      'control.spreadsheet-watches.retry-advice.list.result'
+    );
+
+    expect(advice.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-conflict',
+        status: 'credential-conflict',
+        currentWatchExpirationAt: null,
+        safeRetryAt: null,
+        projectSlugs: ['alpha', 'beta']
+      })
+    ]);
+    expect(advice.data[0]?.note).toContain('conflicting Google credential refs "default", "other"');
+    expect(advice.data[0]?.note).toContain('No Google Drive watch is active');
+    expect(advice.data[0]?.note).toContain('Align googleCredentialRef');
+    expect(JSON.stringify(advice)).not.toContain('active-watch-present');
+  });
+
+  it('does not call Google when renewing or stopping a credential-conflict placeholder', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+    const { driveCalls, controlPlane, controlPlaneNamespace } = createConflictRegistry();
+    await registerConflictPlaceholder(controlPlane);
+    expect(driveCalls).toEqual([]);
+
+    vi.setSystemTime(new Date('2026-05-06T10:00:00.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+    expect(driveCalls).toEqual([]);
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.project.upsert',
+      summary: {
+        slug: 'beta',
+        name: 'beta',
+        spreadsheetId: 'sheet-conflict',
+        googleCredentialRef: 'default',
+        tableCount: 0,
+        updatedAt: '2026-05-06T10:01:00.000Z'
+      }
+    });
+    const notified = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.spreadsheet-watch.notify',
+        channelId: 'credential-conflict:sheet-conflict',
+        resourceId: 'credential-conflict:sheet-conflict',
+        resourceState: 'sync',
+        messageNumber: '1',
+        changedAt: '2026-05-06T10:02:00.000Z',
+        channelExpiration: '2026-05-06T12:00:00.000Z'
+      }),
+      'control.spreadsheet-watch.notify.result'
+    );
+    expect(notified.accepted).toBe(false);
+
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+    expect(driveCalls).toEqual([]);
+    expect(expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.spreadsheet-watches.list' }),
+      'control.spreadsheet-watches.list.result'
+    ).data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-conflict',
+        channelId: 'credential-conflict:sheet-conflict',
+        lastWatchError: conflictPlaceholderMessage
+      })
+    ]);
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.stop',
+      input: {}
+    });
+    expect(driveCalls).toEqual([]);
+    const advice = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.spreadsheet-watches.retry-advice.list'
+      }),
+      'control.spreadsheet-watches.retry-advice.list.result'
+    );
+    expect(advice.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-conflict',
+        status: 'ready-to-retry',
+        currentWatchExpirationAt: null
+      })
+    ]);
+    expect(JSON.stringify(advice)).not.toContain('active-watch-present');
+    expect(JSON.stringify(advice)).not.toContain('cooldown-recommended');
+  });
+
+  it('replaces a credential-conflict placeholder with a real watch after the refs are aligned', async () => {
+    const { driveCalls, controlPlane } = createConflictRegistry();
+    await registerConflictPlaceholder(controlPlane);
+    expect(expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.spreadsheet-watches.list' }),
+      'control.spreadsheet-watches.list.result'
+    ).data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-conflict',
+        channelId: 'credential-conflict:sheet-conflict',
+        lastWatchError: conflictPlaceholderMessage
+      })
+    ]);
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.project.upsert',
+      summary: {
+        slug: 'beta',
+        name: 'beta',
+        spreadsheetId: 'sheet-conflict',
+        googleCredentialRef: 'default',
+        tableCount: 0,
+        updatedAt: '2026-04-29T10:04:00.000Z'
+      }
+    });
+    const registered = expectRpcResult(
+      await registerConflictPlaceholder(controlPlane),
+      'control.spreadsheet-watches.register.result'
+    );
+
+    expect(driveCalls.some((call) => call.startsWith('stop '))).toBe(false);
+    expect(registered.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-conflict',
+        channelId: 'channel-sheet-conflict',
+        googleCredentialRef: 'default',
+        resourceId: 'resource-sheet-conflict',
+        lastWatchError: null,
+        projectSlugs: ['alpha', 'beta']
+      })
+    ]);
+    const advice = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.spreadsheet-watches.retry-advice.list'
+      }),
+      'control.spreadsheet-watches.retry-advice.list.result'
+    );
+    expect(advice.data).toEqual([
+      expect.objectContaining({
+        spreadsheetId: 'sheet-conflict',
+        status: 'active-watch-present',
+        note: 'A known Drive watch is still active for this spreadsheet.',
+        projectSlugs: ['alpha', 'beta']
+      })
+    ]);
+  });
+
+  it('drops a conflict placeholder without a stopped-channel tombstone when its projects are gone', async () => {
+    const { driveCalls, controlPlane } = createConflictRegistry();
+    await registerConflictPlaceholder(controlPlane);
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.project.delete', projectSlug: 'alpha' });
+    await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.project.delete', projectSlug: 'beta' });
+
+    expect(driveCalls).toEqual([]);
+    expect(expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.spreadsheet-watches.list' }),
+      'control.spreadsheet-watches.list.result'
+    ).data).toEqual([]);
+    const advice = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.spreadsheet-watches.retry-advice.list'
+      }),
+      'control.spreadsheet-watches.retry-advice.list.result'
+    );
+    expect(advice.data).toEqual([]);
+  });
 });
 
 describe('ControlPlaneDO project reservations', () => {

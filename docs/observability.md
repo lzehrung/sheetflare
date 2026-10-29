@@ -49,6 +49,21 @@ Emitted by `TableDO`:
 - `rowCount`
 - `validationStatus`
 - `validationIssueCount`
+- `supersededByWrite`
+- `durationMs`
+- `requestId`
+- `route`
+- `principal`
+
+`supersededByWrite` is `true` when a write was applied to the cache while the sync was reading its snapshot and the cached rows could not serve the table's current config (the config changed, or the cache was cleared), so there was nothing to keep. The sync promotes its snapshot anyway, but the snapshot may lack the write, so the cache is marked stale with `staleReason: "external-change"`, and the next read resyncs. When the cached rows can serve the config, the sync does not complete: see the next event.
+
+### Superseded table sync
+
+Emitted by `TableDO` instead of `table.sync.complete` when a write was applied to the cache while the sync was reading its snapshot and the cached rows can still serve the table's config. The snapshot may lack that write, and promoting it would drop the write from the cache, so the sync discards the snapshot and keeps the cached rows, which hold the write. Nothing was refreshed from Google: the cache is marked stale with `staleReason: "external-change"`. Requests that were waiting on the superseded sync join one replacement sync before they are answered, and later reads resync. A sustained rate for one table means writes keep landing while syncs read: edits made directly in the sheet are not reaching the cache, and reads on that table wait longer.
+
+- `event: "table.sync.superseded"`
+- `projectSlug`
+- `tableSlug`
 - `durationMs`
 - `requestId`
 - `route`
@@ -267,6 +282,9 @@ Use these exact predicates in your chosen log platform:
 
 - validation drift review:
   - `event == "table.sync.complete" and validationStatus == "warning"`
+
+- superseded syncs (a sustained rate means the cache is not refreshing from Google):
+  - `event == "table.sync.superseded"` grouped by `projectSlug, tableSlug`
 
 - Drive reindex failure, repeated:
   - `event == "drive.reindex.failed" and attempt >= 3` grouped by `spreadsheetId, projectSlug, tableSlug`

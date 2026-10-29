@@ -189,8 +189,9 @@ describe('project-scoped keys', () => {
     globalAdmin = await stack.mintKey({ name: 'Global key admin', projectSlug: null, scopes: ['admin:keys'] });
   });
 
-  // Pins: the project boundary on table reads (assertCredentialProjectBoundary).
-  it('reads its own project and is refused another, without touching the other project', async () => {
+  // Pins: the project boundary on table reads. A private project is still 403. The project record is resolved
+  // once, only to tell public-read from private; the other project's table is not read.
+  it('reads its own project and is refused another, without reading the other table', async () => {
     const asDemo = stack.requestAs(demoAdmin.credential);
 
     expect(await readCells(await asDemo(usersPath), 'name')).toEqual(['Ada', 'Grace']);
@@ -202,7 +203,7 @@ describe('project-scoped keys', () => {
     const touched = stack.rpcs
       .filter((record) => record.target === 'project' || record.target === 'table')
       .map((record) => record.name);
-    expect(touched).not.toContain('project:other');
+    expect(touched).toEqual(['project:other']);
     expect(touched).not.toContain('table:other:orders');
 
     // The refusal is about the key, not the project: its own key reads it.

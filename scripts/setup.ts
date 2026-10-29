@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createDefaultSetupConfig, parseSetupConfig, serializeSetupConfig, setupConfigUsesDefaultGoogleCredential } from './lib/setup-config';
-import { actionsRequireWranglerAuth, assertRotateKeysApplicable, parseSetupArgs, renderSetupHelp, resolveSetupActions } from './lib/setup-cli';
+import { actionsRequireWranglerAuth, assertRotateKeysApplicable, parseSetupArgs, renderSetupHelp, resolveSetupActions, type SetupCliOptions } from './lib/setup-cli';
 import { confirmSheetShared, createConsolePrompter, promptForSetup, type SetupPromptActions, type SetupPrompter } from './lib/setup-prompts';
 import { checkSetupPrereqsWithOptions, checkWranglerAuthPrereq, recordPrereqResult, type SetupPrereqResult } from './lib/setup-prereqs';
 import {
@@ -39,13 +39,23 @@ import { collectMintedCredentials, formatCredentialHandoff } from './lib/setup-c
 import { getSetupDoctorFailureMessage, runSetupDoctor } from './lib/setup-doctor';
 import { checkGcloudAuthPrereq, isPlaceholderGoogleClientEmail } from './lib/setup-google';
 import { formatBeginnerSetupNextSteps, formatSheetShareInstruction } from './lib/setup-next-steps';
-import { getCommandName, runCommand } from './lib/process';
-import { ScriptError, getEnv, logSetupStep as logStep, logSetupSuccess as logSuccess } from './lib/runtime';
+import { getCommandName, runCommand, withCommandRunner, type CommandRunner } from './lib/process';
+import { ScriptError, getEnv, isDirectScriptExecution, logSetupStep as logStep, logSetupSuccess as logSuccess, withProcessEnv, withSetupFetch } from './lib/runtime';
 
 type SetupExecutionSummary = {
   configPath: string;
   apiUrl: string | null;
   localStatePath: string | null;
+};
+
+export type SetupDependencies = {
+  runCommand?: CommandRunner;
+  fetch?: typeof fetch;
+  prompter?: SetupPrompter | null;
+  paths?: {
+    cwd?: string;
+  };
+  env?: NodeJS.ProcessEnv;
 };
 
 async function readConfigFile(path: string) {
@@ -129,12 +139,12 @@ async function hasSetupGoogleCredential(localState: SetupLocalState | null) {
     || await hasDefaultGoogleCredentialEnvironment();
 }
 
-async function runBootstrap(env: NodeJS.ProcessEnv) {
+async function runBootstrap(env: NodeJS.ProcessEnv, cwd: string) {
   const result = await runCommand(
     getCommandName('npm'),
     ['run', 'ops:bootstrap'],
     {
-      cwd: resolve('.'),
+      cwd,
       ...createBootstrapCommandOptions(env)
     }
   );
@@ -154,12 +164,12 @@ async function runBootstrap(env: NodeJS.ProcessEnv) {
   });
 }
 
-async function runSmoke(env: NodeJS.ProcessEnv) {
+async function runSmoke(env: NodeJS.ProcessEnv, cwd: string) {
   const result = await runCommand(
     getCommandName('npm'),
     ['run', 'smoke'],
     {
-      cwd: resolve('.'),
+      cwd,
       env
     }
   );
@@ -204,17 +214,27 @@ async function registerDriveWatchesIfPossible(options: {
       retries: 2,
       retryDelayMs: 1000
     });
+    const registered = result.filter((watch) => watch.lastWatchError === null);
     const visibleSpreadsheetIds = new Set(verified.map((watch) => watch.spreadsheetId));
-    const missingSpreadsheetIds = result
+    const missingSpreadsheetIds = registered
       .map((watch) => watch.spreadsheetId)
       .filter((spreadsheetId) => !visibleSpreadsheetIds.has(spreadsheetId));
+
+    for (const watch of result) {
+      if (watch.lastWatchError === null) {
+        continue;
+      }
+      console.warn(
+        `Warning: Skipped Drive watch registration for ${watch.spreadsheetId}: ${watch.lastWatchError} Align the Google credential refs on every project for that spreadsheet, then run: npm run ops:watch:drive`
+      );
+    }
 
     if (missingSpreadsheetIds.length > 0) {
       console.warn(
         `Warning: Drive watch registration returned success, but status has not yet confirmed spreadsheet watch visibility for ${missingSpreadsheetIds.join(', ')}. Re-check with npm run ops:watch:drive:status.`
       );
     } else {
-      logSuccess(`Registered or renewed ${result.length} spreadsheet watch${result.length === 1 ? '' : 'es'}`);
+      logSuccess(`Registered or renewed ${registered.length} spreadsheet watch${registered.length === 1 ? '' : 'es'}`);
     }
     return result;
   } catch (error) {
@@ -252,14 +272,14 @@ async function recoverDriveWatches(options: {
   }
 }
 
-async function main() {
-  const options = parseSetupArgs(process.argv.slice(2));
+async function executeSetup(options: SetupCliOptions, deps: SetupDependencies) {
   if (options.help) {
     console.log(renderSetupHelp());
     return;
   }
 
-  const resolvedConfigPath = resolve(options.configPath);
+  const cwd = deps.paths?.cwd ?? process.cwd();
+  const resolvedConfigPath = resolve(cwd, options.configPath);
   const localStatePath = getSetupLocalStatePath(resolvedConfigPath);
 
   if (options.writeDefaultConfig) {
@@ -279,9 +299,10 @@ async function main() {
   });
   renderPrereqSummary(prereqResults);
 
-  const prompter = process.stdin.isTTY && process.stdout.isTTY
-    ? createConsolePrompter()
-    : null;
+  let prompter = deps.prompter ?? null;
+  if (deps.prompter === undefined && process.stdin.isTTY && process.stdout.isTTY) {
+    prompter = createConsolePrompter();
+  }
   let localState = await readSetupLocalState(resolvedConfigPath);
   let localStateWritten = false;
   let configInput: unknown;
@@ -493,7 +514,7 @@ async function main() {
       }
 
       logStep('Creating projects and API keys');
-      const bootstrapOutcome = await runBootstrap(createBootstrapEnv(config, apiUrl, adminBearerToken, { rotateKeys: options.rotateKeys }));
+      const bootstrapOutcome = await runBootstrap(createBootstrapEnv(config, apiUrl, adminBearerToken, { rotateKeys: options.rotateKeys }), cwd);
       if (bootstrapOutcome.output) {
         bootstrapOutput = bootstrapOutcome.output;
         if (config.smoke.enabled) {
@@ -579,7 +600,7 @@ async function main() {
         adminCredential: smokeAdminCredential,
         privateReadKey,
         mutationKey
-      }));
+      }), cwd);
       logSuccess('Sheet read/write test passed');
     }
 
@@ -647,7 +668,34 @@ async function main() {
   }
 }
 
-export const setupRun = main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+export async function runSetup(options: SetupCliOptions, deps: SetupDependencies = {}) {
+  let execute = () => executeSetup(options, deps);
+  const env = deps.env;
+  if (env) {
+    const next = execute;
+    execute = () => withProcessEnv(env, next);
+  }
+  const fetchImpl = deps.fetch;
+  if (fetchImpl) {
+    const next = execute;
+    execute = () => withSetupFetch(fetchImpl, next);
+  }
+  const commandRunner = deps.runCommand;
+  if (commandRunner) {
+    const next = execute;
+    execute = () => withCommandRunner(commandRunner, next);
+  }
+
+  return execute();
+}
+
+async function main() {
+  await runSetup(parseSetupArgs(process.argv.slice(2)));
+}
+
+if (isDirectScriptExecution(import.meta.url)) {
+  void main().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}

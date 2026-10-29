@@ -16,13 +16,15 @@ import {
   createCachedTableReadsHarness,
   createEnv,
   defaultCachedTableReadProps,
+  probesOf,
   expectCachedDataReadGatewayHeaders,
   expectCachedReadPurgeCalls,
   expectDefaultGatewayNoStore,
   expectNoCredentialMaterial,
   expectSuccessfulCachedReadHeaders,
   getOnlyCachedReadRequest,
-  requireCacheKey
+  requireCacheKey,
+  type UnexpectedTableResponseRequest
 } from './support/harness';
 import { WorkersCacheEmulator } from './support/workers-cache';
 
@@ -1263,6 +1265,8 @@ describe('api routes', () => {
         adminUi: 'disabled'
       },
       notes: [
+        'ADMIN_BEARER_TOKEN is shorter than 32 characters.',
+        'GOOGLE_DRIVE_WEBHOOK_SECRET is shorter than 32 characters.',
         'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
       ]
     });
@@ -1355,6 +1359,8 @@ describe('api routes', () => {
       },
       notes: [
         'Neither the default Google service-account credential nor named GOOGLE_CREDENTIALS_JSON entries are configured.',
+        'ADMIN_BEARER_TOKEN is shorter than 32 characters.',
+        'GOOGLE_DRIVE_WEBHOOK_SECRET is shorter than 32 characters.',
         'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
       ]
     });
@@ -1388,6 +1394,8 @@ describe('api routes', () => {
       },
       notes: [
         'Default Google service-account credential is not configured, but named GOOGLE_CREDENTIALS_JSON entries are available for project-specific refs.',
+        'ADMIN_BEARER_TOKEN is shorter than 32 characters.',
+        'GOOGLE_DRIVE_WEBHOOK_SECRET is shorter than 32 characters.',
         'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
       ]
     });
@@ -1439,6 +1447,8 @@ describe('api routes', () => {
       },
       notes: [
         'GOOGLE_CREDENTIALS_JSON is present but invalid. Each named credential must include non-empty client_email/private_key or clientEmail/privateKey fields.',
+        'ADMIN_BEARER_TOKEN is shorter than 32 characters.',
+        'GOOGLE_DRIVE_WEBHOOK_SECRET is shorter than 32 characters.',
         'This endpoint validates internal worker dependencies only. Table access is verified separately through route-level smoke checks.'
       ]
     });
@@ -1761,7 +1771,7 @@ describe('api routes', () => {
     );
 
     expect(response.status).toBe(403);
-    expect(env.__projectRequests).toEqual([]);
+    expect(env.__projectRequests).toEqual(['project.table.resolve']);
   });
 
   it('preserves internal project lookup failures instead of rewriting them as unauthorized', async () => {
@@ -1788,7 +1798,6 @@ describe('api routes', () => {
     const env = createEnv({ defaultAuthMode: 'public-read' }) as Env & {
       __projectRequests: string[];
       __tableRequests: Array<{ type: string; requestContext?: Record<string, unknown> }>;
-      __cachedReadRequests: CachedReadRequestRecord[];
     };
 
     const response = await app.request(
@@ -1802,9 +1811,9 @@ describe('api routes', () => {
     expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
     expect(response.headers.get('cache-tag')).toBeNull();
     expect(env.__projectRequests).toEqual(['project.table.resolve']);
-    expect(env.__cachedReadRequests).toHaveLength(1);
-    expect(env.__cachedReadRequests[0].authorization).toBeNull();
-    expect(env.__cachedReadRequests[0].url).toBe(
+    const cachedReadRequest = getOnlyCachedReadRequest(env);
+    expect(cachedReadRequest.authorization).toBeNull();
+    expect(cachedReadRequest.url).toBe(
       'http://localhost/internal/cache/v1/projects/demo/tables/users/rows'
     );
     expect(env.__tableRequests.map((request) => request.type)).toEqual([
@@ -2264,7 +2273,6 @@ describe('api routes', () => {
           issues: [],
           validatedAt: '2026-04-26T00:00:02.000Z'
         },
-        dataGeneration: 0,
         externalChange: {
           pending: false,
           lastChangedAt: null,
@@ -2472,7 +2480,6 @@ describe('api routes', () => {
           issues: [],
           validatedAt: '2026-04-26T00:00:03.000Z'
         },
-        dataGeneration: 0,
         externalChange: {
           pending: false,
           lastChangedAt: null,
@@ -2732,6 +2739,47 @@ describe('api routes', () => {
     expect(env.__verifyApiKeyCallCount).toBe(0);
     expect(env.__rateLimitRequests).toEqual([
       { name: 'rate-limit:data:client:anonymous', key: 'rows.list' }
+    ]);
+  });
+
+  it('buckets IPv6 clients by their /64 and leaves IPv4 addresses whole', async () => {
+    const app = createApp();
+    const env = createEnv({ rateLimitFixedWindow: true });
+    env.RATE_LIMIT_MAX_REQUESTS = '5';
+    const probes = probesOf(env);
+    const read = (ip: string) => app.request('/v1/projects/demo/tables/users/rows', {
+      headers: { 'cf-connecting-ip': ip }
+    }, env);
+
+    const compressed = '2001:db8:abcd:12::1';
+    const expandedPeer = '2001:0db8:abcd:0012:ffff:ffff:ffff:ffff';
+    const otherPrefix = '2001:db8:abcd:13::1';
+    const ipv4 = '203.0.113.8';
+    const ipv4Peer = '203.0.113.9';
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect((await read(compressed)).status).toBe(401);
+    }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      expect((await read(expandedPeer)).status).toBe(401);
+    }
+
+    const sharedBucket = await read(compressed);
+    expect(sharedBucket.status).toBe(429);
+    const ipv6Names = probes.rateLimitRequests
+      .filter((request) => request.name.includes('2001'))
+      .map((request) => request.name);
+    expect(new Set(ipv6Names)).toEqual(new Set(['rate-limit:data:client:2001:db8:abcd:12::']));
+    expect(ipv6Names).toHaveLength(6);
+
+    expect((await read(otherPrefix)).status).toBe(401);
+    expect((await read(ipv4)).status).toBe(401);
+    expect((await read(ipv4Peer)).status).toBe(401);
+    expect(probes.rateLimitRequests.map((request) => request.name)).toEqual([
+      ...Array.from({ length: 6 }, () => 'rate-limit:data:client:2001:db8:abcd:12::'),
+      'rate-limit:data:client:2001:db8:abcd:13::',
+      'rate-limit:data:client:203.0.113.8',
+      'rate-limit:data:client:203.0.113.9'
     ]);
   });
 

@@ -119,7 +119,11 @@ class LocalDurableObjectNamespace<TEnv> {
     if (!entry) {
       const state = createDurableObjectState();
       entry = {
-        instance: new this.durableObjectClass(state as DurableObjectState, this.env),
+        // The harness backs only `ctx.storage` (SQL, alarms, transactionSync), the part of DurableObjectState that the
+        // Sheetflare Durable Objects use. Their constructors take the full workers-types DurableObjectState, whose
+        // other members mean nothing here, so the double is asserted once, at this platform boundary. A Durable Object
+        // that starts using another member fails its test at once instead of passing silently.
+        instance: new this.durableObjectClass(state as never, this.env),
         __state: state
       };
       this.instances.set(name, entry);

@@ -5,7 +5,6 @@
 // Unlike the canned namespaces in harness.ts, nothing here answers on behalf of a Durable Object: the control plane
 // really stores and compares key hashes, the project Durable Object really creates and deletes projects, and so on.
 
-import { exports as workerExports } from 'cloudflare:workers';
 import { vi } from 'vitest';
 import { z } from 'zod';
 import { doRpc } from '@sheetflare/cloudflare';
@@ -28,6 +27,7 @@ import {
   type CachePurgeTarget,
   type CachedTableReadProps
 } from '../../src/index';
+import { exports as workerExports } from './cloudflare-workers';
 import { createCachedTableReadsHarness, type CachePurgeCall } from './harness';
 import { WorkersCacheEmulator } from './workers-cache';
 

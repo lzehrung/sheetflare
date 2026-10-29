@@ -203,7 +203,9 @@ Important fields:
 - `lastSyncError`
 - `validation`
 
-`lastSyncStartedAt`, `lastSyncCompletedAt`, and `validation` describe the last full cache rebuild from Google Sheets. Successful point mutations update the cache in place but do not rewrite those sync timestamps.
+`lastSyncStartedAt` and `validation` change only on a full rebuild from Google Sheets. A successful create or update refreshes the cache in place and sets `lastSyncCompletedAt` to the mutation time, which also restarts the TTL clock. A delete does the same only when the cache was fresh, the header layout is unchanged, and nothing else changed the cached rows while the delete was in flight (a sync or point read that ran meanwhile may already have seen the sheet without the row, and shifting its row numbers again would corrupt them); otherwise it triggers a full rebuild, which sets all of these normally. Point mutations do not recompute `validation`.
+
+A delete that rebuilds the cache (the cache had expired, the header layout changed, or its rows changed while the delete ran) leaves the rows below the deleted one on their old row numbers until the rebuild is in. It therefore marks the cache `external-change` before the table's write queue is released and runs the rebuild after it. Until the rebuild finishes, every request that needs the cache waits for that one rebuild: list and schema reads, point reads, and the next create, update, or delete. That includes a write after a delete on an expired cache, which would not wait for a sync on its own, and such deletes are common when `cacheTtlSeconds` is short. It also includes a list that had already started a sync of its own on the expired cache: the delete changes the cache under that sync, which then drops its snapshot (a `table.sync.superseded` event), and the list waits for the rebuild instead of answering from the old row numbers. Once the rebuild is in, the next delete finds the cache fresh and lowers the row numbers in place again. A delete that updates the cache in place does not mark it, and nothing waits. If the rebuild fails, the delete and every request waiting for it return the error, the status shows `error`, and the mark stays until a later sync succeeds.
 
 Interpretation:
 
@@ -211,7 +213,7 @@ Interpretation:
 - `never-synced`: table has not completed its first sync
 - `ttl-expired`: cache is old but point reads and mutations can still use narrow repair behavior
 - `config-changed`: table config changed in a way that requires resync
-- `external-change`: Google Drive reported a spreadsheet update and a debounced auto-reindex is pending
+- `external-change`: Google Drive reported a spreadsheet update and a debounced auto-reindex is pending, or a write overlapped a sync so the synced snapshot may lack it, or a delete could not lower the cached row numbers in place and is rebuilding the cache. The last two have no debounce, so the next read resyncs or waits for the rebuild already running, and a Drive notification that arrives meanwhile does not give them one.
 - `error`: last sync failed and needs investigation
 
 Validation interpretation:
@@ -220,7 +222,7 @@ Validation interpretation:
 - `validation.status: "warning"`: the last full sync found rows that violate configured `fieldRules`, for example duplicates after normalization or invalid enum/type values
 - `validation.validatedAt`: when that validation snapshot was last recomputed during a full sync
 - `validation.issues`: a capped sample for operator triage, not an exhaustive dump
-- `externalChange.pending`: Drive notification arrived and the debounce window has not completed yet
+- `externalChange.pending`: a Drive notification arrived and the debounce window has not completed yet, or a write overlapped a sync, or a delete is rebuilding the cache (`debounceUntil` is `null` for those two, so the next read resyncs)
 - `externalChange.debounceUntil`: when the queued automatic reindex is due
 - `externalChange.lastAutoReindexAt`: when the last Drive-triggered automatic reindex completed
 
@@ -307,10 +309,12 @@ Operational notes:
 - `expirationAt` and `lastWatchError` from `npm run ops:watch:drive:status` are the primary signals for renewal health
 - if a watch has expired or `lastWatchError` remains non-null, rerun `npm run ops:watch:drive` and investigate Worker logs
 - if Google returns `Rate limit exceeded for creating file subscriptions.`, stop known watches with `npm run ops:watch:drive:stop`, wait for Google to release stale subscriptions, then retry registration
-- `npm run ops:watch:drive:retry-advice` shows the current helper view of whether a spreadsheet is still cooling down and the earliest conservative retry time
-- Workers Logs are enabled in both Wrangler configs. When a watch or reindex misbehaves, filter for these structured events: `drive.reindex.failed`, `drive.watch.renew.failed`, `drive.watch.stop.failed`, and `drive.notification.rejected`
+- `npm run ops:watch:drive:retry-advice` shows whether a spreadsheet has an active Google watch, is cooling down after a stopped channel, is ready to register, or is blocked by conflicting credential refs. A `credential-conflict:` placeholder is not an active watch, and a stopped-channel tombstone is not one either. Conflict advice uses status `credential-conflict`, names the refs, and tells you to align them before registering again
+- Workers Logs are enabled in both Wrangler configs. When a watch or reindex misbehaves, filter for these structured events: `drive.reindex.failed`, `drive.watch.renew.failed`, `drive.watch.stop.failed`, `drive.watch.credential-conflict`, and `drive.notification.rejected`
 - a Google quota rejection is stored in `lastWatchError` as `Google Drive rate limit exceeded for creating file subscriptions.`
-- projects that share one spreadsheet must use the same Google credential ref; creating a project returns 409 when the spreadsheet is registered, or is being created by another project, under a different ref. A create that fails leaves no project behind, and an upsert that fails leaves the project as it was, so either can be repeated. The failed request's claim on the spreadsheet can last up to 5 minutes, and ends at once when you delete that project slug. If the Durable Object restarts after writing a project but before registering it, repeat the create with `?upsert=true` to register it
+- projects that share one spreadsheet must use the same Google credential ref. Creating a project returns 409 when the spreadsheet is registered, or is being created by another project, under a different ref. A create that fails leaves no project behind, and an upsert that fails leaves the project as it was, so either can be repeated. The failed request's claim on the spreadsheet can last up to 5 minutes, and ends at once when you delete that project slug. If the Durable Object restarts after writing a project but before registering it, repeat the create with `?upsert=true` to register it
+- registries saved before that check can still share one spreadsheet under more than one credential ref. Registration and renewal skip that spreadsheet, continue with every other spreadsheet, and set its `lastWatchError` to `Spreadsheet <id> is registered with conflicting Google credential refs "<ref-a>", "<ref-b>". Projects that share a spreadsheet must use the same credential ref.` A channel id starting with `credential-conflict:` is that recorded status, not a Google channel. Setup counts a registration only when `lastWatchError` is null, and it prints a warning naming each skipped spreadsheet and that error. Align the refs, then run `npm run ops:watch:drive`. Setup continues after the warning. `npm run setup -- --verify` still fails while that errored watch remains, because verification reports non-null `lastWatchError` as degraded renewal health. `npm run ops:watch:drive:status` still lists the row so you can see the error. Retry advice does not report it as `active-watch-present`. Renewal, stop, and removal when no project still uses the spreadsheet do not call Google for it, and it is not recorded as a stopped channel. The same failure is logged as `drive.watch.credential-conflict`
+- to repair it, pick one ref named in that `lastWatchError` and set `googleCredentialRef` to it on every project for the spreadsheet. `npm run ops:bootstrap` upserts those projects and accepts a ref already present on the spreadsheet; a different ref returns 409 until the projects already agree. You can also delete the projects that use the other ref. Then run `npm run ops:watch:drive` and confirm `npm run ops:watch:drive:status` shows `lastWatchError` null and a real channel id for that spreadsheet
 - reindex failures back off exponentially per watch: 30 seconds minimum, 1 hour cap; failed watch stops are retried from the control-plane alarm
 - Google Drive watch behavior is documented at:
   - https://developers.google.com/workspace/drive/api/guides/push
@@ -337,6 +341,10 @@ Expected result:
 - `ok: true`
 - `cache.status: "ready"`
 - `cache.staleReason: "fresh"` for a successful healthy rebuild
+
+If a row write lands while the reindex is reading the sheet, the result shows `cache.staleReason: "external-change"` instead. The cache keeps the rows that write produced and drops the reindex's older snapshot (see [Superseded table sync](./observability.md#superseded-table-sync)), so nothing was refreshed. Run the reindex again once writes pause.
+
+A reindex that arrives while another sync is reading the sheet joins that sync instead of starting its own. When a write supersedes that sync, only the request that started it reports `external-change`: the reindexes that joined it share one new sync, so they do not multiply the Google reads.
 
 ## Interpreting Common Failures
 
@@ -405,6 +413,22 @@ Fix:
 1. Prefer indexed equality/range queries.
 2. Add an index if the query pattern is legitimate and frequent.
 3. If the query is inherently scan-heavy, narrow it or accept that the API will reject it.
+
+### Delete returns 409 (row moved)
+
+Symptoms:
+
+- `DELETE` returns `409` with `Row <rowId> moved while it was being deleted, so a different row may have been deleted. Verify the sheet.`
+- a `table.write.unconfirmed` event with `operation: "delete"` for the table
+
+Cause:
+
+- the row shifted in the sheet between Sheetflare finding it and deleting it, for example when rows were inserted or removed above it during the request. Sheetflare checks the rows next to the deleted row after the delete and fails closed, so the delete was already applied when the `409` is returned.
+
+Fix:
+
+1. Open the sheet and verify the row with managed ID `rowId`. Check that the rows next to where it was are the ones you expect, since a different row may have been deleted.
+2. Retry the delete.
 
 ## Rotating Credentials
 

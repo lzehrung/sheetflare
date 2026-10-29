@@ -1,5 +1,36 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { EventEmitter } from 'node:events';
+import { getProcessEnv } from './runtime';
+
+/**
+ * Host variables a child needs to find and start binaries. They are inherited only when the scoped
+ * env lacks them, so an injected env never picks up unrelated host credentials.
+ */
+const BINARY_RESOLUTION_ENV_NAMES = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC'];
+
+/**
+ * Environment for a spawned child. The base is getProcessEnv(): process.env normally, or the env
+ * that runSetup injects via withProcessEnv (deps.env replaces process.env for helper reads, so it
+ * is also the subprocess base). Host binary-resolution variables fill gaps, and per-command
+ * overrides are applied last.
+ */
+function buildCommandEnv(overrides: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+  const scoped = getProcessEnv();
+  // Windows env names are case-insensitive ("Path" is "PATH"), so compare them that way there.
+  const caseInsensitive = process.platform === 'win32';
+  const scopedNames = new Set(Object.keys(scoped).map((name) => (caseInsensitive ? name.toUpperCase() : name)));
+
+  const inherited: NodeJS.ProcessEnv = {};
+  for (const key of Object.keys(process.env)) {
+    const name = caseInsensitive ? key.toUpperCase() : key;
+    if (BINARY_RESOLUTION_ENV_NAMES.includes(name) && !scopedNames.has(name)) {
+      inherited[key] = process.env[key];
+    }
+  }
+
+  return { ...inherited, ...scoped, ...overrides };
+}
 
 type TerminableProcess = Pick<EventEmitter, 'once' | 'removeListener'>;
 
@@ -17,6 +48,33 @@ export function getCommandName(base: string) {
   return process.platform === 'win32' ? `${base}.cmd` : base;
 }
 
+export type CommandRunOptions = {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  input?: string;
+  echoStdout?: boolean;
+  echoStderr?: boolean;
+};
+
+export type CommandResult = {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+};
+
+export type CommandRunner = (
+  command: string,
+  args: string[],
+  options?: CommandRunOptions
+) => Promise<CommandResult>;
+
+const commandRunnerStore = new AsyncLocalStorage<CommandRunner>();
+
+export function withCommandRunner<T>(runner: CommandRunner, fn: () => T): T {
+  return commandRunnerStore.run(runner, fn);
+}
+
 export function spawnCommand(
   command: string,
   args: string[],
@@ -27,10 +85,7 @@ export function spawnCommand(
 ) : ChildProcess {
   return spawn(command, args, {
     cwd: options?.cwd,
-    env: {
-      ...process.env,
-      ...options?.env
-    },
+    env: buildCommandEnv(options?.env),
     ...(shouldUseWindowsShell(command) ? { shell: true } : {}),
     stdio: 'inherit'
   });
@@ -39,20 +94,24 @@ export function spawnCommand(
 export async function runCommand(
   command: string,
   args: string[],
-  options?: {
-    cwd?: string;
-    env?: NodeJS.ProcessEnv;
-    input?: string;
-    echoStdout?: boolean;
-    echoStderr?: boolean;
+  options?: CommandRunOptions
+): Promise<CommandResult> {
+  const override = commandRunnerStore.getStore();
+  if (override) {
+    return override(command, args, options);
   }
-) {
+
+  return runSpawnedCommand(command, args, options);
+}
+
+async function runSpawnedCommand(
+  command: string,
+  args: string[],
+  options?: CommandRunOptions
+): Promise<CommandResult> {
   const child = spawn(command, args, {
     cwd: options?.cwd,
-    env: {
-      ...process.env,
-      ...options?.env
-    },
+    env: buildCommandEnv(options?.env),
     ...(shouldUseWindowsShell(command) ? { shell: true } : {}),
     stdio: 'pipe'
   });

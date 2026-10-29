@@ -136,9 +136,20 @@ export type GoogleSheetTableConfig = TableConfig & {
   spreadsheetId: string;
 };
 
+/** Managed IDs of the rows directly above and below a row; a side is null when no row with an ID sits there. */
+export type RowNeighbours = {
+  previous: RowReference | null;
+  next: RowReference | null;
+};
+
 export interface RowLookupResult {
   row: RowEnvelope;
+  /**
+   * Rows carrying the ID. A scan counts every row; a lookup that trusts the row-number hint sees
+   * only the rows beside it, so it reports the target plus any adjacent copies.
+   */
   duplicateCount: number;
+  neighbours: RowNeighbours;
 }
 
 export interface TableSnapshot {
@@ -154,6 +165,11 @@ export interface SpreadsheetTabSummary {
 export type RowReference = {
   rowId: string;
   rowNumber: number;
+};
+
+type RowWindow = {
+  row: RowEnvelope;
+  neighbours: RowNeighbours;
 };
 
 type HeaderLayoutEntry = {
@@ -253,9 +269,9 @@ function buildBoundedTableRange(headerRow: number, lastColumnNumber: number) {
   return `A${headerRow}:${lastColumn}`;
 }
 
-function buildBoundedRowRange(rowNumber: number, lastColumnNumber: number) {
+function buildBoundedRowRange(startRowNumber: number, endRowNumber: number, lastColumnNumber: number) {
   const lastColumn = columnNumberToA1(lastColumnNumber);
-  return `A${rowNumber}:${lastColumn}${rowNumber}`;
+  return `A${startRowNumber}:${lastColumn}${endRowNumber}`;
 }
 
 type ColumnValueSegment = {
@@ -410,6 +426,13 @@ function getManagedRowId(value: RowRecord[string] | undefined, idColumn: string,
   );
 }
 
+function findNeighbours(references: readonly RowReference[], rowNumber: number): RowNeighbours {
+  return {
+    previous: references.find((entry) => entry.rowNumber === rowNumber - 1) ?? null,
+    next: references.find((entry) => entry.rowNumber === rowNumber + 1) ?? null
+  };
+}
+
 export class GoogleSheetsService {
   private readonly fetchImpl: FetchLike;
   private readonly oauthTokenUrl: string;
@@ -520,19 +543,26 @@ export class GoogleSheetsService {
   ): Promise<RowLookupResult | null> {
     const verifyUnique = options?.verifyUnique ?? true;
     const layout = options?.layout ?? await this.readHeaderLayout(config);
-    let hintedRow: RowEnvelope | null = null;
+    let hinted: RowWindow | null = null;
     if (rowNumberHint) {
-      hintedRow = await this.readSingleRow(config, rowNumberHint, layout).catch(() => null);
+      hinted = await this.readRowWindow(config, rowNumberHint, layout).catch(() => null);
     }
 
-    if (hintedRow?.id === rowId && !verifyUnique) {
+    if (hinted?.row.id === rowId && !verifyUnique) {
+      // The window includes the rows beside the target, so an ID copied into a neighbouring row is
+      // caught here without scanning the whole ID column.
+      const adjacentCopies = [hinted.neighbours.previous, hinted.neighbours.next]
+        .filter((neighbour) => neighbour?.rowId === rowId)
+        .length;
       return {
-        row: hintedRow,
-        duplicateCount: 1
+        row: hinted.row,
+        duplicateCount: 1 + adjacentCopies,
+        neighbours: hinted.neighbours
       };
     }
 
-    const matchRowNumbers = (await this.readRowReferences(config, layout))
+    const references = await this.readRowReferences(config, layout);
+    const matchRowNumbers = references
       .filter((entry) => entry.rowId === rowId)
       .map((entry) => entry.rowNumber);
 
@@ -541,18 +571,14 @@ export class GoogleSheetsService {
       return null;
     }
 
-    if (hintedRow && matchRowNumbers.includes(hintedRow.rowNumber)) {
-      return {
-        row: hintedRow,
-        duplicateCount
-      };
-    }
-
-    const resolvedRow = await this.readSingleRow(config, matchRowNumbers[0]!, layout);
+    const row = hinted && matchRowNumbers.includes(hinted.row.rowNumber)
+      ? hinted.row
+      : await this.readSingleRow(config, matchRowNumbers[0]!, layout);
 
     return {
-      row: resolvedRow,
-      duplicateCount
+      row,
+      duplicateCount,
+      neighbours: findNeighbours(references, row.rowNumber)
     };
   }
 
@@ -607,7 +633,7 @@ export class GoogleSheetsService {
     const lastColumnNumber = resolvedLayout.entries.at(-1)?.columnNumber ?? 1;
     const values = await this.readValues(
       config.spreadsheetId,
-      `${escapeSheetName(config.sheetTabName)}!${buildBoundedRowRange(rowNumber, lastColumnNumber)}`
+      `${escapeSheetName(config.sheetTabName)}!${buildBoundedRowRange(rowNumber, rowNumber, lastColumnNumber)}`
     );
 
     const row = values[0];
@@ -616,6 +642,40 @@ export class GoogleSheetsService {
     }
 
     return buildRowEnvelope(config, resolvedLayout, rowNumber, row);
+  }
+
+  /** One bounded request for a row and the managed IDs of the rows directly above and below it. */
+  private async readRowWindow(
+    config: GoogleSheetTableConfig,
+    rowNumber: number,
+    layout: GoogleSheetHeaderLayout
+  ): Promise<RowWindow> {
+    const firstRowNumber = Math.max(config.dataStartRow, rowNumber - 1);
+    const lastColumnNumber = layout.entries.at(-1)?.columnNumber ?? 1;
+    const values = await this.readValues(
+      config.spreadsheetId,
+      `${escapeSheetName(config.sheetTabName)}!${buildBoundedRowRange(firstRowNumber, rowNumber + 1, lastColumnNumber)}`
+    );
+
+    const cells = values[rowNumber - firstRowNumber];
+    if (!cells) {
+      throw new NotFoundError(`Row ${rowNumber} was not found in ${config.projectSlug}/${config.tableSlug}.`);
+    }
+
+    // Rows past the end of the sheet are omitted from the response, and blank cells read as absent.
+    const neighbourAt = (neighbourRowNumber: number): RowReference | null => {
+      const idCell = values[neighbourRowNumber - firstRowNumber]?.[layout.idColumnNumber - 1];
+      const parsed = parseManagedRowId(parseSheetCellValue(idCell));
+      return parsed.ok ? { rowId: parsed.rowId, rowNumber: neighbourRowNumber } : null;
+    };
+
+    return {
+      row: buildRowEnvelope(config, layout, rowNumber, cells),
+      neighbours: {
+        previous: neighbourAt(rowNumber - 1),
+        next: neighbourAt(rowNumber + 1)
+      }
+    };
   }
 
   async appendRow(config: GoogleSheetTableConfig, headers: readonly string[], values: RowRecord): Promise<number> {

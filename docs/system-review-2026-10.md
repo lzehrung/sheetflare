@@ -76,7 +76,7 @@ Severity: **P1** likely wrong behavior or significant risk; **P2** real but boun
 - [x] Real-stack auth lifecycle tests (create, authenticate, wrong secret, revoke).
 - [x] Emulated Workers Cache tests for read-after-write and purge budget.
 - [x] Sync/notification race tests and lost-write-response tests.
-- [ ] Setup entry point tests across apply-secrets, deploy, bootstrap, and watch registration. *(partial: credential handoff, key reuse, and watch re-registration planning are unit-tested; the `scripts/setup.ts` entry point is not)*
+- [x] Setup entry point tests across apply-secrets, deploy, bootstrap, and watch registration. *(`runSetup(options, deps)` with fakes only at process, HTTP, and prompt boundaries)*
 - [x] Admin UI tests for project-scoped keys, refresh races, and large projects.
 - [x] Windows `killProcessTree` path.
 
@@ -92,17 +92,29 @@ Severity: **P1** likely wrong behavior or significant risk; **P2** real but boun
 - [x] **P3 · logic** RateLimitDO windows persisted before the cleanup alarm existed never scheduled cleanup. *(Copilot review)*
 - [x] **P2 · logic** `--apply-secrets` kept using the superseded bootstrap token from `SHEETFLARE_ADMIN_CREDENTIAL` for watch registration, smoke, and verify. *(Copilot review)*
 - [x] **P3 · docs** The local admin server credential is delegated to every local process that can reach `127.0.0.1:4173`; Fetch Metadata only blocks cross-origin pages. Documented as the trust boundary. *(Copilot review)*
-- [ ] **P2 · tests** `apps/api/tsconfig.json` type-checks only `src`, so test files are never type-checked (`test/support/harness.ts` already carries a hidden type error).
-- [ ] **P2 · logic** A sync in flight while a write commits can promote the older snapshot, briefly serving pre-write data.
-- [ ] **P2 · logic** `id` filters have the same numeric-operand mismatch between indexed and scan paths that `rowNumber` had.
-- [ ] **P2 · security** Rate-limit principals use the full IPv6 address; bucket by /64.
-- [ ] **P3 · logic** A missing default Google credential returns 400 instead of a 5xx configuration error.
-- [ ] **P3 · logic** Deployments with existing projects sharing a spreadsheet under different credential refs still fail watch registration until an operator aligns the refs (new conflicts are rejected at create).
-- [ ] **P3 · logic** After delete, row identity is verified only at rows R−1..R+1; larger concurrent shifts are not detected.
-- [ ] **P3 · logic** Point writes against a fresh cache no longer detect an ID duplicated upstream within the TTL; the next sync rejects it.
-- [ ] **P3 · usability** A valid key scoped to another project gets 403 on a public-read project that anonymous callers can read.
-- [ ] **P3 · security** No warning for bootstrap or webhook secrets shorter than 32 characters.
-- [ ] **P3 · security** Add Dependabot or Renovate to keep SHA-pinned GitHub Actions current.
+- [x] **P2 · tests** `apps/api/tsconfig.json` type-checks only `src`, so test files are never type-checked (`test/support/harness.ts` already carries a hidden type error). *(fixed: `tsconfig.test.json`; 23 errors fixed; gate proven)*
+- [x] **P2 · logic** A sync in flight while a write commits can promote the older snapshot, briefly serving pre-write data. *(fixed: a sync whose snapshot a write overlapped keeps the live rows and stays stale, so in-flight unique checks keep earlier writes; late reads cannot join an older sync)*
+- [x] **P2 · logic** `id` filters have the same numeric-operand mismatch between indexed and scan paths that `rowNumber` had. *(fixed: operands canonicalized to ID strings)*
+- [x] **P2 · security** Rate-limit principals use the full IPv6 address; bucket by /64.
+- [x] **P3 · logic** A missing default Google credential returns 400 instead of a 5xx configuration error.
+- [x] **P3 · logic** Deployments with existing projects sharing a spreadsheet under different credential refs still fail watch registration until an operator aligns the refs (new conflicts are rejected at create). *(fixed: only the conflicting spreadsheet is skipped, with an explicit `lastWatchError`)*
+- [x] **P3 · logic** After delete, row identity is verified only at rows R−1..R+1; larger concurrent shifts are not detected. *(fixed: neighbour-closure check detects shifts of any size; row writes serialized per table; accepted trade-off: Sheets has no conditional delete, so a wrong-row delete is detected after the fact, fails closed with 409, and marks the cache stale)*
+- [x] **P3 · logic** Point writes against a fresh cache no longer detect an ID duplicated upstream within the TTL; the next sync rejects it. *(fixed for adjacent duplicates; accepted trade-off: duplicates farther than one row are caught by the next sync, documented in README)*
+- [x] **P3 · usability** A valid key scoped to another project gets 403 on a public-read project that anonymous callers can read. *(fixed: reads allowed; writes and private projects keep 403)*
+- [x] **P3 · security** No warning for bootstrap or webhook secrets shorter than 32 characters. *(fixed: admin-only `/ready` note)*
+- [x] **P2 · security** A key scoped to another project could tell existing private tables (403) from missing ones (404) after public-read reads were allowed; cross-project not-found now returns the same 403. *(Copilot review on #20)*
+- [x] **P3 · logic** Credential-conflict placeholder rows were treated as active Drive watches by retry advice, notifications, and cleanup. *(Copilot review on #20)*
+- [x] **P3 · logic** Duplicate configured bootstrap key names could revoke the authenticating key twice during rotation; names are now unique and revocations deduplicated. *(Copilot review on #19)*
+- [x] **P2 · logic** A delete verifying after a sync promoted the post-delete snapshot shifted cached row numbers a second time and marked the corrupted cache fresh. A content revision that moved during the delete now means rebuild instead of shift. *(Copilot review on #20; proven: gated real-TableDO test)*
+- [x] **P2 · logic** Setup subprocesses inherited the host `process.env` instead of the injected setup environment, so an injected `CLOUDFLARE_API_TOKEN` was ignored. *(Copilot review on #20)*
+- [x] **P2 · logic** `--apply-secrets` and webhook rotation: Drive watches are re-registered even when a later step fails, and an operator-selected `sfk_` API key is never replaced by the bootstrap token. *(Copilot review on #19)*
+- [ ] **P2 · tests** `packages/cloudflare/test` is not type-checked (its `tsconfig.json` includes only `src`), and existing test files already carry type errors.
+- [x] **P2 · logic** A delete whose rebuild path ran (revision moved, expired cache, or layout change) left lowered row numbers inconsistent while the cache reported fresh; it now marks an undebounced external change before releasing the write queue, so reads and the next write join one rebuild. *(Copilot review on #20; proven: gated real-DO tests)*
+- [x] **P2 · logic** Lists, point reads and unique-field writes that waited on a sync a write superseded were answered from the unverified cache; they now sync again until a sync is promoted, and a failed rebuild fails every waiter. *(Copilot review on #20; proven: gated real-DO tests)*
+- [x] **P2 · logic** A row lookup in flight across a delete could write its pre-delete row number back into the rebuilt cache; `lookupRowById` now skips the repair when the content revision moved or a resync is pending. *(Copilot review on #20; proven: gated real-DO tests)*
+- [x] **P3 · usability** Setup counted credential-conflict watch placeholders as registered watches; it now counts only watches without `lastWatchError` and warns per skipped spreadsheet. *(Copilot review on #20)*
+- [x] **P2 · performance** Forced requests that joined a sync a write superseded each started their own full-sheet rebuild; they now join one replacement sync. *(Copilot review on #20; proven: gated real-DO tests)*
+- [x] **P3 · security** Add Dependabot or Renovate to keep SHA-pinned GitHub Actions current. *(fixed: `.github/dependabot.yml`)*
 - [ ] **Validation** Verify generation-keyed caching, `cf.cacheKey` format, and purge behavior against real Workers Cache in staging (blocked: GitHub staging secrets unset, Wrangler login expired).
 
 ## Verified correct

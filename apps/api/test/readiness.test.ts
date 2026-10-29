@@ -70,6 +70,37 @@ describe('readiness details', () => {
     expect(body.notes.length).toBeGreaterThan(0);
   });
 
+  it('notes when the bootstrap token or the Drive webhook secret is shorter than 32 characters', async () => {
+    const shortToken = 'short-admin-token';
+    const shortWebhookSecret = 'short-webhook-secret';
+    const response = await readyAs('Bearer short-admin-token', createEnv({
+      adminBearerToken: shortToken,
+      googleDriveWebhookSecret: shortWebhookSecret
+    }));
+
+    expect(response.status).toBe(200);
+    const body = fullReadinessSchema.parse(await response.json());
+    const text = JSON.stringify(body);
+    expect(body.notes).toEqual(expect.arrayContaining([
+      'ADMIN_BEARER_TOKEN is shorter than 32 characters.',
+      'GOOGLE_DRIVE_WEBHOOK_SECRET is shorter than 32 characters.'
+    ]));
+    expect(text).not.toContain(shortToken);
+    expect(text).not.toContain(shortWebhookSecret);
+    expect(text).not.toContain(String(shortToken.length));
+    expect(text).not.toContain(String(shortWebhookSecret.length));
+  });
+
+  it('stays quiet about secrets that are at least 32 characters', async () => {
+    const response = await readyAs(`Bearer ${'a'.repeat(32)}`, createEnv({
+      adminBearerToken: 'a'.repeat(32),
+      googleDriveWebhookSecret: 'b'.repeat(32)
+    }));
+
+    const body = fullReadinessSchema.parse(await response.json());
+    expect(body.notes.join('\n')).not.toContain('shorter than 32 characters');
+  });
+
   it.each([
     { name: 'a project-scoped admin key', authorization: apiKeys.projectAdmin.authorization },
     { name: 'a global key without admin:projects', authorization: apiKeys.global.authorization }
