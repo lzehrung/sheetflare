@@ -1,1134 +1,27 @@
 import { z } from 'zod';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { exports as workerExports } from 'cloudflare:workers';
-import {
-  resolvedTableConfigSnapshotSchema,
-  type ControlPlaneDoResponse,
-  type TableDoResponse
-} from '@sheetflare/contracts';
 import type { Env } from '../src/env';
 import {
-  CachedTableReads,
-  type CachedTableReadProps,
   __getRecentApiKeyTouchCacheSizeForTests,
   __resetRecentApiKeyTouchesForTests,
   __touchApiKeyIfNeededForTests,
   createApp
 } from '../src/index';
-
-type StubHandler = (request: Request) => Response | Promise<Response>;
-
-type CachedReadRequestRecord = {
-  url: string;
-  method: string;
-  authorization: string | null;
-  cacheKey: string | null;
-};
-
-const resolvedTableConfigSnapshot = resolvedTableConfigSnapshotSchema.parse({
-  projectSlug: 'demo',
-  tableSlug: 'users',
-  sheetTabName: 'Users',
-  idColumn: '_id',
-  indexedFields: ['_id'],
-  readOnlyFields: [],
-  fieldRules: {},
-  headerRow: 1,
-  dataStartRow: 2,
-  readEnabled: true,
-  createEnabled: true,
-  updateEnabled: true,
-  deleteEnabled: true,
-  cacheTtlSeconds: 15,
-  createdAt: '2026-04-26T00:00:00.000Z',
-  updatedAt: '2026-04-26T00:00:00.000Z',
-  spreadsheetId: 'sheet-1',
-  googleCredentialRef: 'default'
-});
-
-const defaultCachedTableReadProps: CachedTableReadProps = {
-  resolvedConfig: resolvedTableConfigSnapshot
-};
-
-class FakeDurableObjectStub {
-  constructor(private readonly handler: StubHandler) {}
-
-  fetch(request: RequestInfo | URL, init?: RequestInit) {
-    return this.handler(new Request(request, init));
-  }
-}
-
-class FakeDurableObjectNamespace {
-  constructor(private readonly handlerForName: (name: string) => StubHandler) {}
-
-  idFromName(name: string) {
-    return name;
-  }
-
-  get(name: string) {
-    return new FakeDurableObjectStub(this.handlerForName(name));
-  }
-}
-
-function buildApiKeyRecord(apiKeyId: string) {
-  if (apiKeyId === 'project-key') {
-    return {
-      id: 'project-key',
-      projectSlug: 'demo',
-      name: 'Demo key',
-      scopes: ['table:create', 'table:read'],
-      createdAt: '2026-04-26T00:00:00.000Z',
-      revokedAt: null,
-      lastUsedAt: null
-    };
-  }
-
-  if (apiKeyId === 'touch-key') {
-    return {
-      id: 'touch-key',
-      projectSlug: 'demo',
-      name: 'Touch key',
-      scopes: ['table:read'],
-      createdAt: '2026-04-26T00:00:00.000Z',
-      revokedAt: null,
-      lastUsedAt: null
-    };
-  }
-
-  if (/^touch-key-\d+$/.test(apiKeyId)) {
-    return {
-      id: apiKeyId,
-      projectSlug: 'demo',
-      name: `Touch key ${apiKeyId}`,
-      scopes: ['table:read'],
-      createdAt: '2026-04-26T00:00:00.000Z',
-      revokedAt: null,
-      lastUsedAt: null
-    };
-  }
-
-  if (apiKeyId === 'project-admin-key') {
-    return {
-      id: 'project-admin-key',
-      projectSlug: 'demo',
-      name: 'Demo admin key',
-      scopes: ['admin:projects', 'admin:keys', 'table:read'],
-      createdAt: '2026-04-26T00:00:00.000Z',
-      revokedAt: null,
-      lastUsedAt: null
-    };
-  }
-
-  if (apiKeyId === 'global-key') {
-    return {
-      id: 'global-key',
-      projectSlug: null,
-      name: 'Global key',
-      scopes: ['admin:keys'],
-      createdAt: '2026-04-26T00:00:00.000Z',
-      revokedAt: null,
-      lastUsedAt: null
-    };
-  }
-
-  return null;
-}
-
-type UnexpectedTableResponseRequest =
-  | 'table.cache.refresh'
-  | 'table.reindex'
-  | 'table.row.create'
-  | 'table.row.update'
-  | 'table.row.delete';
-
-function createEnv(options?: {
-  rateLimitAllowed?: boolean;
-  defaultAuthMode?: 'private' | 'public-read';
-  projectAccessStatus?: 200 | 404 | 500;
-  tableCacheClearStatus?: 200 | 503;
-  tableCacheGetUnexpectedResponse?: boolean;
-  tableUnexpectedResponseFor?: UnexpectedTableResponseRequest;
-  controlProjectsListUnexpectedResponse?: boolean;
-  controlSpreadsheetWatchNotifyUnexpectedResponse?: boolean;
-  tableRowsListStatus?: 200 | 503;
-  tableCacheTtlSeconds?: number;
-  tableCacheStatus?: 'idle' | 'syncing' | 'ready' | 'error';
-  tableCacheStale?: boolean;
-  tableCacheStaleReason?: 'fresh' | 'never-synced' | 'ttl-expired' | 'config-changed' | 'external-change' | 'error';
-  tableExternalChangeDebounceUntil?: string | null;
-  googleClientEmail?: string;
-  googlePrivateKey?: string;
-  googleCredentialsJson?: string;
-  adminBearerToken?: string;
-  allowedOrigins?: string;
-  cachedReadPurgeShouldFail?: boolean;
-  cachedReadResponseHeaders?: Record<string, string>;
-}): Env {
-  const rateLimitRequests: Array<{ name: string; key: string }> = [];
-  const projectRequests: string[] = [];
-  const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }> = [];
-  const controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> = [];
-  const durableObjectRequests: string[] = [];
-  const cachedReadRequests: CachedReadRequestRecord[] = [];
-  const cachedReadPurgeCalls: CachePurgeCall[] = [];
-  let verifyApiKeyCallCount = 0;
-  let apiKeyTouchCallCount = 0;
-  const controlPlane = new FakeDurableObjectNamespace(() => async (request) => {
-    const body = (await request.json()) as { type: string; apiKeyId?: string; hash?: string; projectSlug?: string | null };
-    controlPlaneRequests.push({
-      type: body.type,
-      body
-    });
-
-    if (body.type === 'control.api-key.verify') {
-      verifyApiKeyCallCount += 1;
-      return Response.json({
-        type: 'control.api-key.verify.result',
-        result: {
-          record: buildApiKeyRecord(body.apiKeyId ?? '')
-        }
-      });
-    }
-
-    if (body.type === 'control.api-key.touch') {
-      apiKeyTouchCallCount += 1;
-      return Response.json({
-        type: 'control.api-key.touch.result',
-        result: { ok: true }
-      });
-    }
-
-    if (body.type === 'control.api-key.create') {
-      return Response.json({
-        type: 'control.api-key.create.result',
-        result: {
-          apiKey: 'sfk_created-key.secret',
-          record: {
-            id: 'created-key',
-            projectSlug: null,
-            name: 'Created key',
-            scopes: ['admin:keys'],
-            createdAt: '2026-04-26T00:00:00.000Z',
-            revokedAt: null,
-            lastUsedAt: null
-          }
-        }
-      });
-    }
-
-    if (body.type === 'control.api-keys.list') {
-      return Response.json({
-        type: 'control.api-keys.list.result',
-        result: {
-          data: [
-            {
-              id: 'project-key',
-              projectSlug: body.projectSlug ?? 'demo',
-              name: 'Demo key',
-              scopes: ['table:create', 'table:read'],
-              createdAt: '2026-04-26T00:00:00.000Z',
-              revokedAt: null,
-              lastUsedAt: null
-            }
-          ]
-        }
-      });
-    }
-
-    if (body.type === 'control.api-key.get') {
-      return Response.json({
-        type: 'control.api-key.get.result',
-        result: {
-          record: buildApiKeyRecord(body.apiKeyId ?? '')
-        }
-      });
-    }
-
-    if (body.type === 'control.spreadsheet-watches.register') {
-      return Response.json({
-        type: 'control.spreadsheet-watches.register.result',
-        result: {
-          data: [
-            {
-              spreadsheetId: 'sheet-1',
-              googleCredentialRef: 'default',
-              channelId: 'channel-1',
-              resourceId: 'resource-1',
-              resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
-              expirationAt: '2026-05-03T00:00:00.000Z',
-              lastWatchError: null,
-              lastNotificationAt: null,
-              pendingChangedAt: null,
-              debounceUntil: null,
-              lastReindexStartedAt: null,
-              lastReindexCompletedAt: null,
-              lastReindexError: null,
-              projectSlugs: ['demo']
-            }
-          ]
-        }
-      });
-    }
-
-    if (body.type === 'control.spreadsheet-watches.list') {
-      return Response.json({
-        type: 'control.spreadsheet-watches.list.result',
-        result: {
-          data: [
-            {
-              spreadsheetId: 'sheet-1',
-              googleCredentialRef: 'default',
-              channelId: 'channel-1',
-              resourceId: 'resource-1',
-              resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
-              expirationAt: '2026-05-03T00:00:00.000Z',
-              lastWatchError: null,
-              lastNotificationAt: '2026-04-26T00:00:00.000Z',
-              pendingChangedAt: null,
-              debounceUntil: null,
-              lastReindexStartedAt: null,
-              lastReindexCompletedAt: '2026-04-26T00:00:10.000Z',
-              lastReindexError: null,
-              projectSlugs: ['demo']
-            }
-          ]
-        }
-      });
-    }
-
-    if (body.type === 'control.spreadsheet-watches.retry-advice.list') {
-      return Response.json({
-        type: 'control.spreadsheet-watches.retry-advice.list.result',
-        result: {
-          data: [
-            {
-              spreadsheetId: 'sheet-1',
-              status: 'cooldown-recommended',
-              currentWatchExpirationAt: null,
-              lastKnownStoppedAt: '2026-05-01T18:00:00.000Z',
-              lastKnownExpirationAt: '2026-05-02T17:37:46.000Z',
-              safeRetryAt: '2026-05-02T17:52:46.000Z',
-              note: 'Wait until after the last known watch expiration plus a short grace window before re-registering.',
-              projectSlugs: ['demo']
-            }
-          ]
-        }
-      });
-    }
-
-    if (body.type === 'control.spreadsheet-watches.stop') {
-      return Response.json({
-        type: 'control.spreadsheet-watches.stop.result',
-        result: {
-          data: [
-            {
-              spreadsheetId: 'sheet-1',
-              googleCredentialRef: 'default',
-              channelId: 'channel-1',
-              resourceId: 'resource-1',
-              resourceUri: 'https://www.googleapis.com/drive/v3/files/sheet-1',
-              expirationAt: '2026-05-03T00:00:00.000Z',
-              lastWatchError: null,
-              lastNotificationAt: '2026-04-26T00:00:00.000Z',
-              pendingChangedAt: null,
-              debounceUntil: null,
-              lastReindexStartedAt: null,
-              lastReindexCompletedAt: '2026-04-26T00:00:10.000Z',
-              lastReindexError: null,
-              projectSlugs: ['demo']
-            }
-          ]
-        }
-      });
-    }
-
-    if (body.type === 'control.spreadsheet-watch.notify' && options?.controlSpreadsheetWatchNotifyUnexpectedResponse === true) {
-      const response = {
-        type: 'control.project.upsert.result',
-        result: { ok: true }
-      } satisfies ControlPlaneDoResponse;
-      return Response.json(response);
-    }
-
-    if (body.type === 'control.spreadsheet-watch.notify') {
-      return Response.json({
-        type: 'control.spreadsheet-watch.notify.result',
-        result: {
-          accepted: true,
-          spreadsheetId: 'sheet-1',
-          debounceUntil: '2026-04-26T00:00:30.000Z'
-        }
-      });
-    }
-
-    if (body.type === 'control.projects.list' && options?.controlProjectsListUnexpectedResponse === true) {
-      const response = {
-        type: 'control.project.upsert.result',
-        result: { ok: true }
-      } satisfies ControlPlaneDoResponse;
-      return Response.json(response);
-    }
-
-    return Response.json({
-      type: 'control.projects.list.result',
-      result: {
-        data: [
-          {
-            slug: 'demo',
-            name: 'Demo',
-            spreadsheetId: 'sheet-1',
-            googleCredentialRef: 'default',
-            tableCount: 2,
-            updatedAt: '2026-04-26T00:00:00.000Z'
-          }
-        ]
-      }
-    });
-  });
-
-  const project = new FakeDurableObjectNamespace(() => async (request) => {
-    const body = (await request.json()) as {
-      type: string;
-      projectSlug?: string;
-      tableSlug?: string;
-      tab?: string;
-      headerRow?: number;
-      allowExisting?: boolean;
-      input?: {
-        slug?: string;
-        tableSlug?: string;
-      };
-    };
-    projectRequests.push(body.type);
-    durableObjectRequests.push(body.type);
-    const requestUrl = new URL(request.url);
-    const table = {
-      projectSlug: 'demo',
-      tableSlug: 'users',
-      sheetTabName: 'Users',
-      idColumn: '_id',
-      indexedFields: ['_id'],
-      readOnlyFields: [],
-      fieldRules: {},
-      headerRow: 1,
-      dataStartRow: 2,
-      readEnabled: true,
-      createEnabled: true,
-      updateEnabled: true,
-      deleteEnabled: true,
-      cacheTtlSeconds: options?.tableCacheTtlSeconds ?? 15,
-      createdAt: '2026-04-26T00:00:00.000Z',
-      updatedAt: '2026-04-26T00:00:00.000Z'
-    };
-    const resolvedConfig = {
-      ...resolvedTableConfigSnapshot,
-      cacheTtlSeconds: table.cacheTtlSeconds
-    };
-
-    if (body.type === 'project.create') {
-      if (body.input?.slug === 'demo' && body.allowExisting !== true && requestUrl.searchParams.get('upsert') !== 'true') {
-        return Response.json({
-          error: {
-            code: 'CONFLICT',
-            message: 'Project demo already exists.',
-            details: {
-              projectSlug: 'demo'
-            }
-          }
-        }, { status: 409 });
-      }
-
-      return Response.json({
-        type: 'project.create.result',
-        result: {
-          created: !(body.allowExisting === true && body.input?.slug === 'demo'),
-          data: {
-            project: {
-              slug: body.input?.slug ?? 'demo',
-              name: 'Demo',
-              spreadsheetId: 'sheet-1',
-              googleCredentialRef: 'default',
-              createdAt: '2026-04-26T00:00:00.000Z',
-              updatedAt: '2026-04-26T00:00:00.000Z',
-              defaultAuthMode: options?.defaultAuthMode ?? 'private'
-            },
-            tables: [table]
-          }
-        }
-      });
-    }
-
-    if (body.type === 'project.get') {
-      return Response.json({
-        type: 'project.get.result',
-        result: {
-          project: {
-            slug: 'demo',
-            name: 'Demo',
-            spreadsheetId: 'sheet-1',
-            googleCredentialRef: 'default',
-            createdAt: '2026-04-26T00:00:00.000Z',
-            updatedAt: '2026-04-26T00:00:00.000Z',
-            defaultAuthMode: options?.defaultAuthMode ?? 'private'
-          },
-          tables: [table]
-        }
-      });
-    }
-
-    if (body.type === 'project.access.get') {
-      if (options?.projectAccessStatus === 404) {
-        return Response.json(
-          {
-            error: {
-              code: 'NOT_FOUND',
-              message: 'Project demo was not found.',
-              details: null
-            }
-          },
-          { status: 404 }
-        );
-      }
-
-      if (options?.projectAccessStatus === 500) {
-        return new Response('project access failed', { status: 500 });
-      }
-
-      return Response.json({
-        type: 'project.access.get.result',
-        result: {
-          data: {
-            slug: 'demo',
-            defaultAuthMode: options?.defaultAuthMode ?? 'private'
-          }
-        }
-      });
-    }
-
-    if (body.type === 'project.table.resolve') {
-      return Response.json({
-        type: 'project.table.resolve.result',
-        result: {
-          data: {
-            project: {
-              slug: 'demo',
-              spreadsheetId: 'sheet-1',
-              googleCredentialRef: 'default',
-              defaultAuthMode: options?.defaultAuthMode ?? 'private'
-            },
-            table,
-            resolvedConfig
-          }
-        }
-      });
-    }
-
-    if (body.type === 'project.spreadsheet.tabs.list') {
-      return Response.json({
-        type: 'project.spreadsheet.tabs.list.result',
-        result: {
-          data: [
-            {
-              title: 'Users',
-              sheetGid: 11
-            },
-            {
-              title: 'Archive',
-              sheetGid: 12
-            }
-          ]
-        }
-      });
-    }
-
-    if (body.type === 'project.spreadsheet.tab.inspect') {
-      return Response.json({
-        type: 'project.spreadsheet.tab.inspect.result',
-        result: {
-          data: {
-            tab: {
-              title: body.tab ?? 'Users',
-              sheetGid: 11
-            },
-            headerRow: body.headerRow ?? 1,
-            headers: ['_id', 'email', 'status']
-          }
-        }
-      });
-    }
-
-    if (body.type === 'project.table.create') {
-      if (body.input?.tableSlug === 'users' && body.allowExisting !== true && requestUrl.searchParams.get('upsert') !== 'true') {
-        return Response.json({
-          error: {
-            code: 'CONFLICT',
-            message: 'Table demo/users already exists.',
-            details: {
-              projectSlug: 'demo',
-              tableSlug: 'users'
-            }
-          }
-        }, { status: 409 });
-      }
-
-      return Response.json({
-        type: 'project.table.create.result',
-        result: {
-          created: !(body.allowExisting === true && body.input?.tableSlug === 'users'),
-          data: table
-        }
-      });
-    }
-
-    if (body.type === 'project.table.delete') {
-      return Response.json({
-        type: 'project.table.delete.result',
-        result: {
-          ok: true,
-          deletedTable: body.tableSlug ?? 'users'
-        }
-      });
-    }
-
-    if (body.type === 'project.delete') {
-      return Response.json({
-        type: 'project.delete.result',
-        result: {
-          ok: true,
-          deletedProject: body.projectSlug ?? 'demo',
-          deletedTables: body.projectSlug === 'missing-project' ? [] : ['users']
-        }
-      });
-    }
-
-    if (body.type === 'project.table.list') {
-      if (body.projectSlug === 'missing-project') {
-        return Response.json({
-          error: {
-            code: 'NOT_FOUND',
-            message: 'Project missing-project was not found.',
-            details: {
-              projectSlug: 'missing-project'
-            }
-          }
-        }, { status: 404 });
-      }
-
-      return Response.json({
-        type: 'project.table.list.result',
-        result: {
-          data: [table]
-        }
-      });
-    }
-
-    return Response.json({
-      type: 'project.table.list.result',
-      result: {
-        data: [table]
-      }
-    });
-  });
-
-  const table = new FakeDurableObjectNamespace(() => async (request) => {
-    const body = (await request.json()) as {
-      type: string;
-      input?: { values?: Record<string, unknown> };
-      query?: unknown;
-      resolvedConfig?: Record<string, unknown>;
-      requestContext?: Record<string, unknown>;
-      rowId?: string;
-    };
-    tableRequests.push({
-      type: body.type,
-      resolvedConfig: body.resolvedConfig,
-      requestContext: body.requestContext
-    });
-    durableObjectRequests.push(body.type);
-    if (options?.tableUnexpectedResponseFor === body.type) {
-      const response = {
-        type: 'table.cache.clear.result',
-        result: { ok: true }
-      } satisfies TableDoResponse;
-      return Response.json(response);
-    }
-
-
-    if (body.type === 'table.row.create') {
-      return Response.json({
-        type: 'table.row.create.result',
-        result: {
-          data: {
-            id: 'row-1',
-            rowNumber: 2,
-            values: body.input?.values ?? {}
-          },
-          ignoredKeys: []
-        }
-      });
-    }
-
-    if (body.type === 'table.row.update') {
-      return Response.json({
-        type: 'table.row.update.result',
-        result: {
-          data: {
-            id: body.rowId ?? 'row-1',
-            rowNumber: 2,
-            values: body.input?.values ?? {}
-          },
-          ignoredKeys: []
-        }
-      });
-    }
-
-    if (body.type === 'table.row.delete') {
-      return Response.json({
-        type: 'table.row.delete.result',
-        result: {
-          ok: true,
-          deletedId: body.rowId ?? 'row-1'
-        }
-      });
-    }
-
-    if (body.type === 'table.cache.get') {
-      if (options?.tableCacheGetUnexpectedResponse) {
-        const response = {
-          type: 'table.cache.clear.result',
-          result: { ok: true }
-        } satisfies TableDoResponse;
-        return Response.json(response);
-      }
-
-      const stale = options?.tableCacheStale ?? false;
-      return Response.json({
-        type: 'table.cache.get.result',
-        result: {
-          data: {
-            status: options?.tableCacheStatus ?? 'ready',
-            cacheTtlSeconds: options?.tableCacheTtlSeconds ?? 15,
-            stale,
-            staleReason: options?.tableCacheStaleReason ?? (stale ? 'ttl-expired' : 'fresh'),
-            rowCount: 2,
-            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
-            lastSyncCompletedAt: '2026-04-26T00:00:01.000Z',
-            lastSyncError: null,
-            validation: {
-              status: 'ok',
-              issueCount: 0,
-              issues: [],
-              validatedAt: '2026-04-26T00:00:02.000Z'
-            },
-            externalChange: {
-              pending: options?.tableExternalChangeDebounceUntil !== undefined,
-              lastChangedAt: options?.tableExternalChangeDebounceUntil === undefined ? null : '2026-04-26T00:00:00.000Z',
-              debounceUntil: options?.tableExternalChangeDebounceUntil ?? null,
-              lastAutoReindexAt: null
-            }
-          }
-        }
-      });
-    }
-
-    if (body.type === 'table.cache.refresh') {
-      return Response.json({
-        type: 'table.cache.refresh.result',
-        result: {
-          ok: true,
-          rowCount: 3,
-          cache: {
-            status: 'ready',
-            cacheTtlSeconds: 15,
-            stale: false,
-            staleReason: 'fresh',
-            rowCount: 3,
-            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
-            lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
-            lastSyncError: null,
-            validation: {
-              status: 'ok',
-              issueCount: 0,
-              issues: [],
-              validatedAt: '2026-04-26T00:00:03.000Z'
-            },
-            externalChange: {
-              pending: false,
-              lastChangedAt: null,
-              debounceUntil: null,
-              lastAutoReindexAt: null
-            }
-          }
-        }
-      });
-    }
-
-    if (body.type === 'table.reindex') {
-      return Response.json({
-        type: 'table.reindex.result',
-        result: {
-          ok: true,
-          rowCount: 3,
-          cache: {
-            status: 'ready',
-            cacheTtlSeconds: 15,
-            stale: false,
-            staleReason: 'fresh',
-            rowCount: 3,
-            lastSyncStartedAt: '2026-04-26T00:00:00.000Z',
-            lastSyncCompletedAt: '2026-04-26T00:00:02.000Z',
-            lastSyncError: null,
-            validation: {
-              status: 'ok',
-              issueCount: 0,
-              issues: [],
-              validatedAt: '2026-04-26T00:00:03.000Z'
-            },
-            externalChange: {
-              pending: false,
-              lastChangedAt: null,
-              debounceUntil: null,
-              lastAutoReindexAt: null
-            }
-          }
-        }
-      });
-    }
-
-    if (body.type === 'table.cache.clear') {
-      if (options?.tableCacheClearStatus === 503) {
-        return Response.json({
-          error: {
-            code: 'SERVICE_UNAVAILABLE',
-            message: 'Cache clear unavailable.',
-            details: null
-          }
-        }, { status: 503 });
-      }
-
-      return Response.json({
-        type: 'table.cache.clear.result',
-        result: {
-          ok: true
-        }
-      });
-    }
-
-    if (body.type === 'table.rows.list') {
-      if (options?.tableRowsListStatus === 503) {
-        return Response.json({
-          error: {
-            code: 'SERVICE_UNAVAILABLE',
-            message: 'Cached rows are temporarily unavailable.',
-            details: null
-          }
-        }, { status: 503 });
-      }
-
-      return Response.json({
-        type: 'table.rows.list.result',
-        result: {
-          data: body.query ? [{ id: 'row-1', rowNumber: 2, values: { matched: true } }] : [],
-          nextCursor: null
-        }
-      });
-    }
-
-    if (body.type === 'table.schema.get') {
-      return Response.json({
-        type: 'table.schema.get.result',
-        result: {
-          data: {
-            fields: [
-              {
-                name: '_id',
-                inferredType: 'string',
-                nullable: false
-              }
-            ],
-            inferredAt: '2026-04-26T00:00:00.000Z'
-          }
-        }
-      });
-    }
-
-    return Response.json({
-      type: 'table.row.get.result',
-      result: {
-        data: {
-          id: 'row-1',
-          rowNumber: 2,
-          values: {}
-        }
-      }
-    });
-  });
-
-  const rateLimit = new FakeDurableObjectNamespace((name) => async (request) => {
-    const body = (await request.json()) as { key: string };
-    rateLimitRequests.push({ name, key: body.key });
-    return Response.json({
-      type: 'rate-limit.check.result',
-      result: {
-        allowed: options?.rateLimitAllowed ?? true,
-        remaining: options?.rateLimitAllowed === false ? 0 : 299,
-        resetAtMs: Date.parse('2026-04-26T00:01:00.000Z')
-      }
-    });
-  });
-
-  const env: Env = {
-    CONTROL_PLANE_DO: controlPlane as never,
-    PROJECT_DO: project as never,
-    TABLE_DO: table as never,
-    RATE_LIMIT_DO: rateLimit as never,
-    GOOGLE_CLIENT_EMAIL: options?.googleClientEmail ?? 'service@example.com',
-    GOOGLE_PRIVATE_KEY: options?.googlePrivateKey ?? 'private-key',
-    GOOGLE_CREDENTIALS_JSON: options?.googleCredentialsJson,
-    GOOGLE_DRIVE_WEBHOOK_SECRET: 'drive-secret',
-    ADMIN_BEARER_TOKEN: options?.adminBearerToken ?? 'secret',
-    RATE_LIMIT_MAX_REQUESTS: '300',
-    RATE_LIMIT_WINDOW_SECONDS: '60',
-    SHEETFLARE_ALLOWED_ORIGINS: options?.allowedOrigins
-  };
-
-  const fetchCachedTableRead = async (
-    props: CachedTableReadProps,
-    request: Request,
-    init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]
-  ) => {
-    cachedReadRequests.push({
-      url: request.url,
-      method: request.method,
-      authorization: request.headers.get('authorization'),
-      cacheKey: init?.cf?.cacheKey ?? null
-    });
-    const response = await createCachedTableReadsHarness(env, {
-      props,
-      purgeCalls: cachedReadPurgeCalls,
-      purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
-    }).entrypoint.fetch(request);
-    for (const [name, value] of Object.entries(options?.cachedReadResponseHeaders ?? {})) {
-      response.headers.set(name, value);
-    }
-    return response;
-  };
-  workerExports.CachedTableReads = Object.assign(
-    ({ props }: { props: CachedTableReadProps }) => ({
-      fetch: (request: Request, init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]) =>
-        fetchCachedTableRead(props, request, init)
-    }),
-    {
-      fetch: (request: Request, init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]) =>
-        fetchCachedTableRead(defaultCachedTableReadProps, request, init),
-      async invalidateProject(projectSlug: string) {
-        await createCachedTableReadsHarness(env, {
-          purgeCalls: cachedReadPurgeCalls,
-          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
-        }).entrypoint.invalidateProject(projectSlug);
-      },
-      async invalidateTable(projectSlug: string, tableSlug: string) {
-        await createCachedTableReadsHarness(env, {
-          purgeCalls: cachedReadPurgeCalls,
-          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
-        }).entrypoint.invalidateTable(projectSlug, tableSlug);
-      },
-      async invalidateRow(projectSlug: string, tableSlug: string, rowId: string) {
-        await createCachedTableReadsHarness(env, {
-          purgeCalls: cachedReadPurgeCalls,
-          purgeShouldFail: options?.cachedReadPurgeShouldFail ?? false
-        }).entrypoint.invalidateRow(projectSlug, tableSlug, rowId);
-      }
-    }
-  );
-
-  Object.defineProperty(env, '__rateLimitRequests', {
-    value: rateLimitRequests,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__tableRequests', {
-    value: tableRequests,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__projectRequests', {
-    value: projectRequests,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__controlPlaneRequests', {
-    value: controlPlaneRequests,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__durableObjectRequests', {
-    value: durableObjectRequests,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__cachedReadRequests', {
-    value: cachedReadRequests,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__cachedReadPurgeCalls', {
-    value: cachedReadPurgeCalls,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__verifyApiKeyCallCount', {
-    get: () => verifyApiKeyCallCount,
-    enumerable: false
-  });
-  Object.defineProperty(env, '__apiKeyTouchCallCount', {
-    get: () => apiKeyTouchCallCount,
-    enumerable: false
-  });
-
-  return env;
-}
-
-type CachePurgeCall = Parameters<CacheContext['purge']>[0];
-
-class FakeSpan implements Span {
-  get isTraced() {
-    return false;
-  }
-
-  setAttribute() {}
-
-  end() {}
-}
-
-function createTracing(): Tracing {
-  return {
-    Span: FakeSpan,
-    enterSpan<T, A extends unknown[]>(
-      _name: string,
-      callback: (span: Span, ...args: A) => T,
-      ...args: A
-    ): T {
-      return callback(new FakeSpan(), ...args);
-    },
-    startActiveSpan<T, A extends unknown[]>(
-      _name: string,
-      callback: (span: Span, ...args: A) => T,
-      ...args: A
-    ): T {
-      return callback(new FakeSpan(), ...args);
-    }
-  };
-}
-
-function createCachedTableReadsHarness(
-  env: Env = createEnv(),
-  options?: {
-    props?: CachedTableReadProps;
-    purgeCalls?: CachePurgeCall[];
-    purgeShouldFail?: boolean;
-    purgeResultShouldFail?: boolean;
-  }
-): { entrypoint: CachedTableReads; purgeCalls: CachePurgeCall[] } {
-  const purgeCalls = options?.purgeCalls ?? [];
-  const ctx: ExecutionContext<CachedTableReadProps> = {
-    waitUntil(promise: Promise<unknown>) {
-      void promise;
-    },
-    passThroughOnException() {},
-    props: options?.props ?? defaultCachedTableReadProps,
-    cache: {
-      async purge(purgeOptions) {
-        purgeCalls.push(purgeOptions);
-        if (options?.purgeShouldFail === true) {
-          throw new Error('Workers Cache purge failed for test.');
-        }
-        if (options?.purgeResultShouldFail === true) {
-          return {
-            success: false,
-            errors: [
-              {
-                code: 1000,
-                message: 'Workers Cache purge was rejected for test.'
-              }
-            ]
-          };
-        }
-        return {
-          success: true,
-          errors: []
-        };
-      }
-    },
-    tracing: createTracing()
-  };
-
-  return {
-    entrypoint: new CachedTableReads(ctx, env),
-    purgeCalls
-  };
-}
-
-function getOnlyCachedReadRequest(env: { __cachedReadRequests: CachedReadRequestRecord[] }) {
-  expect(env.__cachedReadRequests).toHaveLength(1);
-  const [request] = env.__cachedReadRequests;
-  if (!request) {
-    throw new Error('Expected one cached read request.');
-  }
-  return request;
-}
-
-function requireCacheKey(record: CachedReadRequestRecord) {
-  expect(record.cacheKey).toEqual(expect.any(String));
-  if (record.cacheKey === null) {
-    throw new Error('Expected cached read request to include cf.cacheKey.');
-  }
-  return record.cacheKey;
-}
-
-
-function readCacheTagHeader(response: Response) {
-  const value = response.headers.get('cache-tag');
-  expect(value).toEqual(expect.any(String));
-  if (value === null) {
-    throw new Error('Expected Cache-Tag header.');
-  }
-  return value.split(',').map((tag) => tag.trim()).filter((tag) => tag.length > 0);
-}
-
-function expectCachedReadPurgeCalls(
-  env: { __cachedReadPurgeCalls: CachePurgeCall[] },
-  expectedTags: string[][]
-) {
-  expect(env.__cachedReadPurgeCalls).toEqual(
-    expectedTags.map((tags) => ({
-      tags
-    }))
-  );
-}
-
-function expectSuccessfulCachedReadHeaders(
-  response: Response,
-  options: { edgeCacheControl: string; tags: string[] }
-) {
-  expect(response.headers.get('cache-control')).toBe('private, no-store');
-  expect(response.headers.get('cloudflare-cdn-cache-control')).toBe(options.edgeCacheControl);
-  expect(readCacheTagHeader(response)).toEqual(options.tags);
-}
-
-function expectDefaultGatewayNoStore(response: Response) {
-  expect(response.headers.get('cache-control')).toBe('no-store');
-  expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
-  expect(response.headers.get('cache-tag')).toBeNull();
-}
-
-function expectCachedDataReadGatewayHeaders(response: Response) {
-  expect(response.headers.get('cache-control')).toBe('private, no-store');
-  expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
-  expect(response.headers.get('cache-tag')).toBeNull();
-}
-
-function expectNoCredentialMaterial(value: string) {
-  const lowerValue = value.toLowerCase();
-  expect(lowerValue).not.toContain('authorization');
-  expect(lowerValue).not.toContain('bearer');
-  expect(value).not.toContain('sfk_project-key.any-secret');
-  expect(value).not.toContain('project-key');
-  expect(value).not.toContain('any-secret');
-}
+import { apiKeys, forgedApiKey } from './support/api-keys';
+import {
+  type CachePurgeCall,
+  type CachedReadRequestRecord,
+  createCachedTableReadsHarness,
+  createEnv,
+  defaultCachedTableReadProps,
+  expectCachedDataReadGatewayHeaders,
+  expectCachedReadPurgeCalls,
+  expectDefaultGatewayNoStore,
+  expectNoCredentialMaterial,
+  expectSuccessfulCachedReadHeaders,
+  getOnlyCachedReadRequest,
+  requireCacheKey
+} from './support/harness';
 
 describe('CachedTableReads', () => {
   it('sets client-safe and Workers Cache headers for list rows', async () => {
@@ -2519,7 +1412,7 @@ describe('api routes', () => {
       '/v1/admin/projects',
       {
         headers: {
-          authorization: 'Bearer sfk_project-admin-key.any-secret'
+          authorization: apiKeys.projectAdmin.authorization
         }
       },
       createEnv()
@@ -2537,7 +1430,7 @@ describe('api routes', () => {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         },
         body: JSON.stringify({
           values: {
@@ -2563,7 +1456,7 @@ describe('api routes', () => {
     expect(response.headers.get('x-ratelimit-limit')).toBe('300');
     expect(response.headers.get('x-ratelimit-remaining')).toBe('299');
     expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitOperationKey":"rows.create"'));
-    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('"rateLimitPrincipal":"api-key:project-key"'));
+    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining(`"rateLimitPrincipal":"api-key:${apiKeys.project.id}"`));
   });
 
   it('keeps row mutations on the default route and purges exact cache tags', async () => {
@@ -2825,7 +1718,7 @@ describe('api routes', () => {
       '/v1/projects/other/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -2901,7 +1794,7 @@ describe('api routes', () => {
         path,
         {
           headers: {
-            authorization: 'Bearer sfk_project-key.any-secret'
+            authorization: apiKeys.project.authorization
           }
         },
         env
@@ -2931,7 +1824,7 @@ describe('api routes', () => {
         `/v1/projects/demo/tables/users/rows?case=${encodeURIComponent(name)}`,
         {
           headers: {
-            authorization: 'Bearer sfk_project-key.any-secret'
+            authorization: apiKeys.project.authorization
           }
         },
         env
@@ -2951,7 +1844,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows?limit=10',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       createEnv({
@@ -2978,7 +1871,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows?limit=10',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret',
+          authorization: apiKeys.project.authorization,
           origin: 'https://client.example'
         }
       },
@@ -3003,7 +1896,7 @@ describe('api routes', () => {
     expect(env.__cachedReadRequests).toHaveLength(1);
     expect(env.__rateLimitRequests).toEqual([
       { name: 'rate-limit:data:client:anonymous', key: 'rows.list' },
-      { name: 'rate-limit:data:api-key:project-key', key: 'rows.list' }
+      { name: `rate-limit:data:api-key:${apiKeys.project.id}`, key: 'rows.list' }
     ]);
   });
 
@@ -3161,7 +2054,7 @@ describe('api routes', () => {
       {
         method: 'POST',
         headers: {
-          authorization: 'Bearer sfk_project-admin-key.any-secret',
+          authorization: apiKeys.projectAdmin.authorization,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -3183,7 +2076,7 @@ describe('api routes', () => {
       {
         method: 'POST',
         headers: {
-          authorization: 'Bearer sfk_project-admin-key.any-secret',
+          authorization: apiKeys.projectAdmin.authorization,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -3212,7 +2105,7 @@ describe('api routes', () => {
       {
         method: 'POST',
         headers: {
-          authorization: 'Bearer sfk_global-key.any-secret',
+          authorization: apiKeys.global.authorization,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -3236,11 +2129,11 @@ describe('api routes', () => {
   it('rejects revoking another project or global key with a project-scoped admin key', async () => {
     const app = createApp();
     const response = await app.request(
-      '/v1/admin/keys/global-key',
+      `/v1/admin/keys/${apiKeys.global.id}`,
       {
         method: 'DELETE',
         headers: {
-          authorization: 'Bearer sfk_project-admin-key.any-secret'
+          authorization: apiKeys.projectAdmin.authorization
         }
       },
       createEnv()
@@ -3590,7 +2483,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows?filter=%7B%22status%22%3A%7B%22eq%22%3A%22active%22%7D%7D',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       createEnv()
@@ -3617,7 +2510,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows?limit=10',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       createEnv()
@@ -3656,7 +2549,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -3669,7 +2562,7 @@ describe('api routes', () => {
         key: 'rows.list'
       },
       {
-        name: 'rate-limit:data:api-key:project-key',
+        name: `rate-limit:data:api-key:${apiKeys.project.id}`,
         key: 'rows.list'
       }
     ]);
@@ -3686,7 +2579,7 @@ describe('api routes', () => {
       '/v1/admin/projects',
       {
         headers: {
-          authorization: 'Bearer sfk_forged-key.any-secret'
+          authorization: forgedApiKey.authorization
         }
       },
       env
@@ -3709,7 +2602,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -3718,7 +2611,7 @@ describe('api routes', () => {
     expect(response.status).toBe(200);
     expect(env.__rateLimitRequests).toEqual([
       { name: 'rate-limit:data:client:anonymous', key: 'rows.list' },
-      { name: 'rate-limit:data:api-key:project-key', key: 'rows.list' }
+      { name: `rate-limit:data:api-key:${apiKeys.project.id}`, key: 'rows.list' }
     ]);
   });
 
@@ -3733,7 +2626,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -3774,7 +2667,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -3792,7 +2685,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_touch-key.any-secret'
+          authorization: apiKeys.touch.authorization
         }
       },
       env
@@ -3801,7 +2694,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows',
       {
         headers: {
-          authorization: 'Bearer sfk_touch-key.any-secret'
+          authorization: apiKeys.touch.authorization
         }
       },
       env
@@ -3836,7 +2729,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows?limit=10',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -3917,7 +2810,7 @@ describe('api routes', () => {
       `/v1/projects/demo/tables/users/rows?${firstQuery.toString()}`,
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       firstEnv
@@ -3929,7 +2822,7 @@ describe('api routes', () => {
       `/v1/projects/demo/tables/users/rows?${secondQuery.toString()}`,
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       secondEnv
@@ -3972,7 +2865,7 @@ describe('api routes', () => {
         `/v1/projects/demo/tables/users/rows?${query.toString()}`,
         {
           headers: {
-            authorization: 'Bearer sfk_project-key.any-secret'
+            authorization: apiKeys.project.authorization
           }
         },
         env
@@ -4008,7 +2901,7 @@ describe('api routes', () => {
         '/v1/projects/demo/tables/users/rows?limit=10',
         {
           headers: {
-            authorization: 'Bearer sfk_project-key.any-secret'
+            authorization: apiKeys.project.authorization
           }
         },
         env
@@ -4063,7 +2956,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/schema',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
@@ -4117,7 +3010,7 @@ describe('api routes', () => {
       '/v1/projects/demo/tables/users/rows/row-1',
       {
         headers: {
-          authorization: 'Bearer sfk_project-key.any-secret'
+          authorization: apiKeys.project.authorization
         }
       },
       env
