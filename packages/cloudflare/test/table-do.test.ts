@@ -5492,4 +5492,52 @@ describe('TableDO', () => {
     expect(rows.data.map((row) => row.values.name)).toEqual(['Ada Lovelace']);
     expect((await getUsersCacheStatus(env)).externalChange.pending).toBe(false);
   });
+
+  it('runs its own sync when the in-flight sync was started for a different table config', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name', 'status'],
+        ['row-1', 'Ada', 'active'],
+        ['row-2', 'Bea', 'draft']
+      ],
+      requestedRanges: []
+    };
+    const baseFetch = createSheetsFetch(sheet);
+    const snapshotRead = createSignal();
+    const releaseSnapshot = createSignal();
+    let gateNextSnapshot = false;
+    let snapshotReads = 0;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (decodeRangeFromUrl(String(input)) === "'Users'!A1:C") {
+        snapshotReads += 1;
+        if (gateNextSnapshot) {
+          gateNextSnapshot = false;
+          const snapshot = await baseFetch(input, init);
+          snapshotRead.resolve();
+          await releaseSnapshot.promise;
+          return snapshot;
+        }
+      }
+
+      return baseFetch(input, init);
+    });
+    const env = createTestEnv();
+    await createUsersTable(env, { indexedFields: ['name'], cacheTtlSeconds: 3600 });
+
+    gateNextSnapshot = true;
+    const configAList = listUsers(env);
+    await snapshotRead.promise;
+    await createUsersTable(env, { indexedFields: ['name', 'status'], cacheTtlSeconds: 3600 });
+    const configBList = listUsers(env, { filter: { status: { eq: 'active' } } });
+    // Let request B reach the in-flight config-A sync before releasing it. setImmediate yields
+    // event-loop turns without a wall-clock delay; nothing observable marks "waiting on a sync".
+    for (let turn = 0; turn < 10; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    releaseSnapshot.resolve();
+    await configAList;
+
+    expect((await configBList).data.map((row) => row.id)).toEqual(['row-1']);
+    expect(snapshotReads).toBe(2);
+  });
 });

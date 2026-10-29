@@ -262,7 +262,7 @@ function getProjectStub(env: CloudflareEnv, projectSlug: string) {
 
 export class TableDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
-  private activeSync: Promise<TableCacheStatus> | null = null;
+  private activeSync: { configSignature: string; promise: Promise<TableCacheStatus> } | null = null;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -458,11 +458,8 @@ export class TableDO {
         return {
           type: 'table.reindex.result',
           result: await this.syncCache(
-            body.projectSlug,
-            body.tableSlug,
-            body.resolvedConfig
-              ? { force: true, resolvedConfig: body.resolvedConfig, requestContext }
-              : { force: true, requestContext }
+            await this.getTableConfig(body.projectSlug, body.tableSlug, body.resolvedConfig),
+            { force: true, requestContext }
           )
         };
       case 'table.generation.get':
@@ -744,7 +741,7 @@ export class TableDO {
       this.markCacheFreshAfterMutation(config, headers);
     } else {
       this.noteCacheContentChanged();
-      await this.syncCache(projectSlug, tableSlug, { force: true, resolvedConfig: config, requestContext: requestContext ?? null });
+      await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
     }
 
     return {
@@ -791,9 +788,8 @@ export class TableDO {
     const cacheState = this.getCacheState(config);
 
     if (cacheState.staleReason !== 'fresh') {
-      await this.syncCache(projectSlug, tableSlug, {
+      await this.syncCache(config, {
         force: cacheState.staleReason === 'never-synced' || cacheState.staleReason === 'error',
-        resolvedConfig: config,
         requestContext: requestContext ?? null
       });
     }
@@ -820,7 +816,7 @@ export class TableDO {
     return { ok: true as const };
   }
 
-  private async ensureQueryCacheReady(config: GoogleSheetTableConfig, requestContext?: TableRequestContext | null) {
+  private async ensureQueryCacheReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
     const cacheState = this.getCacheState(config);
     if (
       cacheState.staleReason === 'fresh' ||
@@ -829,14 +825,14 @@ export class TableDO {
       return cacheState;
     }
 
-    await this.syncCache(config.projectSlug, config.tableSlug, {
+    await this.syncCache(config, {
       force: cacheState.staleReason === 'never-synced' || cacheState.staleReason === 'error',
       requestContext: requestContext ?? null
     });
     return this.getCacheState(config);
   }
 
-  private async ensurePointReadReady(config: GoogleSheetTableConfig, requestContext?: TableRequestContext | null) {
+  private async ensurePointReadReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
     const cacheState = this.getCacheState(config);
     if (
       cacheState.staleReason === 'fresh' ||
@@ -846,23 +842,23 @@ export class TableDO {
       return cacheState;
     }
 
-    await this.syncCache(config.projectSlug, config.tableSlug, { force: true, requestContext: requestContext ?? null });
+    await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
     return this.getCacheState(config);
   }
 
-  private async ensurePointOperationReady(config: GoogleSheetTableConfig, requestContext?: TableRequestContext | null) {
+  private async ensurePointOperationReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
     const cacheState = this.getCacheState(config);
     if (cacheState.staleReason === 'fresh' || cacheState.staleReason === 'ttl-expired') {
       return cacheState;
     }
 
-    await this.syncCache(config.projectSlug, config.tableSlug, { force: true, requestContext: requestContext ?? null });
+    await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
     return this.getCacheState(config);
   }
 
   private async ensureMutationValidationReady(config: ResolvedTableConfig, requestContext?: TableRequestContext | null) {
     if (this.getCacheState(config).staleReason === 'external-change') {
-      await this.syncCache(config.projectSlug, config.tableSlug, { force: true, requestContext: requestContext ?? null });
+      await this.syncCache(config, { force: true, requestContext: requestContext ?? null });
       return this.getCacheState(config);
     }
 
@@ -873,23 +869,26 @@ export class TableDO {
     return this.ensurePointOperationReady(config, requestContext);
   }
 
-  private async syncCache(
-    projectSlug: string,
-    tableSlug: string,
-    options: { force: boolean; resolvedConfig?: ResolvedTableConfigSnapshot; requestContext?: TableRequestContext | null | undefined }
-  ) {
-    if (this.activeSync) {
-      const cache = await this.activeSync;
-      if (!options.force || !cache.stale) {
-        return {
-          ok: true as const,
-          rowCount: cache.rowCount,
-          cache
-        };
+  private async syncCache(config: ResolvedTableConfig, options: { force: boolean; requestContext: TableRequestContext | null }) {
+    const configSignature = buildCacheConfigSignature(config);
+    let active = this.activeSync;
+    while (active) {
+      if (active.configSignature === configSignature) {
+        const cache = await active.promise;
+        if (!options.force || !cache.stale) {
+          const status = this.computeCacheStatus(config);
+          return { ok: true as const, rowCount: status.rowCount, cache: status };
+        }
+
+        break;
       }
+
+      // A sync for another table config is in flight. Its outcome says nothing about this config,
+      // so wait for it to finish (syncs share the staging tables) and then evaluate this config.
+      await active.promise.catch(() => undefined);
+      active = this.activeSync === active ? null : this.activeSync;
     }
 
-    const config = await this.getTableConfig(projectSlug, tableSlug, options.resolvedConfig);
     const currentStatus = this.computeCacheStatus(config);
     if (!options.force && currentStatus.status === 'ready' && !currentStatus.stale) {
       return {
@@ -899,18 +898,18 @@ export class TableDO {
       };
     }
 
-    const syncPromise = this.performSync(config, options.requestContext ?? null);
-    this.activeSync = syncPromise;
+    const sync = { configSignature, promise: this.performSync(config, options.requestContext) };
+    this.activeSync = sync;
 
     try {
-      const cache = await syncPromise;
+      const cache = await sync.promise;
       return {
         ok: true as const,
         rowCount: cache.rowCount,
         cache
       };
     } finally {
-      if (this.activeSync === syncPromise) {
+      if (this.activeSync === sync) {
         this.activeSync = null;
       }
     }
