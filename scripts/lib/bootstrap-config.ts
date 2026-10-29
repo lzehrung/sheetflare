@@ -74,6 +74,19 @@ function parseTables(project: Record<string, unknown>, projectIndex: number) {
   });
 }
 
+function assertUniqueApiKeyNames(apiKeys: ReadonlyArray<{ name: string }>) {
+  const firstIndexByName = new Map<string, number>();
+  for (const [apiKeyIndex, apiKey] of apiKeys.entries()) {
+    const firstIndex = firstIndexByName.get(apiKey.name);
+    if (firstIndex !== undefined) {
+      throw new ScriptError(
+        `Bootstrap config api key ${apiKeyIndex + 1} reuses name ${apiKey.name} already configured by api key ${firstIndex + 1}; api key names must be unique.`
+      );
+    }
+    firstIndexByName.set(apiKey.name, apiKeyIndex);
+  }
+}
+
 export function parseBootstrapConfig(input: unknown): BootstrapConfig {
   if (!isRecord(input)) {
     throw new ScriptError('SHEETFLARE_BOOTSTRAP_CONFIG_JSON must be a JSON object.');
@@ -125,6 +138,8 @@ export function parseBootstrapConfig(input: unknown): BootstrapConfig {
       throw error;
     }
   });
+
+  assertUniqueApiKeyNames(apiKeys);
 
   return {
     projects,

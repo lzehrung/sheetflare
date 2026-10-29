@@ -98,4 +98,23 @@ describe('parseBootstrapConfig', () => {
       })
     ).toThrow('SHEETFLARE_BOOTSTRAP_CONFIG_JSON field apiKeys must be an array when provided.');
   });
+
+  it('rejects duplicate api key names before any request is made', () => {
+    expect(() =>
+      parseBootstrapConfig({
+        projects: [
+          {
+            slug: 'demo',
+            name: 'Demo',
+            spreadsheetId: 'sheet-1'
+          }
+        ],
+        apiKeys: [
+          { name: 'demo-key', scopes: ['table:read'] },
+          { name: 'other-key', scopes: ['table:read'] },
+          { name: 'demo-key', projectSlug: 'demo', scopes: ['table:read'] }
+        ]
+      })
+    ).toThrow('Bootstrap config api key 3 reuses name demo-key already configured by api key 1; api key names must be unique.');
+  });
 });

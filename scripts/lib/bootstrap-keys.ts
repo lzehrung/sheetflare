@@ -105,7 +105,8 @@ async function issueBootstrapApiKeys(
     .data
     .filter((key) => key.revokedAt === null);
 
-  const keysToRevoke: ManagedKeyRef[] = [];
+  // Keyed by key id: a key matched by several configured entries is still revoked only once.
+  const keysToRevoke = new Map<string, ManagedKeyRef>();
   for (const apiKey of options.apiKeys) {
     const existing = activeKeys.filter((key) => key.name === apiKey.name);
     const [firstExisting] = existing;
@@ -117,7 +118,9 @@ async function issueBootstrapApiKeys(
       continue;
     }
 
-    keysToRevoke.push(...existing.map((key) => ({ name: key.name, id: key.id })));
+    for (const key of existing) {
+      keysToRevoke.set(key.id, { name: key.name, id: key.id });
+    }
     logStep(`Creating key ${apiKey.name}`);
     const createResponse = await requestJson<unknown>({
       baseUrl: options.baseUrl,
@@ -137,7 +140,7 @@ async function issueBootstrapApiKeys(
   const currentKeyId = authenticatingKeyId(options.bearer);
   const revokeFirst: ManagedKeyRef[] = [];
   const revokeLast: ManagedKeyRef[] = [];
-  for (const key of keysToRevoke) {
+  for (const key of keysToRevoke.values()) {
     if (currentKeyId !== null && key.id === currentKeyId) {
       revokeLast.push(key);
     } else {
