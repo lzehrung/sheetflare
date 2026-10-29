@@ -109,6 +109,7 @@ describe('setup Drive watch recovery after webhook secret replacement', () => {
     args: string[];
     baseUrl?: string | null;
     bootstrap?: { code: number; stdout: string; stderr: string };
+    failingSecret?: 'GOOGLE_DRIVE_WEBHOOK_SECRET' | 'ADMIN_BEARER_TOKEN';
     fetch?: typeof fetch;
   }) {
     const configDir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-'));
@@ -146,6 +147,9 @@ describe('setup Drive watch recovery after webhook secret replacement', () => {
       boundary.commands.push({ args, input: commandOptions?.input ?? null });
       if (args.includes('ops:bootstrap')) {
         return commandResult(bootstrap.code, bootstrap.stdout, bootstrap.stderr);
+      }
+      if (options.failingSecret && args.includes(options.failingSecret)) {
+        return commandResult(1, '', 'wrangler secret put failed');
       }
       return commandResult(0);
     };
@@ -235,5 +239,35 @@ describe('setup Drive watch recovery after webhook secret replacement', () => {
     const message = failure instanceof Error ? failure.message : String(failure);
     expect(message).toContain('Bootstrap failed');
     expect(message).not.toContain('register failed');
+  });
+
+  it('keeps the previous admin credential for watch re-registration when the ADMIN_BEARER_TOKEN put fails after the webhook secret lands', async () => {
+    const { run } = await runSetupWithDeps({
+      args: ['--apply-secrets', '--bootstrap'],
+      baseUrl: 'https://example.workers.dev',
+      failingSecret: 'ADMIN_BEARER_TOKEN'
+    });
+
+    const failure = await run().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(registerUrls()).toHaveLength(1);
+    expect(boundary.bearers.length).toBeGreaterThan(0);
+    expect(boundary.bearers.every((bearer) => bearer === oldBootstrapToken)).toBe(true);
+    const message = failure instanceof Error ? failure.message : String(failure);
+    expect(message).toContain('Failed to apply ADMIN_BEARER_TOKEN');
+  });
+
+  it('does not re-register Drive watches when the GOOGLE_DRIVE_WEBHOOK_SECRET put fails', async () => {
+    const { run } = await runSetupWithDeps({
+      args: ['--apply-secrets', '--bootstrap'],
+      baseUrl: 'https://example.workers.dev',
+      failingSecret: 'GOOGLE_DRIVE_WEBHOOK_SECRET'
+    });
+
+    const failure = await run().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(registerUrls()).toHaveLength(0);
+    const message = failure instanceof Error ? failure.message : String(failure);
+    expect(message).toContain('Failed to apply GOOGLE_DRIVE_WEBHOOK_SECRET');
   });
 });

@@ -64,6 +64,22 @@ describe('findUnpersistedValues', () => {
     )).toEqual([{ field: 'name', expected: 'alice', actual: ' Alice ' }]);
   });
 
+  it('reads a configured field name with surrounding whitespace back under its trimmed name', () => {
+    expect(findUnpersistedValues({ name: 'Smoke Row Updated' }, { ' name ': 'Smoke Row Updated' })).toEqual([]);
+  });
+
+  it('applies a field rule to a configured field name with surrounding whitespace, as the write path does', () => {
+    const fieldRules: FieldRules = { email: { normalize: ['trim', 'lowercase'] } };
+    expect(findUnpersistedValues({ email: 'alice' }, { ' email ': ' Alice ' }, fieldRules)).toEqual([]);
+    expect(findUnpersistedValues({ email: ' Alice ' }, { ' email ': ' Alice ' }, fieldRules)).toEqual([
+      { field: 'email', expected: 'alice', actual: ' Alice ' }
+    ]);
+  });
+
+  it('finds a field rule keyed by a padded name, since rule names are trimmed the same way', () => {
+    expect(findUnpersistedValues({ email: 'alice' }, { email: ' Alice ' }, { ' email ': { normalize: ['trim', 'lowercase'] } })).toEqual([]);
+  });
+
   it('expects an array to persist as the sheets JSON text', () => {
     const persisted = parseSheetCellValue(serializeSheetCell(['a', 'b']));
     expect(findUnpersistedValues({ tags: persisted }, { tags: ['a', 'b'] })).toEqual([]);
