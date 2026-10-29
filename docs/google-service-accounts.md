@@ -55,7 +55,7 @@ That means:
 3. Create a user-managed service account.
 4. Create a key only if your org policy allows service-account keys.
 
-Example `gcloud` flow:
+Example `gcloud` flow for a staging credential. It applies the key with `npm run setup:staging`, which targets `sheetflare.staging.setup.json` and `apps/api/wrangler.staging.jsonc`. For production, set `$serviceAccountName = "sheetflare-prod"` and run `npm run setup -- --apply-secrets` instead; that command writes the **production** Worker's secrets.
 
 ```powershell
 $projectId = "YOUR_GCP_PROJECT_ID"
@@ -73,7 +73,7 @@ gcloud iam service-accounts create $serviceAccountName `
 try {
   gcloud iam service-accounts keys create $keyPath --iam-account=$serviceAccountEmail
   $env:GOOGLE_APPLICATION_CREDENTIALS = $keyPath
-  npm run setup -- --apply-secrets
+  npm run setup:staging -- --apply-secrets
 }
 finally {
   Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
@@ -83,7 +83,7 @@ finally {
 
 Both APIs are required. `sheets.googleapis.com` serves row reads and writes; `drive.googleapis.com` serves Drive watch registration (`npm run ops:watch:drive`) and the automatic reindexing that depends on it. Enabling only the Sheets API leaves watch registration failing.
 
-The `finally` block deletes the private key file even when setup fails, so it never lingers in `%TEMP%`. Deleting the file does not revoke the key: it still exists in Google Cloud. If `npm run setup -- --apply-secrets` failed and you will not retry with this key, revoke it so no unused credential stays valid:
+The `finally` block deletes the private key file even when setup fails, so it never lingers in `%TEMP%`. Deleting the file does not revoke the key: it still exists in Google Cloud. If the apply-secrets run failed and you will not retry with this key, revoke it so no unused credential stays valid:
 
 ```powershell
 gcloud iam service-accounts keys list --iam-account=$serviceAccountEmail
@@ -198,7 +198,7 @@ If it reports that you are not authenticated, run:
 npx wrangler login
 ```
 
-One shared credential manual fallback:
+One shared credential manual fallback (production config; for staging use `--config apps/api/wrangler.staging.jsonc`):
 
 ```powershell
 npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc

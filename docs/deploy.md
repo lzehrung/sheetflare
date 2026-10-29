@@ -33,7 +33,7 @@ npm run setup:staging
 
 Use `npm run setup -- --advanced` only when the safe defaults do not fit. Use the rest of this guide for CI, recovery, and manual fallback—not for a normal first deployment.
 
-For reruns from an existing setup config:
+For reruns from an existing production setup config:
 
 ```powershell
 npm run setup -- --apply-secrets
@@ -42,6 +42,8 @@ npm run setup -- --bootstrap
 npm run setup -- --smoke
 npm run setup -- --verify
 ```
+
+These commands use `sheetflare.setup.json` and `apps/api/wrangler.jsonc`, so they change **production**. For staging, run the same flags through `npm run setup:staging -- <flag>` (for example `npm run setup:staging -- --apply-secrets`), which selects `sheetflare.staging.setup.json` and the staging Wrangler config. `--apply-secrets` replaces the bootstrap token and webhook secret on whichever Worker it targets.
 
 - `--apply-secrets` applies Worker secrets only. It mints a new bootstrap admin token and Drive webhook secret unless you export `ADMIN_BEARER_TOKEN` or `GOOGLE_DRIVE_WEBHOOK_SECRET`. A minted token is printed once. Because a new webhook secret orphans existing Drive watches, the run re-registers them when it knows the API URL (`.sheetflare.setup.local.json` or `SHEETFLARE_BASE_URL`) and an admin credential (`SHEETFLARE_ADMIN_CREDENTIAL`, or the token it just applied). `wrangler secret put` deploys that secret immediately, so setup still re-registers after a later step fails (for example bootstrap) instead of leaving channels on the old token. It registers at most once. If it cannot re-register, or re-registration fails, it warns and tells you to run `npm run ops:watch:drive`, then reports the original failure.
 - `--deploy` deploys the API Worker, including the hosted admin UI unless `adminUi` is `disabled`.
@@ -153,7 +155,7 @@ npm run deploy:api:raw
 npm run deploy:staging:api:raw
 ```
 
-To invoke Wrangler directly outside setup:
+To invoke Wrangler directly outside setup (these target **production**; for staging use `--config apps/api/wrangler.staging.jsonc`):
 
 ```powershell
 npm --workspace @sheetflare/api run build
