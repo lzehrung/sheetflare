@@ -5122,4 +5122,44 @@ describe('TableDO', () => {
       }
     });
   });
+
+  it('rejects creates and updates whose date or datetime values are impossible calendar values', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'dueDate', 'updatedAt'],
+        ['row-1', '2026-02-28', '2026-02-28T10:00:00Z']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      fieldRules: {
+        dueDate: { type: 'date' },
+        updatedAt: { type: 'datetime' }
+      },
+      cacheTtlSeconds: 3600
+    });
+
+    await expect(createUser(env, { dueDate: '2026-02-30', updatedAt: '2026-02-30T10:00:00Z' })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Table row failed validation.',
+      details: {
+        fieldErrors: [
+          { field: 'dueDate', code: 'TYPE' },
+          { field: 'updatedAt', code: 'TYPE' }
+        ]
+      }
+    });
+    await expect(updateUser(env, 'row-1', { updatedAt: '2026-04-26T24:00:00Z' })).rejects.toMatchObject({
+      name: 'BadRequestError',
+      details: {
+        fieldErrors: [{ field: 'updatedAt', code: 'TYPE' }]
+      }
+    });
+    expect(sheet.rows).toEqual([
+      ['_id', 'dueDate', 'updatedAt'],
+      ['row-1', '2026-02-28', '2026-02-28T10:00:00Z']
+    ]);
+  });
 });

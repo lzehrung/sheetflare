@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { FieldFilter, FieldRule, FieldRules, QueryScalarValue, RowFilter, RowRecord } from '@sheetflare/contracts';
 
 export type ConstraintViolationCode = 'REQUIRED' | 'TYPE' | 'ENUM';
@@ -26,13 +27,10 @@ export function normalizeFieldRule(rule: FieldRule | undefined): FieldRule | und
   };
 }
 
-function isIsoDateString(value: string) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00.000Z`));
-}
-
-function isIsoDateTimeString(value: string) {
-  return /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
-}
+// Zod's ISO validators check month lengths and leap years. Date.parse is not a calendar check:
+// it rolls 2026-02-30 over to March 2 instead of rejecting it.
+const isoDateSchema = z.iso.date();
+const isoDateTimeSchema = z.iso.datetime({ offset: true, local: true });
 
 function isCanonicalNumberString(value: string) {
   return /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value);
@@ -142,9 +140,9 @@ function matchesConstrainedType(value: RowRecord[string] | undefined, expectedTy
     case 'boolean':
       return typeof value === 'boolean';
     case 'date':
-      return typeof value === 'string' && isIsoDateString(value);
+      return typeof value === 'string' && isoDateSchema.safeParse(value).success;
     case 'datetime':
-      return typeof value === 'string' && isIsoDateTimeString(value);
+      return typeof value === 'string' && isoDateTimeSchema.safeParse(value).success;
   }
 }
 

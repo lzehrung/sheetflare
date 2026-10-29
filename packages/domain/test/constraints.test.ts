@@ -107,6 +107,35 @@ describe('validateFieldRules', () => {
       }
     ]);
   });
+
+  it('rejects impossible calendar dates and datetime components', () => {
+    const rules = {
+      dueDate: { type: 'date' as const },
+      updatedAt: { type: 'datetime' as const }
+    };
+
+    for (const dueDate of ['2026-02-30', '2026-02-29', '2026-04-31', '2026-13-01', '2026-00-10', '2026-01-00']) {
+      expect(validateFieldRules({ dueDate }, rules)).toEqual([
+        { field: 'dueDate', code: 'TYPE', message: 'dueDate must be a date.' }
+      ]);
+    }
+
+    for (const updatedAt of ['2026-02-30T00:00:00.000Z', '2026-04-26T24:00:00Z', '2026-04-26T10:60:00Z', '2026-04-26T10:00:61Z', '2026-04-26T10:00:00+25:00', '2026-04-26Tnoon']) {
+      expect(validateFieldRules({ updatedAt }, rules)).toEqual([
+        { field: 'updatedAt', code: 'TYPE', message: 'updatedAt must be a datetime.' }
+      ]);
+    }
+
+    expect(validateFieldRules({
+      dueDate: '2024-02-29',
+      updatedAt: '2024-02-29T23:59:59.999Z'
+    }, rules)).toEqual([]);
+    expect(validateFieldRules({
+      dueDate: '2026-12-31',
+      updatedAt: '2026-04-26T10:00:00+05:30'
+    }, rules)).toEqual([]);
+    expect(validateFieldRules({ updatedAt: '2026-04-26T10:00' }, rules)).toEqual([]);
+  });
 });
 
 describe('coerceRowFilter', () => {
