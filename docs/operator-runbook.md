@@ -205,13 +205,15 @@ Important fields:
 
 `lastSyncStartedAt` and `validation` change only on a full rebuild from Google Sheets. A successful create or update refreshes the cache in place and sets `lastSyncCompletedAt` to the mutation time, which also restarts the TTL clock. A delete does the same only when the cache was fresh, the header layout is unchanged, and nothing else changed the cached rows while the delete was in flight (a sync or point read that ran meanwhile may already have seen the sheet without the row, and shifting its row numbers again would corrupt them); otherwise it triggers a full rebuild, which sets all of these normally. Point mutations do not recompute `validation`.
 
+A delete that rebuilds the cache (the cache had expired, the header layout changed, or its rows changed while the delete ran) leaves the rows below the deleted one on their old row numbers until the rebuild is in. It therefore marks the cache `external-change` before the table's write queue is released and runs the rebuild after it. Until the rebuild finishes, every request that needs the cache waits for that one rebuild: list and schema reads, point reads, and the next create, update, or delete. That includes a write after a delete on an expired cache, which would not wait for a sync on its own, and such deletes are common when `cacheTtlSeconds` is short. Once the rebuild is in, the next delete finds the cache fresh and lowers the row numbers in place again. A delete that updates the cache in place does not mark it, and nothing waits. If the rebuild fails, the delete returns the error, the status shows `error`, and the mark stays until a later sync succeeds.
+
 Interpretation:
 
 - `fresh`: cache is usable and within TTL/config
 - `never-synced`: table has not completed its first sync
 - `ttl-expired`: cache is old but point reads and mutations can still use narrow repair behavior
 - `config-changed`: table config changed in a way that requires resync
-- `external-change`: Google Drive reported a spreadsheet update and a debounced auto-reindex is pending, or a write overlapped a sync so the synced snapshot may lack it. An overlapping write has no debounce, so the next read resyncs.
+- `external-change`: Google Drive reported a spreadsheet update and a debounced auto-reindex is pending, or a write overlapped a sync so the synced snapshot may lack it, or a delete could not lower the cached row numbers in place and is rebuilding the cache. The last two have no debounce, so the next read resyncs or waits for the rebuild already running, and a Drive notification that arrives meanwhile does not give them one.
 - `error`: last sync failed and needs investigation
 
 Validation interpretation:
@@ -220,7 +222,7 @@ Validation interpretation:
 - `validation.status: "warning"`: the last full sync found rows that violate configured `fieldRules`, for example duplicates after normalization or invalid enum/type values
 - `validation.validatedAt`: when that validation snapshot was last recomputed during a full sync
 - `validation.issues`: a capped sample for operator triage, not an exhaustive dump
-- `externalChange.pending`: a Drive notification arrived and the debounce window has not completed yet, or a write overlapped a sync (`debounceUntil` is `null`, so the next read resyncs)
+- `externalChange.pending`: a Drive notification arrived and the debounce window has not completed yet, or a write overlapped a sync, or a delete is rebuilding the cache (`debounceUntil` is `null` for those two, so the next read resyncs)
 - `externalChange.debounceUntil`: when the queued automatic reindex is due
 - `externalChange.lastAutoReindexAt`: when the last Drive-triggered automatic reindex completed
 

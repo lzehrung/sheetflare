@@ -1,3 +1,4 @@
+import { setImmediate as nextEventLoopTurn } from 'node:timers/promises';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BadRequestError,
@@ -396,6 +397,73 @@ function createSnapshotGate(baseFetch: FetchHandler, snapshotRange: string) {
     reached: reached.promise,
     release: released.resolve
   };
+}
+
+// Lets every request that nothing holds finish. A setImmediate turn passes without a wall-clock
+// delay, and nothing observable marks "waiting on a sync".
+async function yieldEventLoopTurns(turns = 25) {
+  for (let turn = 0; turn < turns; turn += 1) {
+    await nextEventLoopTurn();
+  }
+}
+
+// The request's result when it answers while the event loop runs, or 'waiting' when a gated Google
+// read still holds it.
+function answerOrWaiting<TResult>(request: Promise<TResult>) {
+  return Promise.race([request, yieldEventLoopTurns().then(() => 'waiting' as const)]);
+}
+
+// A delete of row-1 overlaps a point read. The read caches row-4 from the sheet as it is after the
+// delete, so the delete finds the cached rows changed under it, cannot lower their row numbers, and
+// rebuilds the cache instead. Resolves once Google has answered the rebuild's snapshot read and the
+// answer is held (a 403 once released, with denyRebuild). At that point the cache has dropped row-1
+// but still has row-2 on row 3 and row-3 on row 4, where the repaired row-4 sits too, while the sheet
+// has them on 2, 3 and 4. The retry gate holds the snapshot read of a sync that starts after the rebuild.
+async function startDeleteRebuildAfterPointReadRepair(options: { denyRebuild?: boolean } = {}) {
+  const sheet: SheetState = {
+    rows: [
+      ['_id', 'name'],
+      ['row-1', 'Ada'],
+      ['row-2', 'Bea'],
+      ['row-3', 'Cora']
+    ],
+    requestedRanges: []
+  };
+  const snapshotRange = "'Users'!A1:B";
+  // Holds the delete's verification read: the deleted row's old position and the one below it.
+  const verification = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A2:A3");
+  let denyNextSnapshot = false;
+  const denyingFetch: FetchHandler = async (input, init) => {
+    if (denyNextSnapshot && decodeRangeFromUrl(String(input)) === snapshotRange) {
+      denyNextSnapshot = false;
+      return Response.json({ error: { code: 403, message: 'denied', status: 'PERMISSION_DENIED' } }, { status: 403 });
+    }
+
+    return verification.fetch(input, init);
+  };
+  const retry = createSnapshotGate(denyingFetch, snapshotRange);
+  const rebuild = createSnapshotGate(retry.fetch, snapshotRange);
+  vi.stubGlobal('fetch', rebuild.fetch);
+  const env = createTestEnv();
+  await createUsersTable(env, { cacheTtlSeconds: 3600 });
+  await listUsers(env);
+  denyNextSnapshot = options.denyRebuild === true;
+
+  // A row typed in by hand is not cached yet, so a point read has to ask Google for it.
+  sheet.rows.push(['row-4', 'Dee']);
+  verification.arm();
+  const deletion = deleteUser(env, 'row-1');
+  await verification.reached;
+
+  // Google already lacks row-1, so the point read caches row-4 on row 4 and moves the cache's content revision.
+  const repaired = await callUsersTable(env, { type: 'table.row.get', ...usersTable, rowId: 'row-4' }, 'table.row.get.result');
+  expect(repaired.data.rowNumber).toBe(4);
+
+  rebuild.arm();
+  verification.release();
+  await rebuild.reached;
+
+  return { env, deletion, rebuild, retry };
 }
 
 describe('TableDO', () => {
@@ -6248,7 +6316,7 @@ describe('TableDO', () => {
     vi.useRealTimers();
   });
 
-  it('does not hold up the next write while a delete rebuilds the cache', async () => {
+  it('releases the write queue before a delete rebuilds the cache, and makes the next write wait for that rebuild instead of writing against the old rows', async () => {
     const sheet: SheetState = {
       rows: [
         ['_id', 'name'],
@@ -6261,7 +6329,8 @@ describe('TableDO', () => {
     const gate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:C");
     vi.stubGlobal('fetch', gate.fetch);
     const env = createTestEnv();
-    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    // Creates are disabled, so a create is refused as soon as it leaves the write queue, before it needs the cache.
+    await createUsersTable(env, { cacheTtlSeconds: 3600, createEnabled: false });
     await listUsers(env);
 
     // A column added by hand means the delete cannot repair the cache in place and rebuilds it.
@@ -6270,15 +6339,67 @@ describe('TableDO', () => {
     const deletion = deleteUser(env, 'row-1');
     await gate.reached;
 
-    // The rebuild is still reading Google, and a write must not queue behind it.
-    await updateUser(env, 'row-3', { name: 'Cora Lee' });
+    // The rebuild is still reading Google and the delete has let go of the write queue, so a write gets through it.
+    await expect(answerOrWaiting(createUser(env, { name: 'Dee' }))).rejects.toMatchObject({ name: 'ForbiddenError' });
+
+    // The cache still has row-3 on row 4 and is marked for the rebuild, so an update waits for it instead of
+    // running against those rows. The sheet is untouched until the rebuild's snapshot is in.
+    const update = updateUser(env, 'row-3', { name: 'Cora Lee' });
+    expect(await answerOrWaiting(update)).toBe('waiting');
+    expect(sheet.rows[2]).toEqual(['row-3', 'Cora', 'active']);
 
     gate.release();
     await deletion;
-    expect((await listUsers(env)).data.map((row) => [row.id, row.values.name])).toEqual([
-      ['row-2', 'Bea'],
-      ['row-3', 'Cora Lee']
+    await expect(update).resolves.toMatchObject({ data: { id: 'row-3', rowNumber: 3, values: { name: 'Cora Lee' } } });
+    expect(sheet.rows[2]).toEqual(['row-3', 'Cora Lee', 'active']);
+
+    // The update landed on the rebuilt cache, so it did not supersede the rebuild and nothing resyncs afterwards.
+    expect((await listUsers(env, { sort: 'rowNumber:asc' })).data.map((row) => [row.id, row.rowNumber, row.values.name])).toEqual([
+      ['row-2', 2, 'Bea'],
+      ['row-3', 3, 'Cora Lee']
     ]);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', rowCount: 2 });
+    expect(sheet.requestedRanges.filter((range) => range === "'Users'!A1:C")).toHaveLength(1);
+  });
+
+  it('does not mark the cache or hold up the next write when a delete can lower the cached row numbers in place', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    // A rebuild would stop at this gate, so a delete that finishes did not start one.
+    const gate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:B");
+    vi.stubGlobal('fetch', gate.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+    sheet.requestedRanges = [];
+
+    gate.arm();
+    await expect(answerOrWaiting(deleteUser(env, 'row-1'))).resolves.toMatchObject({ ok: true, deletedId: 'row-1' });
+    expect(await getUsersCacheStatus(env)).toMatchObject({
+      status: 'ready',
+      stale: false,
+      staleReason: 'fresh',
+      externalChange: { pending: false },
+      rowCount: 2
+    });
+
+    await expect(answerOrWaiting(updateUser(env, 'row-3', { name: 'Cora Lee' }))).resolves.toMatchObject({
+      data: { id: 'row-3', rowNumber: 3, values: { name: 'Cora Lee' } }
+    });
+    await expect(answerOrWaiting(listUsers(env, { sort: 'rowNumber:asc' }))).resolves.toMatchObject({
+      data: [
+        { id: 'row-2', rowNumber: 2 },
+        { id: 'row-3', rowNumber: 3 }
+      ]
+    });
+    expect(sheet.requestedRanges).not.toContain("'Users'!A1:B");
   });
 
   it('rebuilds the cache instead of shifting its row numbers again when a sync promotes the post-delete sheet while the delete verifies', async () => {
@@ -6425,5 +6546,246 @@ describe('TableDO', () => {
       [created.data.id, 3, 'Grace']
     ]);
     expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', rowCount: 2 });
+  });
+
+  it('holds list reads and rowNumber filters back while a delete rebuilds a cache whose row numbers it could not lower', async () => {
+    const { env, deletion, rebuild } = await startDeleteRebuildAfterPointReadRepair();
+
+    // The cache has dropped row-1 but still has row-2 on row 3 and row-3 on row 4, next to the repaired row-4 on
+    // row 4. Until the rebuild promotes the snapshot Google is still answering, none of those row numbers can be served.
+    const sorted = listUsers(env, { sort: 'rowNumber:asc' });
+    const onRowThree = listUsers(env, { filter: { rowNumber: { eq: '3' } } });
+    expect(await answerOrWaiting(sorted)).toBe('waiting');
+    expect(await answerOrWaiting(onRowThree)).toBe('waiting');
+
+    rebuild.release();
+    await deletion;
+    expect((await sorted).data.map((row) => [row.id, row.rowNumber])).toEqual([
+      ['row-2', 2],
+      ['row-3', 3],
+      ['row-4', 4]
+    ]);
+    expect((await onRowThree).data.map((row) => row.id)).toEqual(['row-3']);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', rowCount: 3 });
+  });
+
+  it('reports the cache stale while a delete rebuilds it, and fresh once the rebuild has promoted its snapshot', async () => {
+    const { env, deletion, rebuild } = await startDeleteRebuildAfterPointReadRepair();
+
+    expect(await getUsersCacheStatus(env)).toMatchObject({
+      status: 'syncing',
+      stale: true,
+      staleReason: 'external-change',
+      externalChange: { pending: true, debounceUntil: null }
+    });
+
+    rebuild.release();
+    await deletion;
+    expect(await getUsersCacheStatus(env)).toMatchObject({
+      status: 'ready',
+      stale: false,
+      staleReason: 'fresh',
+      externalChange: { pending: false }
+    });
+  });
+
+  it('holds a point read back from the cached row numbers a delete has not lowered', async () => {
+    const { env, deletion, rebuild } = await startDeleteRebuildAfterPointReadRepair();
+
+    // The cache has row-3 on row 4 and Google has it on row 3, so a point read served from the cache would say 4.
+    const read = callUsersTable(env, { type: 'table.row.get', ...usersTable, rowId: 'row-3' }, 'table.row.get.result');
+    expect(await answerOrWaiting(read)).toBe('waiting');
+
+    rebuild.release();
+    await deletion;
+    expect((await read).data).toMatchObject({ id: 'row-3', rowNumber: 3 });
+  });
+
+  it('does not let a Drive notification with a debounce window make the cache servable again while a delete rebuilds it', async () => {
+    const { env, deletion, rebuild } = await startDeleteRebuildAfterPointReadRepair();
+
+    // Drive reports the delete's own edit while the rebuild is still reading Google.
+    await callUsersTable(env, {
+      type: 'table.external-change.record',
+      ...usersTable,
+      changedAt: new Date().toISOString(),
+      debounceUntil: new Date(Date.now() + 60_000).toISOString()
+    }, 'table.external-change.record.result');
+
+    const sorted = listUsers(env, { sort: 'rowNumber:asc' });
+    expect(await answerOrWaiting(sorted)).toBe('waiting');
+
+    rebuild.release();
+    await deletion;
+    expect((await sorted).data.map((row) => [row.id, row.rowNumber])).toEqual([
+      ['row-2', 2],
+      ['row-3', 3],
+      ['row-4', 4]
+    ]);
+
+    // The notification arrived after the rebuild began, so the rebuild did not read what it describes.
+    // It stays pending without a window, so the next read resyncs once and the table settles.
+    expect(await getUsersCacheStatus(env)).toMatchObject({
+      stale: true,
+      staleReason: 'external-change',
+      externalChange: { pending: true, debounceUntil: null }
+    });
+    await listUsers(env);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', externalChange: { pending: false } });
+  });
+
+  it('keeps the cache stale after the rebuild fails, so a retry does not serve the old row numbers as fresh either', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { env, deletion, rebuild, retry } = await startDeleteRebuildAfterPointReadRepair({ denyRebuild: true });
+
+    const failedDeletion = expect(deletion).rejects.toMatchObject({ name: 'BadGatewayError' });
+    rebuild.release();
+    await failedDeletion;
+    // Google already applied the delete, so the failed rebuild leaves the mark and the error status behind.
+    expect(await getUsersCacheStatus(env)).toMatchObject({
+      status: 'error',
+      stale: true,
+      staleReason: 'error',
+      externalChange: { pending: true }
+    });
+
+    // The next read retries the rebuild. While that sync reads Google the status is no longer "error",
+    // and the cache must not read as fresh.
+    retry.arm();
+    const recovering = listUsers(env, { sort: 'rowNumber:asc' });
+    await retry.reached;
+    expect(await getUsersCacheStatus(env)).toMatchObject({ status: 'syncing', stale: true, staleReason: 'external-change' });
+    const alongside = listUsers(env, { sort: 'rowNumber:asc' });
+    expect(await answerOrWaiting(alongside)).toBe('waiting');
+
+    retry.release();
+    const consistentRows = [
+      ['row-2', 2],
+      ['row-3', 3],
+      ['row-4', 4]
+    ];
+    expect((await recovering).data.map((row) => [row.id, row.rowNumber])).toEqual(consistentRows);
+    expect((await alongside).data.map((row) => [row.id, row.rowNumber])).toEqual(consistentRows);
+    expect(await getUsersCacheStatus(env)).toMatchObject({
+      status: 'ready',
+      stale: false,
+      staleReason: 'fresh',
+      lastSyncError: null,
+      externalChange: { pending: false }
+    });
+  });
+
+  it('makes the next write and later reads wait for the rebuild of a delete on an expired cache, and lets the next delete lower row numbers in place', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-10-29T12:00:00.000Z'));
+      const sheet: SheetState = {
+        rows: [
+          ['_id', 'name'],
+          ['row-1', 'Ada'],
+          ['row-2', 'Bea'],
+          ['row-3', 'Cora']
+        ],
+        requestedRanges: []
+      };
+      const gate = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A1:B");
+      vi.stubGlobal('fetch', gate.fetch);
+      const env = createTestEnv();
+      await createUsersTable(env, { cacheTtlSeconds: 15 });
+      await listUsers(env);
+      vi.setSystemTime(new Date('2026-10-29T12:01:00.000Z'));
+
+      // The cache has expired, so the delete cannot lower its row numbers in place and rebuilds it.
+      gate.arm();
+      const deletion = deleteUser(env, 'row-1');
+      await gate.reached;
+
+      // A write that ran now would restart the TTL clock and make the rows the delete did not lower look fresh.
+      const update = updateUser(env, 'row-3', { name: 'Cora Lee' });
+      expect(await answerOrWaiting(update)).toBe('waiting');
+      const sorted = listUsers(env, { sort: 'rowNumber:asc' });
+      expect(await answerOrWaiting(sorted)).toBe('waiting');
+
+      gate.release();
+      await deletion;
+      await update;
+      expect((await sorted).data.map((row) => [row.id, row.rowNumber])).toEqual([
+        ['row-2', 2],
+        ['row-3', 3]
+      ]);
+      expect((await listUsers(env, { sort: 'rowNumber:asc' })).data.map((row) => [row.id, row.rowNumber, row.values.name])).toEqual([
+        ['row-2', 2, 'Bea'],
+        ['row-3', 3, 'Cora Lee']
+      ]);
+      const snapshotReads = () => sheet.requestedRanges.filter((range) => range === "'Users'!A1:B").length;
+      expect(snapshotReads()).toBe(2);
+
+      // The rebuild made the cache fresh, so the next delete lowers the row numbers in place and starts no rebuild.
+      await deleteUser(env, 'row-2');
+      expect(snapshotReads()).toBe(2);
+      expect((await listUsers(env, { sort: 'rowNumber:asc' })).data.map((row) => [row.id, row.rowNumber, row.values.name])).toEqual([
+        ['row-3', 2, 'Cora Lee']
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not let a point read that began before the delete supersede the rebuild by repairing a cached row', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'Ada'],
+        ['row-2', 'Bea'],
+        ['row-3', 'Cora']
+      ],
+      requestedRanges: []
+    };
+    // Holds the delete's verification read, a point read's answer from Google, and the rebuild's snapshot read.
+    const verification = createSnapshotGate(createSheetsFetch(sheet), "'Users'!A2:A3");
+    const lateRead = createSnapshotGate(verification.fetch, "'Users'!A5:B5");
+    const rebuild = createSnapshotGate(lateRead.fetch, "'Users'!A1:B");
+    vi.stubGlobal('fetch', rebuild.fetch);
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // Rows typed in by hand are not cached yet, so point reads have to ask Google for them.
+    sheet.rows.push(['row-4', 'Dee'], ['row-5', 'Eli']);
+    verification.arm();
+    const deletion = deleteUser(env, 'row-1');
+    await verification.reached;
+
+    // The first point read repairs row-4 from the post-delete sheet, so the delete rebuilds. The second asks for
+    // row-5 and passes its cache check before the delete marks the cache, then waits on Google's answer.
+    await callUsersTable(env, { type: 'table.row.get', ...usersTable, rowId: 'row-4' }, 'table.row.get.result');
+    lateRead.arm();
+    const slowRead = callUsersTable(env, { type: 'table.row.get', ...usersTable, rowId: 'row-5' }, 'table.row.get.result');
+    await lateRead.reached;
+    rebuild.arm();
+    verification.release();
+    await rebuild.reached;
+
+    const sorted = listUsers(env, { sort: 'rowNumber:asc' });
+    expect(await answerOrWaiting(sorted)).toBe('waiting');
+
+    // Google's answer reaches the point read while the rebuild is still reading. Repairing row-5 now would move
+    // the cache's content revision under the rebuild, which would then discard its snapshot and keep the old
+    // row numbers. The point read still returns the row it got from Google.
+    lateRead.release();
+    await expect(slowRead).resolves.toMatchObject({ data: { id: 'row-5', rowNumber: 5 } });
+    rebuild.release();
+    await deletion;
+    expect(infoSpy).not.toHaveBeenCalledWith(expect.stringContaining('"event":"table.sync.superseded"'));
+
+    expect((await sorted).data.map((row) => [row.id, row.rowNumber])).toEqual([
+      ['row-2', 2],
+      ['row-3', 3],
+      ['row-4', 4],
+      ['row-5', 5]
+    ]);
+    expect(await getUsersCacheStatus(env)).toMatchObject({ stale: false, staleReason: 'fresh', rowCount: 4 });
   });
 });
