@@ -25,9 +25,11 @@ import {
   ProjectDO,
   RateLimitDO,
   TableDO,
+  type CachePurgeTarget,
   type CachedTableReadProps
 } from '../../src/index';
 import { createCachedTableReadsHarness, type CachePurgeCall } from './harness';
+import { WorkersCacheEmulator } from './workers-cache';
 
 const bootstrapToken = 'real-stack-bootstrap-token';
 
@@ -331,22 +333,35 @@ export function createRealStack(): RealStack {
   bindings.table = asBinding(observe('table', tableNamespace, rpcs));
   bindings['rate-limit'] = asBinding(observe('rate-limit', rateLimitNamespace, rpcs));
 
-  // The gateway reads through `CachedTableReads`, a Workers entrypoint with Workers Cache in front of it. Only the
-  // entrypoint is real here: there is no cache emulation, so every read reaches the table Durable Object.
+  // The gateway reads through `CachedTableReads`, a Workers entrypoint with Workers Cache in front of it. The emulator
+  // is that cache: a hit never reaches the entrypoint, and purge calls go to the emulated purge API.
+  const workersCache = new WorkersCacheEmulator();
+  const fetchCachedTableRead = (
+    props: CachedTableReadProps,
+    request: Request,
+    init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]
+  ) => {
+    const runEntrypoint = () =>
+      createCachedTableReadsHarness(env, { props, purgeCalls, workersCache }).entrypoint.fetch(request);
+    return workersCache.fetch({
+      props,
+      cacheKey: init?.cf?.cacheKey ?? null,
+      request,
+      run: runEntrypoint
+    });
+  };
   workerExports.CachedTableReads = Object.assign(
     ({ props }: { props: CachedTableReadProps }) => ({
-      fetch: (request: Request) => createCachedTableReadsHarness(env, { props, purgeCalls }).entrypoint.fetch(request)
+      fetch: (request: Request, init?: Parameters<typeof workerExports.CachedTableReads.fetch>[1]) =>
+        fetchCachedTableRead(props, request, init)
     }),
     {
-      async fetch(): Promise<Response> {
+      fetch(): Promise<Response> {
         throw new Error('The gateway reads through CachedTableReads({ props }), never through the bare binding.');
       },
-      invalidateProject: (projectSlug: string) =>
-        createCachedTableReadsHarness(env, { purgeCalls }).entrypoint.invalidateProject(projectSlug),
-      invalidateTable: (projectSlug: string, tableSlug: string) =>
-        createCachedTableReadsHarness(env, { purgeCalls }).entrypoint.invalidateTable(projectSlug, tableSlug),
-      invalidateRow: (projectSlug: string, tableSlug: string, rowId: string) =>
-        createCachedTableReadsHarness(env, { purgeCalls }).entrypoint.invalidateRow(projectSlug, tableSlug, rowId)
+      purge(targets: readonly CachePurgeTarget[]) {
+        return createCachedTableReadsHarness(env, { purgeCalls, workersCache }).entrypoint.purge(targets);
+      }
     }
   );
 

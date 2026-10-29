@@ -66,7 +66,6 @@ import {
   type CreateProjectInput,
   type CreateRowInput,
   type CreateTableInput,
-  type DeleteProjectResult,
   type DeleteTableResult,
   type GetTableCacheStatusResult,
   type ListRowsQuery,
@@ -1373,6 +1372,19 @@ async function getApiKeyRecord(c: { env: Env }, apiKeyId: string) {
     type: 'control.api-key.get.result';
     result: { record: ApiKeyPrincipal | null };
   }).result.record;
+}
+
+async function listProjectApiKeyIds(c: { env: Env }, projectSlug: string) {
+  const response = await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
+    type: 'control.api-keys.list',
+    projectSlug
+  });
+
+  if (response.type !== 'control.api-keys.list.result') {
+    throw new ServiceUnavailableError('Unexpected control plane api key list response.');
+  }
+
+  return response.result.data.map((record) => record.id);
 }
 
 function parsePathParams<TSchema extends z.ZodType>(c: { req: { param(): Record<string, string> } }, schema: TSchema): z.infer<TSchema> {
@@ -2849,17 +2861,22 @@ function createApp() {
       await clearTableCacheState(c, project, table.tableSlug, 'admin.projects.delete');
     }
 
+    // Collected before the delete revokes them. The control plane keeps the rows, but the isolate that handled this
+    // request would otherwise keep serving them from its verified-principal cache until that entry expired.
+    const projectApiKeyIds = await listProjectApiKeyIds(c, project);
     const response = await doRpc<ProjectDoResponse>(getProjectStub(c.env, project), {
       type: 'project.delete',
       projectSlug: project
     });
-    const result = (response as {
-      type: 'project.delete.result';
-      result: DeleteProjectResult;
-    }).result;
+    if (response.type !== 'project.delete.result') {
+      throw new ServiceUnavailableError('Unexpected project delete response.');
+    }
+    for (const apiKeyId of projectApiKeyIds) {
+      forgetCachedPrincipals(apiKeyId);
+    }
     await purgeCachedEntries(c, [{ kind: 'project', projectSlug: project }]);
 
-    return c.json(result);
+    return c.json(response.result);
   });
 
   app.openapi(adminListSpreadsheetTabsRoute, async (c) => {

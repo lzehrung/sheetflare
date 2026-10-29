@@ -69,7 +69,7 @@ Emitted by `TableDO`:
 
 ### Cache invalidation failure
 
-Emitted by the route layer when a committed change or Drive notification cannot purge the edge cache. The mutation still succeeds and its response carries `X-Sheetflare-Cache-Invalidation: failed`; edge-cached reads can serve pre-change data until their TTL expires.
+Emitted as a `warn` by the route layer when a Workers Cache purge is rejected. Cached reads are keyed by the table's data generation, so a purge failure does not serve stale data. The purge is best-effort garbage collection: it only frees edge storage ahead of the entry TTL. The mutation still succeeds, and the response does not report purge status.
 
 - `event: "cache.invalidation.failed"`
 - `method`
@@ -217,7 +217,7 @@ Alert on these conditions before broad production use:
     Alert when the same `channelId` keeps producing events for more than 15 minutes. A channel that never stops, or a watch the control plane lost track of, shows up this way.
 
 14. `cache.invalidation.failed`
-    Alert on any occurrence for critical tables, or on a sustained rate overall. Edge-cached reads can serve pre-change data until their TTL expires.
+    Alert on a sustained rate of purge rejections, not on a single event. Workers Cache purge uses a budget of 5 requests a minute after a burst of 25, so isolated rejections are expected. A sustained rate means that budget is exhausted. Purge failure does not make reads stale.
 
 15. `table.create.rollback_failed`
     Alert on any occurrence. A partial row can remain in the sheet until an operator removes it.
@@ -268,7 +268,7 @@ Use these exact predicates in your chosen log platform:
 - rejected Drive notifications:
   - `event == "drive.notification.rejected"` grouped by `channelId, reason`
 
-- cache invalidation failure:
+- cache invalidation failure (alert on a sustained rate; a single rejection is within the purge budget):
   - `event == "cache.invalidation.failed"`
 
 - unconfirmed table write:

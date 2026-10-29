@@ -349,12 +349,11 @@ describe('project deletion', () => {
     expect((await stack.requestAs(leftBehind.credential)(usersPath)).status).toBe(401);
   });
 
-  // KNOWN BUG, reported and not fixed here (apps/api/src/index.ts is owned by another change): deleting a project
-  // revokes its keys at the control plane, but the isolate that handled the delete keeps vouching for them from its
-  // verified-principal cache for up to ten seconds, and only DELETE /v1/admin/keys/:id evicts a key. A slug that is
-  // re-created inside that window therefore serves its new data to the deleted project's key. The two tests above
-  // pass because they start from a fresh isolate. Drop `.fails` once the delete route evicts the project's keys.
-  it.fails('rejects a deleted project key at once on the isolate that deleted it, even after the slug is re-created', async () => {
+  // Pins: project deletion evicting the project's keys from the isolate that handled the delete. Revocation at the
+  // control plane is not enough on its own: that isolate keeps vouching for them from its verified-principal cache
+  // until the entry expires, and a slug re-created inside that window would serve its data to the deleted project's
+  // key. The two tests above start from a fresh isolate, so they do not pin this.
+  it('rejects a deleted project key at once on the isolate that deleted it, even after the slug is re-created', async () => {
     const reader = await stack.mintKey({ name: 'Demo reader', projectSlug: 'demo', scopes: ['table:read'] });
     expect((await stack.requestAs(reader.credential)(usersPath)).status).toBe(200);
 
