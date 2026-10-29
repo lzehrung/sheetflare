@@ -105,6 +105,10 @@ Severity: **P1** likely wrong behavior or significant risk; **P2** real but boun
 - [x] **P2 · security** A key scoped to another project could tell existing private tables (403) from missing ones (404) after public-read reads were allowed; cross-project not-found now returns the same 403. *(Copilot review on #20)*
 - [x] **P3 · logic** Credential-conflict placeholder rows were treated as active Drive watches by retry advice, notifications, and cleanup. *(Copilot review on #20)*
 - [x] **P3 · logic** Duplicate configured bootstrap key names could revoke the authenticating key twice during rotation; names are now unique and revocations deduplicated. *(Copilot review on #19)*
+- [x] **P2 · logic** A delete verifying after a sync promoted the post-delete snapshot shifted cached row numbers a second time and marked the corrupted cache fresh. A content revision that moved during the delete now means rebuild instead of shift. *(Copilot review on #20; proven: gated real-TableDO test)*
+- [x] **P2 · logic** Setup subprocesses inherited the host `process.env` instead of the injected setup environment, so an injected `CLOUDFLARE_API_TOKEN` was ignored. *(Copilot review on #20)*
+- [x] **P2 · logic** `--apply-secrets` and webhook rotation: Drive watches are re-registered even when a later step fails, and an operator-selected `sfk_` API key is never replaced by the bootstrap token. *(Copilot review on #19)*
+- [ ] **P2 · tests** `packages/cloudflare/test` is not type-checked (its `tsconfig.json` includes only `src`), and existing test files already carry type errors.
 - [x] **P3 · security** Add Dependabot or Renovate to keep SHA-pinned GitHub Actions current. *(fixed: `.github/dependabot.yml`)*
 - [ ] **Validation** Verify generation-keyed caching, `cf.cacheKey` format, and purge behavior against real Workers Cache in staging (blocked: GitHub staging secrets unset, Wrangler login expired).
 

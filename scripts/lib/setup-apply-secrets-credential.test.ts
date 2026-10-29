@@ -93,12 +93,13 @@ function responseFor(url: string) {
 
 describe('setup --apply-secrets credential selection', () => {
   const tempDirs: string[] = [];
+  const scopedApiKey = `sfk_11111111-1111-4111-8111-111111111111.${'ab'.repeat(32)}`;
 
   afterEach(async () => {
     await Promise.all(tempDirs.splice(0).map((path) => rm(path, { force: true, recursive: true })));
   });
 
-  it('uses the applied bootstrap token for watch registration, smoke, and verify when SHEETFLARE_ADMIN_CREDENTIAL is the superseded token', async () => {
+  async function runSetupWithAdminCredential(adminCredential: string) {
     const configDir = await mkdtemp(join(tmpdir(), 'sheetflare-setup-'));
     tempDirs.push(configDir);
     const configPath = join(configDir, 'sheetflare.setup.json');
@@ -140,7 +141,7 @@ describe('setup --apply-secrets credential selection', () => {
       fetch: fetchImpl,
       prompter: null,
       env: isolatedEnv({
-        SHEETFLARE_ADMIN_CREDENTIAL: oldBootstrapToken,
+        SHEETFLARE_ADMIN_CREDENTIAL: adminCredential,
         SHEETFLARE_BASE_URL: 'https://example.workers.dev',
         SHEETFLARE_PRIVATE_READ_KEY: 'sfk_read.secret',
         SHEETFLARE_MUTATION_KEY: 'sfk_mutation.secret',
@@ -155,10 +156,26 @@ describe('setup --apply-secrets credential selection', () => {
       ?.trim() ?? null;
     const smokeCredential = commands.find((command) => command.args.includes('smoke'))?.envCredential ?? null;
 
+    return { appliedToken, smokeCredential, bearers };
+  }
+
+  it('uses the applied bootstrap token for watch registration, smoke, and verify when SHEETFLARE_ADMIN_CREDENTIAL is the superseded token', async () => {
+    const { appliedToken, smokeCredential, bearers } = await runSetupWithAdminCredential(oldBootstrapToken);
+
     expect(appliedToken).toEqual(expect.any(String));
     expect(appliedToken).not.toBe(oldBootstrapToken);
     expect(bearers.length).toBeGreaterThan(0);
     expect(bearers.every((bearer) => bearer === appliedToken)).toBe(true);
     expect(smokeCredential).toBe(appliedToken);
+  });
+
+  it('keeps the operator-selected API key for watch registration, smoke, and verify when SHEETFLARE_ADMIN_CREDENTIAL is an API key', async () => {
+    const { appliedToken, smokeCredential, bearers } = await runSetupWithAdminCredential(scopedApiKey);
+
+    expect(appliedToken).toEqual(expect.any(String));
+    expect(appliedToken).not.toBe(scopedApiKey);
+    expect(bearers.length).toBeGreaterThan(0);
+    expect(bearers.every((bearer) => bearer === scopedApiKey)).toBe(true);
+    expect(smokeCredential).toBe(scopedApiKey);
   });
 });
