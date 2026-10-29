@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ControlPlaneDoResponse, ProjectDoResponse, TableDoResponse } from '@sheetflare/contracts';
 import { ControlPlaneDO, ProjectDO, TableDO, doRpc, type CloudflareEnv } from '../src';
 import { createDurableObjectNamespace } from './support/do-harness';
+import { expectRpcResult } from './support/rpc-result';
 
 const testPrivateKey = [
   '-----BEGIN PRIVATE KEY-----',
@@ -1734,6 +1735,51 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
           message: 'The caller does not have permission'
         }
       }
+    });
+  });
+});
+
+describe('ControlPlaneDO API key lifecycle', () => {
+  it('keeps the first revocation timestamp when a key is revoked again', async () => {
+    const { env } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    const created = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.api-key.create',
+        input: { name: 'Demo reader', projectSlug: 'demo', scopes: ['table:read'] }
+      }),
+      'control.api-key.create.result'
+    );
+
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.api-key.revoke',
+      apiKeyId: created.record.id,
+      revokedAt: '2026-10-01T00:00:00.000Z'
+    });
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.api-key.revoke',
+      apiKeyId: created.record.id,
+      revokedAt: '2026-10-02T00:00:00.000Z'
+    });
+
+    const stored = expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.api-key.get', apiKeyId: created.record.id }),
+      'control.api-key.get.result'
+    );
+    expect(stored.record?.revokedAt).toBe('2026-10-01T00:00:00.000Z');
+  });
+
+  it('rejects revoking an unknown API key with a not-found contract error', async () => {
+    const { env } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+
+    await expect(doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.api-key.revoke',
+      apiKeyId: 'missing-key',
+      revokedAt: '2026-10-01T00:00:00.000Z'
+    })).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+      status: 404
     });
   });
 });

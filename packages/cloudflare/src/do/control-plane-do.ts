@@ -1,4 +1,4 @@
-import { AppError, ServiceUnavailableError } from '@sheetflare/contracts';
+import { AppError, NotFoundError, ServiceUnavailableError } from '@sheetflare/contracts';
 import type {
   AdminListSpreadsheetWatchRetryAdviceResult,
   AdminListSpreadsheetWatchesResult,
@@ -476,8 +476,13 @@ export class ControlPlaneDO {
   }
 
   private revokeApiKey(apiKeyId: string, revokedAt: string) {
+    if (!this.selectOptionalRow<{ id: string }>(`SELECT id FROM api_keys WHERE id = ?`, apiKeyId)) {
+      throw new NotFoundError(`API key ${apiKeyId} was not found.`);
+    }
+
+    // Revoking again keeps the first timestamp so the audit trail shows when access actually ended.
     this.ctx.storage.sql.exec(
-      `UPDATE api_keys SET revoked_at = ? WHERE id = ?`,
+      `UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`,
       revokedAt,
       apiKeyId
     );
