@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { toErrorResponse, type ControlPlaneDoResponse, type ProjectDoResponse, type TableDoResponse } from '@sheetflare/contracts';
 import { ControlPlaneDO, ProjectDO, TableDO, doRpc, type CloudflareEnv } from '../src';
 import { createDurableObjectNamespace } from './support/do-harness';
@@ -1782,6 +1782,119 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
         }
       }
     });
+  });
+});
+
+describe('ControlPlaneDO project removal', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('deletes a project when Google cannot stop its watch and retries the stop from the alarm', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-01T10:00:00.000Z'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'status'],
+        ['row-1', 'draft']
+      ]
+    };
+    const fallbackFetch = createSheetsAndDriveFetch(sheet);
+    const stoppedChannels: string[] = [];
+    let googleStopFails = true;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/drive/v3/channels/stop')) {
+        stoppedChannels.push(String(JSON.parse(String(init?.body ?? '{}')).id));
+        if (googleStopFails) {
+          return Response.json({ error: { code: 500, message: 'Backend Error', status: 'INTERNAL' } }, { status: 500 });
+        }
+      }
+
+      return fallbackFetch(input, init);
+    });
+    const { env, controlPlaneNamespace } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    const project = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo'));
+    await doRpc<ProjectDoResponse>(project, {
+      type: 'project.create',
+      input: { slug: 'demo', name: 'Demo', spreadsheetId: 'sheet-1' }
+    });
+    await doRpc<ProjectDoResponse>(project, {
+      type: 'project.table.create',
+      projectSlug: 'demo',
+      input: { tableSlug: 'users', sheetTabName: 'Users' }
+    });
+    await doRpc<ControlPlaneDoResponse>(controlPlane, {
+      type: 'control.spreadsheet-watches.register',
+      webhookUrl: 'https://sheetflare.example/v1/system/google/drive/notifications',
+      webhookToken: 'secret-token',
+      debounceSeconds: 30,
+      expirationMs: Date.parse('2026-05-08T10:00:00.000Z')
+    });
+
+    const deleted = expectRpcResult(
+      await doRpc<ProjectDoResponse>(project, { type: 'project.delete', projectSlug: 'demo' }),
+      'project.delete.result'
+    );
+
+    expect(deleted).toEqual({ ok: true, deletedProject: 'demo', deletedTables: ['users'] });
+    expect(expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.spreadsheet-watches.list' }),
+      'control.spreadsheet-watches.list.result'
+    ).data).toEqual([]);
+    expect(stoppedChannels).toEqual(['channel-sheet-1']);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"event":"drive.watch.stop.failed"'));
+    expect(controlPlaneNamespace.getAlarm('control-plane')).toBe(Date.parse('2026-05-01T10:01:00.000Z'));
+
+    vi.setSystemTime(new Date('2026-05-01T10:01:00.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect(stoppedChannels).toEqual(['channel-sheet-1', 'channel-sheet-1']);
+    expect(controlPlaneNamespace.getAlarm('control-plane')).toBe(Date.parse('2026-05-01T10:03:00.000Z'));
+
+    googleStopFails = false;
+    vi.setSystemTime(new Date('2026-05-01T10:03:00.000Z'));
+    await controlPlaneNamespace.triggerAlarm('control-plane');
+
+    expect(stoppedChannels).toEqual(['channel-sheet-1', 'channel-sheet-1', 'channel-sheet-1']);
+    expect(controlPlaneNamespace.getAlarm('control-plane')).toBeNull();
+  });
+
+  it('deletes a project while other projects share a spreadsheet under conflicting credential refs', async () => {
+    vi.stubGlobal('fetch', createSheetsAndDriveFetch({ rows: [['_id']] }));
+    const { env } = createTestEnv();
+    const controlPlane = env.CONTROL_PLANE_DO.get(env.CONTROL_PLANE_DO.idFromName('control-plane'));
+    // Registries written before credential refs were checked at project creation can hold such a pair.
+    for (const [slug, googleCredentialRef] of [['alpha', 'default'], ['beta', 'other']]) {
+      await doRpc<ControlPlaneDoResponse>(controlPlane, {
+        type: 'control.project.upsert',
+        summary: {
+          slug,
+          name: slug,
+          spreadsheetId: 'sheet-1',
+          googleCredentialRef,
+          tableCount: 0,
+          updatedAt: '2026-05-01T00:00:00.000Z'
+        }
+      });
+    }
+    const gamma = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:gamma'));
+    await doRpc<ProjectDoResponse>(gamma, {
+      type: 'project.create',
+      input: { slug: 'gamma', name: 'Gamma', spreadsheetId: 'sheet-2' }
+    });
+
+    await expect(doRpc<ProjectDoResponse>(gamma, { type: 'project.delete', projectSlug: 'gamma' }))
+      .resolves.toMatchObject({ type: 'project.delete.result' });
+    await expect(doRpc<ProjectDoResponse>(gamma, { type: 'project.delete', projectSlug: 'gamma' }))
+      .resolves.toMatchObject({ type: 'project.delete.result' });
+
+    expect(expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(controlPlane, { type: 'control.projects.list' }),
+      'control.projects.list.result'
+    ).data.map((project) => project.slug).sort()).toEqual(['alpha', 'beta']);
   });
 });
 
