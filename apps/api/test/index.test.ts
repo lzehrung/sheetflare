@@ -1181,7 +1181,7 @@ describe('api routes', () => {
 
   it('reports internal readiness separately from liveness', async () => {
     const app = createApp();
-    const response = await app.request('/ready', {}, createEnv());
+    const response = await app.request('/ready', { headers: { authorization: 'Bearer secret' } }, createEnv());
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
@@ -1270,7 +1270,7 @@ describe('api routes', () => {
 
   it('treats the checked-in placeholder GOOGLE_CLIENT_EMAIL as not configured in /ready', async () => {
     const app = createApp();
-    const response = await app.request('/ready', {}, createEnv({
+    const response = await app.request('/ready', { headers: { authorization: 'Bearer secret' } }, createEnv({
       googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com'
     }));
 
@@ -1296,7 +1296,7 @@ describe('api routes', () => {
 
   it('treats named Google credentials as a healthy readiness source when the default credential is absent', async () => {
     const app = createApp();
-    const response = await app.request('/ready', {}, createEnv({
+    const response = await app.request('/ready', { headers: { authorization: 'Bearer secret' } }, createEnv({
       googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
       googlePrivateKey: '',
       googleCredentialsJson: JSON.stringify({
@@ -1329,7 +1329,7 @@ describe('api routes', () => {
 
   it('accepts documented named Google credential field names in /ready', async () => {
     const app = createApp();
-    const response = await app.request('/ready', {}, createEnv({
+    const response = await app.request('/ready', { headers: { authorization: 'Bearer secret' } }, createEnv({
       googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
       googlePrivateKey: '',
       googleCredentialsJson: JSON.stringify({
@@ -1352,7 +1352,7 @@ describe('api routes', () => {
 
   it('reports invalid named Google credentials distinctly in /ready', async () => {
     const app = createApp();
-    const response = await app.request('/ready', {}, createEnv({
+    const response = await app.request('/ready', { headers: { authorization: 'Bearer secret' } }, createEnv({
       googleClientEmail: 'service-account@your-gcp-project.iam.gserviceaccount.com',
       googlePrivateKey: '',
       googleCredentialsJson: '{"prod":{"client_email":"service@example.com"}}'
@@ -3148,7 +3148,7 @@ describe('hosted admin UI', () => {
     expect(await adminResponse.json()).toMatchObject({ error: { code: 'SERVICE_UNAVAILABLE' } });
     expect(assetPaths).toEqual([]);
 
-    const readyResponse = await app.request('/ready', {}, env);
+    const readyResponse = await app.request('/ready', { headers: { authorization: 'Bearer secret' } }, env);
     const ready = z.object({ ok: z.boolean(), checks: z.object({ adminUi: z.string() }), notes: z.array(z.string()) }).parse(await readyResponse.json());
     expect(ready.ok).toBe(true);
     expect(ready.checks.adminUi).toBe(status);
@@ -3157,7 +3157,7 @@ describe('hosted admin UI', () => {
 
   it('reports an enabled admin UI in readiness', async () => {
     const { env } = createAdminEnv('enabled');
-    const response = await createApp().request('/ready', {}, env);
+    const response = await createApp().request('/ready', { headers: { authorization: 'Bearer secret' } }, env);
 
     expect(await response.json()).toMatchObject({ checks: { adminUi: 'enabled' } });
   });

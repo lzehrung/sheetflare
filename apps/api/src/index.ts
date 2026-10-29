@@ -109,9 +109,12 @@ const healthResponseSchema = z.object({
   service: z.string()
 });
 
-const readyResponseSchema = z.object({
+const readySummarySchema = z.object({
   ok: z.boolean(),
-  service: z.string(),
+  service: z.string()
+});
+
+const readyResponseSchema = readySummarySchema.extend({
   checks: z.object({
     controlPlane: z.literal('ok'),
     rateLimit: z.literal('ok'),
@@ -308,6 +311,11 @@ const principalCacheTtlMs = 10_000;
 const maxPrincipalCacheEntries = 10_000;
 type CachedPrincipal = { record: ApiKeyPrincipal | null; expiresAtMs: number };
 const principalCache = new Map<string, CachedPrincipal>();
+// /ready would otherwise cost a control plane call per request, so each isolate probes it once per window and reports
+// the same outcome, failure included, until the window ends.
+const readinessProbeTtlMs = 10_000;
+type ReadinessProbe = { outcome: { ok: true } | { ok: false; error: unknown }; expiresAtMs: number };
+let readinessProbe: ReadinessProbe | null = null;
 const corsAllowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
 const corsAllowedHeaders = 'Authorization, Content-Type';
 const cacheStatusHeaderName = 'x-sheetflare-cache-status';
@@ -482,7 +490,7 @@ function getRateLimitPrincipal(c: { req: { header(name: string): string | undefi
 }
 
 function getRateLimitRouteFamily(path: string) {
-  if (path.startsWith('/v1/system/')) {
+  if (path.startsWith('/v1/system/') || path === '/ready') {
     return 'system';
   }
 
@@ -561,6 +569,10 @@ function getRateLimitOperationKey(
 
   if (path === '/v1/system/google/drive/notifications' && normalizedMethod === 'POST') {
     return 'system.google.drive.notifications';
+  }
+
+  if (path === '/ready' && normalizedMethod === 'GET') {
+    return 'system.ready';
   }
 
   if (path.startsWith('/v1/admin/keys/') && normalizedMethod === 'DELETE') {
@@ -769,6 +781,33 @@ async function enforceVerifiedApiKeyRateLimit(c: AppContext, apiKeyId: string) {
       windowSeconds: config.windowSeconds,
       resetAtMs: result.resetAtMs
     });
+  }
+}
+
+// A primary-key lookup of an id that never exists: it proves the control plane answers without scanning the registry
+// or writing anything.
+async function probeControlPlane(env: Env): Promise<ReadinessProbe['outcome']> {
+  try {
+    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(env), {
+      type: 'control.api-key.get',
+      apiKeyId: 'readiness-probe'
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+async function assertControlPlaneReachable(env: Env) {
+  const nowMs = Date.now();
+  let probe = readinessProbe;
+  if (probe === null || probe.expiresAtMs <= nowMs) {
+    probe = { outcome: await probeControlPlane(env), expiresAtMs: nowMs + readinessProbeTtlMs };
+    readinessProbe = probe;
+  }
+
+  if (!probe.outcome.ok) {
+    throw probe.outcome.error;
   }
 }
 
@@ -1243,15 +1282,17 @@ const readyRoute = createRoute({
   method: 'get',
   path: '/ready',
   tags: ['System'],
+  security: optionalBearerSecurity,
   responses: {
     200: {
-      description: 'Readiness check',
-      content: jsonContent(readyResponseSchema)
+      description: 'Ready. Anonymous callers receive only `ok` and `service`; a global admin credential also receives the checks and notes.',
+      content: jsonContent(z.union([readyResponseSchema, readySummarySchema]))
     },
     503: {
-      description: 'Readiness check failed',
-      content: jsonContent(readyResponseSchema)
-    }
+      description: 'Not ready. Same shape as the 200 response.',
+      content: jsonContent(z.union([readyResponseSchema, readySummarySchema]))
+    },
+    ...protectedRouteErrorResponses
   }
 });
 
@@ -2327,6 +2368,12 @@ function createApp() {
     await next();
   });
 
+  // Readiness is public, so it sits behind the same per-client limiter as the API.
+  app.use('/ready', async (c, next) => {
+    await enforceRateLimit(c);
+    await next();
+  });
+
   app.onError((error, c) => {
     const normalizedError = normalizeRequestError(error);
     const rateLimitContext = c.get('rateLimitContext');
@@ -2380,19 +2427,21 @@ function createApp() {
   );
 
   app.openapi(readyRoute, async (c) => {
-    await doRpc<ControlPlaneDoResponse>(getControlPlaneStub(c.env), {
-      type: 'control.projects.list'
-    });
-    await doRpc<RateLimitDoResponse>(getRateLimitStub(c.env, 'ready:system'), {
-      type: 'rate-limit.check',
-      key: c.get('requestId'),
-      limit: 1,
-      windowSeconds: 1
-    });
+    // Anonymous callers learn only whether the service is ready. Configuration state needs a global admin credential.
+    const auth = await authenticateRequest(c);
+    if (auth.kind !== 'anonymous') {
+      assertGlobalAdminScope(auth, 'admin:projects');
+    }
+    await assertControlPlaneReachable(c.env);
 
     const hasDefaultGoogleCredential = hasConfiguredDefaultGoogleCredential(c.env);
     const namedGoogleCredentials = getNamedGoogleCredentialsStatus(c.env);
     const hasAnyGoogleCredential = hasDefaultGoogleCredential || namedGoogleCredentials === 'configured';
+    const status = hasAnyGoogleCredential ? 200 : 503;
+    if (auth.kind === 'anonymous') {
+      return c.json({ ok: hasAnyGoogleCredential, service: 'sheetflare-api' }, status);
+    }
+
     const hasDriveWebhookSecret = Boolean(c.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim());
     const hasBootstrapAdmin = Boolean(c.env.ADMIN_BEARER_TOKEN?.trim());
     const adminUi = getAdminUiStatus(c.env);
@@ -2435,7 +2484,7 @@ function createApp() {
         adminUi
       },
       notes
-    }, hasAnyGoogleCredential ? 200 : 503);
+    }, status);
   });
 
   app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', {
@@ -2974,6 +3023,7 @@ const app = createApp();
 function resetGatewayStateForTests() {
   recentApiKeyTouches.clear();
   principalCache.clear();
+  readinessProbe = null;
 }
 
 function getRecentApiKeyTouchCacheSizeForTests() {
