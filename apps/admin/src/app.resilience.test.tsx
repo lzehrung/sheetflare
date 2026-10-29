@@ -81,6 +81,22 @@ describe('App review regressions', () => {
       expect(screen.getByText('Creating projects requires a global admin key.')).toBeTruthy();
     });
 
+    it('offers the project slug entry when the Worker answers 403 FORBIDDEN for a valid non-global key', async () => {
+      stubFetch((input, init) => {
+        const key = requestKey(input, init);
+        if (key === 'GET /v1/admin/projects') {
+          return createWorkerError(403, 'FORBIDDEN', 'This operation requires a global admin key.');
+        }
+        throw new Error(`Unexpected request: ${key}`);
+      });
+
+      render(<App />);
+      signIn('sfk_demo.secret');
+
+      await screen.findByLabelText('Project slug');
+      expect(screen.getByText('Project key')).toBeTruthy();
+    });
+
     it('reports a project outside the key scope without leaving the slug prompt', async () => {
       const worker = createScopedWorker();
       stubFetch(worker.fetch);
