@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BadRequestError, NotFoundError } from '@sheetflare/contracts';
+import { NotFoundError, ServiceUnavailableError } from '@sheetflare/contracts';
 import { defaultGoogleCredentialRef, resolveGoogleCredential, type CloudflareEnv } from '../src';
 
 function createEnv(overrides?: Partial<CloudflareEnv>): CloudflareEnv {
@@ -58,14 +58,33 @@ describe('resolveGoogleCredential', () => {
     expect(() => resolveGoogleCredential(createEnv(), 'missing')).toThrowError(NotFoundError);
   });
 
-  it('fails clearly when the default credential is missing required secrets', () => {
-    expect(() =>
-      resolveGoogleCredential(
-        createEnv({
-          GOOGLE_PRIVATE_KEY: undefined
-        }),
-        defaultGoogleCredentialRef
-      )
-    ).toThrowError(BadRequestError);
+  it('reports a missing default Google credential as a configuration error', () => {
+    const clientEmail = 'default-service-account@example.com';
+    const privateKeys = [undefined, '   '] as const;
+
+    for (const privateKey of privateKeys) {
+      let caught: unknown;
+      try {
+        resolveGoogleCredential(
+          createEnv({
+            GOOGLE_CLIENT_EMAIL: clientEmail,
+            GOOGLE_PRIVATE_KEY: privateKey
+          }),
+          defaultGoogleCredentialRef
+        );
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(ServiceUnavailableError);
+      if (!(caught instanceof ServiceUnavailableError)) {
+        continue;
+      }
+
+      expect(caught.status).toBe(503);
+      expect(caught.code).toBe('SERVICE_UNAVAILABLE');
+      expect(caught.message).not.toContain(clientEmail);
+      expect(caught.message).not.toContain('privateKey');
+    }
   });
 });

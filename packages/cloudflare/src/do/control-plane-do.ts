@@ -113,6 +113,7 @@ const reindexRetryMaxMs = 60 * 60 * 1000;
 const unexpectedReindexErrorMessage = 'Reindex failed unexpectedly. See the drive.reindex.failed log event for details.';
 const unexpectedWatchErrorMessage = 'Watch renewal failed unexpectedly. See the drive.watch.renew.failed log event for details.';
 const driveWatchQuotaErrorMessage = 'Google Drive rate limit exceeded for creating file subscriptions.';
+const credentialConflictChannelPrefix = 'credential-conflict:';
 
 // GoogleSheetsService sets this flag and omits Google's message. Detection uses only the flag.
 const driveWatchQuotaErrorDetailsSchema = z.object({
@@ -605,8 +606,24 @@ export class ControlPlaneDO {
     await this.removeObsoleteSpreadsheetWatches();
 
     for (const registration of registrations) {
+      if (registration.conflictingGoogleCredentialRefs) {
+        results.push(this.recordSpreadsheetCredentialConflict(
+          registration.spreadsheetId,
+          registration.conflictingGoogleCredentialRefs,
+          registration.projectSlugs,
+          webhookUrl,
+          debounceSeconds
+        ));
+        continue;
+      }
+
+      const googleCredentialRef = registration.googleCredentialRef;
+      if (!googleCredentialRef) {
+        continue;
+      }
+
       const existing = existingWatches.get(registration.spreadsheetId) ?? null;
-      const createdWatch = await this.createSpreadsheetWatch(registration.spreadsheetId, registration.googleCredentialRef, {
+      const createdWatch = await this.createSpreadsheetWatch(registration.spreadsheetId, googleCredentialRef, {
         webhookUrl,
         token: webhookToken,
         expirationMs
@@ -635,7 +652,7 @@ export class ControlPlaneDO {
           updated_at = excluded.updated_at
         `,
         registration.spreadsheetId,
-        registration.googleCredentialRef,
+        googleCredentialRef,
         watch.channelId,
         watch.resourceId,
         watch.resourceUri,
@@ -812,33 +829,112 @@ export class ControlPlaneDO {
       `
     );
 
-    const grouped = new Map<string, { googleCredentialRef: string; projectSlugs: string[] }>();
+    const grouped = new Map<string, { credentialRefs: string[]; projectSlugs: string[] }>();
     for (const row of rows) {
       const existing = grouped.get(row.spreadsheet_id);
       if (!existing) {
         grouped.set(row.spreadsheet_id, {
-          googleCredentialRef: row.google_credential_ref,
+          credentialRefs: [row.google_credential_ref],
           projectSlugs: [row.slug]
         });
         continue;
       }
 
-      if (existing.googleCredentialRef !== row.google_credential_ref) {
-        throw new ServiceUnavailableError(`Spreadsheet ${row.spreadsheet_id} is registered with conflicting Google credential refs.`, {
-          spreadsheetId: row.spreadsheet_id,
-          firstGoogleCredentialRef: existing.googleCredentialRef,
-          conflictingGoogleCredentialRef: row.google_credential_ref
-        });
+      if (!existing.credentialRefs.includes(row.google_credential_ref)) {
+        existing.credentialRefs.push(row.google_credential_ref);
       }
-
       existing.projectSlugs.push(row.slug);
     }
 
-    return [...grouped.entries()].map(([spreadsheetId, value]) => ({
+    return [...grouped.entries()].map(([spreadsheetId, value]) => {
+      if (value.credentialRefs.length > 1) {
+        return {
+          spreadsheetId,
+          googleCredentialRef: null,
+          conflictingGoogleCredentialRefs: [...value.credentialRefs].sort((left, right) => left.localeCompare(right)),
+          projectSlugs: value.projectSlugs
+        };
+      }
+
+      return {
+        spreadsheetId,
+        googleCredentialRef: value.credentialRefs[0] ?? null,
+        conflictingGoogleCredentialRefs: null,
+        projectSlugs: value.projectSlugs
+      };
+    });
+  }
+
+  private listSpreadsheetCredentialRefs(spreadsheetId: string) {
+    return this.selectRows<{ google_credential_ref: string }>(
+      `
+      SELECT DISTINCT google_credential_ref
+      FROM project_registry
+      WHERE spreadsheet_id = ?
+      ORDER BY google_credential_ref ASC
+      `,
+      spreadsheetId
+    ).map((row) => row.google_credential_ref)
+      .sort((left, right) => left.localeCompare(right));
+  }
+
+  // A legacy registry can share one spreadsheet across credential refs. That spreadsheet cannot choose a channel
+  // credential, so its watch status records the refs and every other spreadsheet continues.
+  private recordSpreadsheetCredentialConflict(
+    spreadsheetId: string,
+    googleCredentialRefs: string[],
+    projectSlugs: string[],
+    webhookUrl: string,
+    debounceSeconds: number
+  ) {
+    const message = describeCredentialRefConflict(spreadsheetId, googleCredentialRefs);
+    const now = new Date().toISOString();
+    const existing = this.getSpreadsheetWatch(spreadsheetId);
+    if (existing) {
+      this.ctx.storage.sql.exec(
+        `
+        UPDATE spreadsheet_watches
+        SET last_watch_error = ?, updated_at = ?
+        WHERE spreadsheet_id = ?
+        `,
+        message,
+        now,
+        spreadsheetId
+      );
+    } else {
+      const googleCredentialRef = googleCredentialRefs[0];
+      if (!googleCredentialRef) {
+        throw new ServiceUnavailableError(message);
+      }
+
+      const channelId = `${credentialConflictChannelPrefix}${spreadsheetId}`;
+      this.ctx.storage.sql.exec(
+        `
+        INSERT INTO spreadsheet_watches (
+          spreadsheet_id, google_credential_ref, channel_id, resource_id, resource_uri, expiration_at, debounce_seconds,
+          webhook_url, expiration_duration_ms, last_message_number, last_watch_error,
+          last_notification_at, pending_changed_at, debounce_until, last_reindex_started_at, last_reindex_completed_at, last_reindex_error, updated_at
+        ) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?)
+        `,
+        spreadsheetId,
+        googleCredentialRef,
+        channelId,
+        channelId,
+        debounceSeconds,
+        webhookUrl,
+        message,
+        now
+      );
+    }
+
+    console.error(JSON.stringify({
+      event: 'drive.watch.credential-conflict',
       spreadsheetId,
-      googleCredentialRef: value.googleCredentialRef,
-      projectSlugs: value.projectSlugs
+      googleCredentialRefs,
+      lastWatchError: message
     }));
+
+    return this.mapSpreadsheetWatch(this.requireSpreadsheetWatch(spreadsheetId), projectSlugs);
   }
 
   private getSpreadsheetWatch(spreadsheetId: string) {
@@ -915,6 +1011,10 @@ export class ControlPlaneDO {
   }
 
   private async stopExistingSpreadsheetWatch(watch: Pick<SpreadsheetWatchRow, 'google_credential_ref' | 'channel_id' | 'resource_id'>) {
+    if (isCredentialConflictPlaceholder(watch.channel_id)) {
+      return;
+    }
+
     try {
       await this.getSheetsClient(watch.google_credential_ref).stopDriveChannel(watch.channel_id, watch.resource_id);
     } catch (error) {
@@ -945,6 +1045,11 @@ export class ControlPlaneDO {
   // that retired it. The stop is queued before it is attempted and retried from the alarm until Google accepts it or
   // the channel expires on its own.
   private async stopRetiredWatchChannel(watch: SpreadsheetWatchRow) {
+    // Conflict rows are local status, not Google channels. Stopping them would retry forever: they have no expiration.
+    if (isCredentialConflictPlaceholder(watch.channel_id)) {
+      return;
+    }
+
     const pendingStop: PendingWatchStopRow = {
       channel_id: watch.channel_id,
       resource_id: watch.resource_id,
@@ -1076,6 +1181,13 @@ export class ControlPlaneDO {
   }
 
   private async renewSpreadsheetWatch(watch: SpreadsheetWatchRow) {
+    const credentialRefs = this.listSpreadsheetCredentialRefs(watch.spreadsheet_id);
+    if (credentialRefs.length > 1) {
+      this.recordWatchRenewalFailure(watch, describeCredentialRefConflict(watch.spreadsheet_id, credentialRefs), null);
+      return;
+    }
+
+    const googleCredentialRef = credentialRefs[0] ?? watch.google_credential_ref;
     const webhookToken = this.env.GOOGLE_DRIVE_WEBHOOK_SECRET?.trim();
     if (!watch.webhook_url?.trim()) {
       this.recordWatchRenewalFailure(watch, 'Spreadsheet watch is missing its stored webhook URL.', null);
@@ -1091,7 +1203,7 @@ export class ControlPlaneDO {
     const durationMs = this.getWatchDurationMs(watch);
 
     try {
-      const renewedWatch = await this.getSheetsClient(watch.google_credential_ref).watchSpreadsheetFile(
+      const renewedWatch = await this.getSheetsClient(googleCredentialRef).watchSpreadsheetFile(
         watch.spreadsheet_id,
         {
           webhookUrl: watch.webhook_url,
@@ -1104,7 +1216,8 @@ export class ControlPlaneDO {
       this.ctx.storage.sql.exec(
         `
         UPDATE spreadsheet_watches
-        SET channel_id = ?,
+        SET google_credential_ref = ?,
+            channel_id = ?,
             resource_id = ?,
             resource_uri = ?,
             expiration_at = ?,
@@ -1114,6 +1227,7 @@ export class ControlPlaneDO {
             updated_at = ?
         WHERE spreadsheet_id = ?
         `,
+        googleCredentialRef,
         renewedWatch.channelId,
         renewedWatch.resourceId,
         renewedWatch.resourceUri,
@@ -1623,8 +1737,26 @@ function getWatchRenewRetryDelayMs(lastWatchError: string | null) {
 }
 
 function isNonRetriableWatchConfigurationError(lastWatchError: string | null) {
+  if (!lastWatchError) {
+    return false;
+  }
+
   return lastWatchError === 'Spreadsheet watch is missing its stored webhook URL.'
-    || lastWatchError === 'GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.';
+    || lastWatchError === 'GOOGLE_DRIVE_WEBHOOK_SECRET is not configured.'
+    || isCredentialRefConflictMessage(lastWatchError);
+}
+
+function isCredentialRefConflictMessage(lastWatchError: string) {
+  return lastWatchError.includes('conflicting Google credential refs');
+}
+
+function describeCredentialRefConflict(spreadsheetId: string, googleCredentialRefs: readonly string[]) {
+  const listedRefs = googleCredentialRefs.map((ref) => `"${ref}"`).join(', ');
+  return `Spreadsheet ${spreadsheetId} is registered with conflicting Google credential refs ${listedRefs}. Projects that share a spreadsheet must use the same credential ref.`;
+}
+
+function isCredentialConflictPlaceholder(channelId: string) {
+  return channelId.startsWith(credentialConflictChannelPrefix);
 }
 
 function isDriveWatchSubscriptionQuotaError(error: unknown) {
