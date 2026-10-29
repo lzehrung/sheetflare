@@ -1276,24 +1276,31 @@ async function lookupTableForCaller(
 // Table reads wait on the caller's rate limit and on the table lookup. Neither depends on the other, so once the
 // caller is known both run together, and the generation lookup rides along with the table lookup instead of queueing
 // behind the rate limit. Whether a key scoped to another project may read is decided from the project the lookup
-// returns: a public-read project allows it as an anonymous caller, and anything else is 403. Writes and admin routes
-// never come here, so they keep rejecting that key with 403.
+// returns: a public-read project allows it as an anonymous caller, and anything else is 403. A missing project or
+// table is that same 403, so the key cannot tell them from a private table. Any other lookup failure is returned
+// unchanged. Writes and admin routes never come here, so they keep rejecting that key with 403.
 async function authorizeTableRead(c: AppContext, projectSlug: string, tableSlug: string): Promise<TableReadTarget> {
   const auth = await identifyCaller(c);
 
   const lookup = settle(lookupTableForCaller(c, auth, projectSlug, tableSlug));
   await completeAuthentication(c, auth);
   const looked = await lookup;
+  const crossesProject = keyCrossesProjectBoundary(auth, projectSlug);
 
   if (looked.ok) {
     if (looked.value.readable) {
       return looked.value.target;
     }
-    if (keyCrossesProjectBoundary(auth, projectSlug)) {
-      throw new ForbiddenError(wrongProjectMessage);
+  } else if (crossesProject) {
+    if (!isNotFound(looked.reason)) {
+      throw looked.reason;
     }
   } else if (grantsTableRead(auth) || !isNotFound(looked.reason)) {
     throw looked.reason;
+  }
+
+  if (crossesProject) {
+    throw new ForbiddenError(wrongProjectMessage);
   }
 
   // Callers without a read grant may only read public-read projects. Private projects, missing projects, and missing
