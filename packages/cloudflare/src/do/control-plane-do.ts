@@ -12,6 +12,7 @@ import type {
   ControlPlaneDoResponse,
   ProjectDoResponse,
   ProjectSummary,
+  SpreadsheetWatchNotifyResult,
   TableConfig,
   TableDoResponse,
   TableRequestContext
@@ -704,7 +705,7 @@ export class ControlPlaneDO {
     messageNumber: string | null,
     changedAt: string,
     channelExpiration: string | null
-  ) {
+  ): Promise<SpreadsheetWatchNotifyResult> {
     const watch = this.selectOptionalRow<SpreadsheetWatchRow>(
       `SELECT * FROM spreadsheet_watches WHERE channel_id = ?`,
       channelId
@@ -725,15 +726,20 @@ export class ControlPlaneDO {
       return {
         accepted: false,
         spreadsheetId: null,
-        debounceUntil: null
+        debounceUntil: null,
+        changed: false,
+        projectSlugs: []
       };
     }
 
+    const projectSlugs = this.getProjectSlugsForSpreadsheet(watch.spreadsheet_id);
     if (this.shouldIgnoreNotification(watch, messageNumber)) {
       return {
         accepted: true,
         spreadsheetId: watch.spreadsheet_id,
-        debounceUntil: watch.debounce_until
+        debounceUntil: watch.debounce_until,
+        changed: false,
+        projectSlugs
       };
     }
 
@@ -759,7 +765,9 @@ export class ControlPlaneDO {
       return {
         accepted: true,
         spreadsheetId: watch.spreadsheet_id,
-        debounceUntil: null
+        debounceUntil: null,
+        changed: false,
+        projectSlugs
       };
     }
 
@@ -791,7 +799,9 @@ export class ControlPlaneDO {
     return {
       accepted: true,
       spreadsheetId: watch.spreadsheet_id,
-      debounceUntil
+      debounceUntil,
+      changed: true,
+      projectSlugs
     };
   }
 

@@ -951,13 +951,12 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       }
     );
 
-    expect((notifyResponse as {
-      type: 'control.spreadsheet-watch.notify.result';
-      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
-    }).result).toEqual({
+    expect(expectRpcResult(notifyResponse, 'control.spreadsheet-watch.notify.result')).toEqual({
       accepted: true,
       spreadsheetId: 'sheet-1',
-      debounceUntil: '2026-04-29T15:01:30.000Z'
+      debounceUntil: '2026-04-29T15:01:30.000Z',
+      changed: true,
+      projectSlugs: ['demo']
     });
 
     const duplicateResponse = await doRpc<ControlPlaneDoResponse>(
@@ -973,13 +972,12 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       }
     );
 
-    expect((duplicateResponse as {
-      type: 'control.spreadsheet-watch.notify.result';
-      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
-    }).result).toEqual({
+    expect(expectRpcResult(duplicateResponse, 'control.spreadsheet-watch.notify.result')).toEqual({
       accepted: true,
       spreadsheetId: 'sheet-1',
-      debounceUntil: '2026-04-29T15:01:30.000Z'
+      debounceUntil: '2026-04-29T15:01:30.000Z',
+      changed: false,
+      projectSlugs: ['demo']
     });
 
     const cacheAfterNotify = await doRpc<TableDoResponse>(
@@ -1120,13 +1118,12 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       channelExpiration: 'Fri, 01 May 2026 00:00:00 GMT'
     });
 
-    expect((nullMessageResponse as {
-      type: 'control.spreadsheet-watch.notify.result';
-      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
-    }).result).toEqual({
+    expect(expectRpcResult(nullMessageResponse, 'control.spreadsheet-watch.notify.result')).toEqual({
       accepted: true,
       spreadsheetId: 'sheet-1',
-      debounceUntil: '2026-04-29T15:01:40.000Z'
+      debounceUntil: '2026-04-29T15:01:40.000Z',
+      changed: true,
+      projectSlugs: ['demo']
     });
 
     const duplicateResponse = await doRpc<ControlPlaneDoResponse>(controlPlane, {
@@ -1139,13 +1136,12 @@ describe('ControlPlaneDO Drive watch orchestration', () => {
       channelExpiration: 'Fri, 01 May 2026 00:00:00 GMT'
     });
 
-    expect((duplicateResponse as {
-      type: 'control.spreadsheet-watch.notify.result';
-      result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null };
-    }).result).toEqual({
+    expect(expectRpcResult(duplicateResponse, 'control.spreadsheet-watch.notify.result')).toEqual({
       accepted: true,
       spreadsheetId: 'sheet-1',
-      debounceUntil: '2026-04-29T15:01:40.000Z'
+      debounceUntil: '2026-04-29T15:01:40.000Z',
+      changed: false,
+      projectSlugs: ['demo']
     });
 
     vi.useRealTimers();
@@ -2159,6 +2155,61 @@ describe('ControlPlaneDO Drive reindex', () => {
         errorCode: 'BAD_GATEWAY'
       })
     ]);
+  });
+
+  it('reports whether a notification changed anything and which projects share the spreadsheet', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-29T10:00:00.000Z'));
+    vi.stubGlobal('fetch', createSheetsAndDriveFetch({ rows: [['_id', 'status'], ['row-1', 'v1']] }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { env } = createTestEnv();
+    await createWatchedTables(env, [
+      { projectSlug: 'demo', tableSlug: 'users' },
+      { projectSlug: 'prod', tableSlug: 'members' }
+    ]);
+    const notify = async (resourceState: string, messageNumber: string, channelId = 'channel-sheet-1') => expectRpcResult(
+      await doRpc<ControlPlaneDoResponse>(getControlPlane(env), {
+        type: 'control.spreadsheet-watch.notify',
+        channelId,
+        resourceId: 'resource-sheet-1',
+        resourceState,
+        messageNumber,
+        changedAt: new Date().toISOString(),
+        channelExpiration: null
+      }),
+      'control.spreadsheet-watch.notify.result'
+    );
+
+    expect(await notify('sync', '1')).toEqual({
+      accepted: true,
+      spreadsheetId: 'sheet-1',
+      debounceUntil: null,
+      changed: false,
+      projectSlugs: ['demo', 'prod']
+    });
+    expect(await notify('update', '2')).toEqual({
+      accepted: true,
+      spreadsheetId: 'sheet-1',
+      debounceUntil: '2026-04-29T10:00:30.000Z',
+      changed: true,
+      projectSlugs: ['demo', 'prod']
+    });
+    vi.setSystemTime(new Date('2026-04-29T10:00:05.000Z'));
+    expect(await notify('update', '2')).toEqual({
+      accepted: true,
+      spreadsheetId: 'sheet-1',
+      debounceUntil: '2026-04-29T10:00:30.000Z',
+      changed: false,
+      projectSlugs: ['demo', 'prod']
+    });
+    expect(await notify('update', '1')).toMatchObject({ accepted: true, changed: false });
+    expect(await notify('update', '3', 'channel-unknown')).toEqual({
+      accepted: false,
+      spreadsheetId: null,
+      debounceUntil: null,
+      changed: false,
+      projectSlugs: []
+    });
   });
 
   it('logs notifications for unknown channels or resources as drive.notification.rejected', async () => {

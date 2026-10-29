@@ -291,6 +291,19 @@ export const rateLimitDoRequestSchema = z.discriminatedUnion('type', [
 
 export type ControlPlaneDoRequest = z.infer<typeof controlPlaneDoRequestSchema>;
 
+// Result of control.spreadsheet-watch.notify. `changed` is true only when the notification recorded a new content
+// change; sync messages and duplicate, replayed or out-of-order message numbers report false. `projectSlugs` lists the
+// projects registered on the notified spreadsheet and is empty when the notification was not accepted.
+export const spreadsheetWatchNotifyResultSchema = z.object({
+  accepted: z.boolean(),
+  spreadsheetId: z.string().min(1).nullable(),
+  debounceUntil: z.string().datetime().nullable(),
+  changed: z.boolean(),
+  projectSlugs: z.array(projectSlugSchema)
+});
+
+export type SpreadsheetWatchNotifyResult = z.infer<typeof spreadsheetWatchNotifyResultSchema>;
+
 export type ControlPlaneDoResponse =
   | { type: 'control.projects.list.result'; result: AdminListProjectsResult }
   | { type: 'control.project.upsert.result'; result: { ok: true } }
@@ -300,7 +313,7 @@ export type ControlPlaneDoResponse =
   | { type: 'control.spreadsheet-watches.retry-advice.list.result'; result: AdminListSpreadsheetWatchRetryAdviceResult }
   | { type: 'control.spreadsheet-watches.register.result'; result: AdminRegisterSpreadsheetWatchesResult }
   | { type: 'control.spreadsheet-watches.stop.result'; result: AdminRegisterSpreadsheetWatchesResult }
-  | { type: 'control.spreadsheet-watch.notify.result'; result: { accepted: boolean; spreadsheetId: string | null; debounceUntil: string | null } }
+  | { type: 'control.spreadsheet-watch.notify.result'; result: SpreadsheetWatchNotifyResult }
   | { type: 'control.api-key.create.result'; result: AdminCreateApiKeyResult }
   | { type: 'control.api-keys.list.result'; result: AdminListApiKeysResult }
   | { type: 'control.api-key.get.result'; result: { record: ApiKeyPrincipal | null } }
