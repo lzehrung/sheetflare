@@ -9,10 +9,12 @@ export type RateLimitPressureAssessment = {
 };
 
 /**
- * The Worker keys rate limits by the `cf-connecting-ip` header (or a shared `bootstrap-admin`
- * principal for the bootstrap token). It ignores `x-forwarded-for`, and API keys do not get
- * their own bucket, so a single load runner cannot synthesize separate principals. This scenario
- * therefore only measures pressure on one principal and says so in the report.
+ * Every request counts against a client bucket keyed by the `cf-connecting-ip` header
+ * (`x-forwarded-for` is ignored), or a shared `bootstrap-admin` bucket for the bootstrap token.
+ * A request with a valid API key also counts against that key's own `api-key:<id>` bucket, and
+ * the first 429 comes from whichever bucket runs out first. One load runner shares one client
+ * bucket, so it cannot show isolation between clients. This scenario therefore only measures
+ * pressure on one principal and says so in the report.
  */
 export function assessRateLimitPressure(attempts: readonly RateLimitPressureAttempt[]): RateLimitPressureAssessment {
   const firstLimitedIndex = attempts.findIndex((attempt) => attempt.status === 429);
