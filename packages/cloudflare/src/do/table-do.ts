@@ -274,6 +274,10 @@ function getProjectStub(env: CloudflareEnv, projectSlug: string) {
 export class TableDO {
   private readonly sheetsByCredentialRef = new Map<string, GoogleSheetsService>();
   private activeSync: ActiveSync | null = null;
+  // Row writes address Google rows by index and check uniqueness against the cache, so two that
+  // interleave can shift each other's target rows (a delete moves every row below it) or both pass
+  // a unique check. They run one at a time; reads and syncs are never queued behind them.
+  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -427,17 +431,17 @@ export class TableDO {
       case 'table.row.create':
         return {
           type: 'table.row.create.result',
-          result: await this.createRow(body.projectSlug, body.tableSlug, body.input.values, requestContext)
+          result: await this.runExclusiveWrite(() => this.createRow(body.projectSlug, body.tableSlug, body.input.values, requestContext))
         };
       case 'table.row.update':
         return {
           type: 'table.row.update.result',
-          result: await this.updateRow(body.projectSlug, body.tableSlug, body.rowId, body.input.values, requestContext)
+          result: await this.runExclusiveWrite(() => this.updateRow(body.projectSlug, body.tableSlug, body.rowId, body.input.values, requestContext))
         };
       case 'table.row.delete':
         return {
           type: 'table.row.delete.result',
-          result: await this.deleteRow(body.projectSlug, body.tableSlug, body.rowId, requestContext)
+          result: await this.runExclusiveWrite(() => this.deleteRow(body.projectSlug, body.tableSlug, body.rowId, requestContext))
         };
       case 'table.schema.get':
         return {
@@ -479,6 +483,12 @@ export class TableDO {
           result: await this.getDataGeneration(body.projectSlug, body.tableSlug, body.resolvedConfig)
         };
     }
+  }
+
+  private runExclusiveWrite<T>(write: () => Promise<T>): Promise<T> {
+    const result = this.writeQueue.then(write);
+    this.writeQueue = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   private async getTableConfig(

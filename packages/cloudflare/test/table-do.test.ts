@@ -5894,4 +5894,67 @@ describe('TableDO', () => {
     await expect(deleteUser(env, 'row-2')).rejects.toMatchObject({ name: 'ServiceUnavailableError' });
     expect((await listUsers(env)).data.map((row) => row.id)).toEqual(['row-1']);
   });
+
+  it('runs concurrent row writes one at a time so each lands on its own row', async () => {
+    const sheet: SheetState = {
+      rows: [
+        ['_id', 'name'],
+        ['row-1', 'a'],
+        ['row-2', 'b'],
+        ['row-3', 'c'],
+        ['row-4', 'd'],
+        ['row-5', 'e'],
+        ['row-6', 'f']
+      ],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, { cacheTtlSeconds: 3600 });
+    await listUsers(env);
+
+    // Writes address Google rows by index, so interleaved deletes would shift one another's targets.
+    await Promise.all([
+      deleteUser(env, 'row-2'),
+      deleteUser(env, 'row-3'),
+      updateUser(env, 'row-6', { name: 'F' }),
+      deleteUser(env, 'row-5')
+    ]);
+
+    expect(sheet.rows).toEqual([
+      ['_id', 'name'],
+      ['row-1', 'a'],
+      ['row-4', 'd'],
+      ['row-6', 'F']
+    ]);
+    expect((await listUsers(env)).data.map((row) => [row.id, row.rowNumber, row.values.name])).toEqual([
+      ['row-1', 2, 'a'],
+      ['row-4', 3, 'd'],
+      ['row-6', 4, 'F']
+    ]);
+  });
+
+  it('checks a unique field against the rows written by the create that ran before it', async () => {
+    const sheet: SheetState = {
+      rows: [['_id', 'email']],
+      requestedRanges: []
+    };
+    vi.stubGlobal('fetch', createSheetsFetch(sheet));
+    const env = createTestEnv();
+    await createUsersTable(env, {
+      indexedFields: ['email'],
+      cacheTtlSeconds: 3600,
+      fieldRules: { email: { unique: true } }
+    });
+    await listUsers(env);
+
+    const outcomes = await Promise.allSettled([
+      createUser(env, { email: 'ada@example.com' }),
+      createUser(env, { email: 'ada@example.com' })
+    ]);
+
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(['fulfilled', 'rejected']);
+    expect(outcomes[1]).toMatchObject({ reason: { name: 'ConflictError', message: 'email must be unique.' } });
+    expect(sheet.rows.filter((row) => row[1] === 'ada@example.com')).toHaveLength(1);
+  });
 });
