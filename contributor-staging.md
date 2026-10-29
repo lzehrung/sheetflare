@@ -71,10 +71,32 @@ Set these under **Settings > Secrets and variables > Actions > Repository secret
 | --- | --- |
 | `CLOUDFLARE_API_TOKEN` | A token scoped to the Cloudflare account with `Workers Scripts Write` ([deploy.md](./docs/deploy.md#github-actions-deployment)). |
 | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account ID that owns `sheetflare-staging-api`. |
-| `SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY` | The `private_key` value of a key for the staging service account. Create one with the manual flow in [google-service-accounts.md](./docs/google-service-accounts.md#create-a-dedicated-service-account), paste the PEM, and let the flow delete the local key file. Each Deploy Staging run writes it to the Worker as `GOOGLE_PRIVATE_KEY`. A key that `--apply-secrets --provision-google` creates is not in this secret, so the next Deploy Staging run replaces it. |
+| `SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY` | The `private_key` value of a key for the staging service account. Create it with [Create the staging Google key](#create-the-staging-google-key), which stores it here and on the Worker before deleting the local key file. Each Deploy Staging run writes it to the Worker as `GOOGLE_PRIVATE_KEY`. A key that `--apply-secrets --provision-google` creates is not in this secret, so the next Deploy Staging run replaces it. |
 | `SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN` | The staging `ADMIN_BEARER_TOKEN`: the bootstrap token from the `SAVE THESE CREDENTIALS NOW` block, or any long random string you also keep in the password manager. Each Deploy Staging run writes it to the Worker as `ADMIN_BEARER_TOKEN`, replacing the current value, so replace it whenever `--apply-secrets` mints a new token. |
 
 The workflow writes these two Worker secrets to a temporary secrets file that an `always()` step removes. The Cloudflare token and account ID are used only by Wrangler.
+
+### Create the staging Google key
+
+The local key file is deleted at the end, so the flow copies `private_key` into the GitHub secret first. It then applies the same key to the Worker, so both hold one key. Run it from the repository root with `gh` authenticated:
+
+```powershell
+$serviceAccountEmail = "sheetflare-staging@sheetflare-staging.iam.gserviceaccount.com"
+$keyPath = Join-Path $env:TEMP "sheetflare-staging-key.json"
+
+try {
+  gcloud iam service-accounts keys create $keyPath --iam-account=$serviceAccountEmail
+  (Get-Content -Raw -LiteralPath $keyPath | ConvertFrom-Json).private_key | gh secret set SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY
+  $env:GOOGLE_APPLICATION_CREDENTIALS = $keyPath
+  npm run setup:staging -- --apply-secrets
+}
+finally {
+  Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
+  Remove-Item Env:GOOGLE_APPLICATION_CREDENTIALS -ErrorAction SilentlyContinue
+}
+```
+
+`gh secret set` reads the value from standard input when `--body` is omitted. If setup fails, the local key file is already gone: rerun the whole block, which creates a new key and overwrites the GitHub secret, then revoke the unused key as described in [google-service-accounts.md](./docs/google-service-accounts.md#create-a-dedicated-service-account). `--apply-secrets` also mints a new bootstrap token; put it in `SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN` too.
 
 ### Keep the GitHub secrets and the Worker in sync
 
