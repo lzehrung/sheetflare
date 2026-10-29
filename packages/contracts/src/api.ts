@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { createApiKeyInputSchema, createApiKeyResultSchema, apiKeyPrincipalSchema } from './auth';
-import { defaultAuthModeSchema, fieldRulesSchema, maxIndexedFieldCount, projectConfigSchema, tableConfigSchema } from './project';
+import { cacheTtlSecondsSchema, defaultAuthModeSchema, fieldRulesSchema, maxIndexedFieldCount, projectConfigSchema, tableConfigSchema } from './project';
 import { apiKeyIdSchema, projectSlugSchema, rowIdSchema, sheetTabNameSchema, spreadsheetIdSchema, tableSlugSchema } from './ids';
 import { rowEnvelopeSchema, rowRecordSchema, tableCacheStatusSchema, tableSchemaSchema } from './table';
 
@@ -26,7 +26,7 @@ export const createTableInputSchema = z.object({
   createEnabled: z.boolean().optional(),
   updateEnabled: z.boolean().optional(),
   deleteEnabled: z.boolean().optional(),
-  cacheTtlSeconds: z.number().int().nonnegative().optional()
+  cacheTtlSeconds: cacheTtlSecondsSchema.optional()
 }).superRefine((value, ctx) => {
   const headerRow = value.headerRow ?? 1;
   const dataStartRow = value.dataStartRow ?? 2;

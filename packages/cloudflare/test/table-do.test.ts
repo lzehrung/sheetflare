@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { BadRequestError, type ProjectDoResponse, type TableDoResponse } from '@sheetflare/contracts';
+import {
+  BadRequestError,
+  type CreateTableInput,
+  type ListRowsQuery,
+  type ProjectDoResponse,
+  type ResolvedTableConfigSnapshot,
+  type TableDoRequest,
+  type TableDoResponse
+} from '@sheetflare/contracts';
 import { ControlPlaneDO, ProjectDO, TableDO, doRpc, type CloudflareEnv } from '../src';
 import { createDurableObjectNamespace } from './support/do-harness';
 
@@ -183,6 +191,17 @@ function createSheetsFetch(sheet: SheetState) {
       });
     }
 
+    const boundedRectangleMatch = range.match(/^'Users'!([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
+    if (boundedRectangleMatch && boundedRectangleMatch[2] !== boundedRectangleMatch[4]) {
+      const startColumnIndex = columnLettersToIndex(boundedRectangleMatch[1]);
+      const endColumnIndex = columnLettersToIndex(boundedRectangleMatch[3]);
+      return Response.json({
+        values: sheet.rows
+          .slice(Number(boundedRectangleMatch[2]) - 1, Number(boundedRectangleMatch[4]))
+          .map((row) => row.slice(startColumnIndex, endColumnIndex + 1))
+      });
+    }
+
     const boundedSingleRowMatch = range.match(/^'Users'!A(\d+):([A-Z]+)\d+$/);
     if (boundedSingleRowMatch) {
       const rowIndex = Number(boundedSingleRowMatch[1]) - 1;
@@ -237,6 +256,115 @@ function createTestEnv(overrides?: Partial<CloudflareEnv>) {
   env.TABLE_DO = createDurableObjectNamespace(env, TableDO) as never;
   env.RATE_LIMIT_DO = null as never;
   return env;
+}
+
+const usersTable = {
+  projectSlug: 'demo',
+  tableSlug: 'users'
+};
+
+type TableDoResult<TType extends TableDoResponse['type']> = Extract<TableDoResponse, { type: TType }>['result'];
+
+function isTableDoResponse<TType extends TableDoResponse['type']>(
+  response: TableDoResponse,
+  type: TType
+): response is Extract<TableDoResponse, { type: TType }> {
+  return response.type === type;
+}
+
+function getUsersTableStub(env: CloudflareEnv) {
+  return env.TABLE_DO.get(env.TABLE_DO.idFromName('table:demo:users'));
+}
+
+async function callUsersTable<TType extends TableDoResponse['type']>(
+  env: CloudflareEnv,
+  body: TableDoRequest,
+  expectedType: TType
+): Promise<TableDoResult<TType>> {
+  const response = await doRpc<TableDoResponse>(getUsersTableStub(env), body);
+  if (!isTableDoResponse(response, expectedType)) {
+    throw new Error(`Expected ${expectedType} but received ${response.type}.`);
+  }
+
+  return response.result;
+}
+
+async function createUsersTable(env: CloudflareEnv, input: Omit<CreateTableInput, 'tableSlug' | 'sheetTabName'>) {
+  const projectStub = env.PROJECT_DO.get(env.PROJECT_DO.idFromName('project:demo'));
+  await doRpc<ProjectDoResponse>(projectStub, {
+    type: 'project.create',
+    allowExisting: true,
+    input: {
+      slug: 'demo',
+      name: 'Demo',
+      spreadsheetId: 'sheet-1'
+    }
+  });
+  await doRpc<ProjectDoResponse>(projectStub, {
+    type: 'project.table.create',
+    allowExisting: true,
+    projectSlug: 'demo',
+    input: {
+      tableSlug: 'users',
+      sheetTabName: 'Users',
+      ...input
+    }
+  });
+}
+
+function buildResolvedUsersConfig(overrides?: Partial<ResolvedTableConfigSnapshot>): ResolvedTableConfigSnapshot {
+  return {
+    projectSlug: 'demo',
+    tableSlug: 'users',
+    spreadsheetId: 'sheet-1',
+    googleCredentialRef: 'default',
+    sheetTabName: 'Users',
+    idColumn: '_id',
+    indexedFields: ['_id'],
+    readOnlyFields: [],
+    fieldRules: {},
+    headerRow: 1,
+    dataStartRow: 2,
+    readEnabled: true,
+    createEnabled: true,
+    updateEnabled: true,
+    deleteEnabled: true,
+    cacheTtlSeconds: 3600,
+    createdAt: '2026-10-28T00:00:00.000Z',
+    updatedAt: '2026-10-28T00:00:00.000Z',
+    ...overrides
+  };
+}
+
+function listUsers(env: CloudflareEnv, query: ListRowsQuery = {}) {
+  return callUsersTable(env, { type: 'table.rows.list', ...usersTable, query }, 'table.rows.list.result');
+}
+
+async function getUsersCacheStatus(env: CloudflareEnv) {
+  const result = await callUsersTable(env, { type: 'table.cache.get', ...usersTable }, 'table.cache.get.result');
+  return result.data;
+}
+
+function createUser(env: CloudflareEnv, values: Record<string, string>) {
+  return callUsersTable(env, { type: 'table.row.create', ...usersTable, input: { values } }, 'table.row.create.result');
+}
+
+function updateUser(env: CloudflareEnv, rowId: string, values: Record<string, string>) {
+  return callUsersTable(env, { type: 'table.row.update', ...usersTable, rowId, input: { values } }, 'table.row.update.result');
+}
+
+function deleteUser(env: CloudflareEnv, rowId: string) {
+  return callUsersTable(env, { type: 'table.row.delete', ...usersTable, rowId }, 'table.row.delete.result');
+}
+
+// The workspace TypeScript lib is ES2022, so Promise.withResolvers is not typed here.
+function createSignal() {
+  let resolve: () => void = () => {};
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+
+  return { promise, resolve };
 }
 
 describe('TableDO', () => {
@@ -4964,6 +5092,33 @@ describe('TableDO', () => {
             { name: 'status', inferredType: 'string', nullable: false }
           ]
         }
+      }
+    });
+  });
+
+  it('rejects resolved table configs whose cache TTL exceeds one hour', async () => {
+    const env = createTestEnv();
+
+    await expect(
+      callUsersTable(
+        env,
+        { type: 'table.cache.get', ...usersTable, resolvedConfig: buildResolvedUsersConfig({ cacheTtlSeconds: 3601 }) },
+        'table.cache.get.result'
+      )
+    ).rejects.toMatchObject({
+      name: 'BadRequestError',
+      message: 'Request validation failed.'
+    });
+
+    await expect(
+      callUsersTable(
+        env,
+        { type: 'table.cache.get', ...usersTable, resolvedConfig: buildResolvedUsersConfig({ cacheTtlSeconds: 3600 }) },
+        'table.cache.get.result'
+      )
+    ).resolves.toMatchObject({
+      data: {
+        cacheTtlSeconds: 3600
       }
     });
   });

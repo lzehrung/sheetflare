@@ -3,6 +3,8 @@ import { projectSlugSchema, sheetTabNameSchema, spreadsheetIdSchema, tableSlugSc
 
 export const defaultAuthModeSchema = z.enum(['private', 'public-read']);
 export const maxIndexedFieldCount = 32;
+export const maxCacheTtlSeconds = 3600;
+export const cacheTtlSecondsSchema = z.number().int().nonnegative().max(maxCacheTtlSeconds);
 export const fieldNormalizationSchema = z.enum(['trim', 'lowercase']);
 export const constrainedFieldTypeSchema = z.enum(['string', 'number', 'boolean', 'date', 'datetime']);
 export const fieldRuleSchema = z.object({
@@ -64,7 +66,7 @@ export const tableConfigSchema = z.object({
   createEnabled: z.boolean(),
   updateEnabled: z.boolean(),
   deleteEnabled: z.boolean(),
-  cacheTtlSeconds: z.number().int().nonnegative(),
+  cacheTtlSeconds: cacheTtlSecondsSchema,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime()
 }).superRefine(validateTableLayout);
