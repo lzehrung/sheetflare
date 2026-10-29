@@ -306,6 +306,8 @@ $env:SHEETFLARE_SMOKE_UPDATE_VALUES_JSON = '{"name":"Smoke Row Updated"}'
 
 The smoke row will be created with a generated ID and deleted automatically.
 
+Smoke compares a configured number with its read-back after removing `,`, spaces, and one leading or trailing `$`, `€`, `£`, or `¥`, so `1234` matches `1,234` or `$1,234.00`; percentages and decimal commas are not matched, so use plain number formatting for smoke columns.
+
 If you also want anonymous `public-read` coverage, add:
 
 ```powershell
