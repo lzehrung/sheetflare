@@ -40,7 +40,7 @@ The Worker decides every request. Assets are reachable only through the Worker's
 - The gateway's existing `Cache-Control: no-store` applies to every admin response.
 - The route never touches auth, Durable Objects, rate limiting, or Workers Cache; the default entrypoint already runs with cache disabled.
 - `GET /__sheetflare/admin-session` returns `{ "serverCredential": false }`, so the UI goes straight to manual entry without a failed request.
-- `/ready` reports `checks.adminUi`: `enabled`, `disabled`, `invalid`, or `assets-missing`, with a note for the last two. It does not change `ok`.
+- `/ready` reports `checks.adminUi`: `enabled`, `disabled`, `invalid`, or `assets-missing`, with a note for the last two. It does not change `ok`. The field is visible only with an admin credential; anonymous `/ready` returns `{ ok, service }`.
 
 `ADMIN_UI` is declared explicitly in both Wrangler configs with value `enabled`. Setup config `adminUi: "enabled" | "disabled"` (default `enabled`) is patched into `vars` at deploy. `disabled` also removes the `assets` block, so no admin files upload. Legacy setup configs with `deploy.admin: false` map to `disabled`.
 
@@ -68,7 +68,7 @@ The Worker decides every request. Assets are reachable only through the Worker's
 ### 7. Operator narrative
 
 - Setup prints `Admin UI is live at <apiUrl>/admin/` after deploy. Beginner next steps list the hosted URL, or `npm run dev:admin` when hosting is disabled or no API URL is known.
-- `npm run doctor` adds an **Admin UI** result from `/ready`: ready when the deployed state matches setup config, warning on mismatch or an older Worker, blocked on `invalid` or `assets-missing`.
+- `npm run doctor` adds an **Admin UI** result from `/ready`: ready when the deployed state matches setup config, warning on mismatch or an older Worker, blocked on `invalid` or `assets-missing`. Without an admin credential the doctor warns that the state is unavailable instead.
 - Docs lead with the hosted URL. Local mode is documented as optional.
 
 ## Tests

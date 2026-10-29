@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertUpdatedValuesPersisted, findUnpersistedValues } from './smoke-assertions';
+import { assertReadinessChecksOk, assertUpdatedValuesPersisted, findUnpersistedValues } from './smoke-assertions';
 import { ScriptError } from './runtime';
 
 describe('findUnpersistedValues', () => {
@@ -52,5 +52,23 @@ describe('assertUpdatedValuesPersisted', () => {
 
   it('passes silently when the update persisted', () => {
     expect(() => assertUpdatedValuesPersisted({ name: 'x' }, { name: 'x' }, 'after the update')).not.toThrow();
+  });
+});
+
+describe('assertReadinessChecksOk', () => {
+  it('reports nothing verified and does not throw when /ready omitted the detailed checks', () => {
+    expect(assertReadinessChecksOk(undefined)).toBe(false);
+  });
+
+  it('reports verified when every detailed check is ok', () => {
+    expect(assertReadinessChecksOk({ controlPlane: 'ok', rateLimit: 'ok' })).toBe(true);
+  });
+
+  it('throws when the control plane reports a failure', () => {
+    expect(() => assertReadinessChecksOk({ controlPlane: 'error', rateLimit: 'ok' })).toThrow(/control-plane failure/);
+  });
+
+  it('throws when the rate limiter reports a failure', () => {
+    expect(() => assertReadinessChecksOk({ controlPlane: 'ok', rateLimit: 'error' })).toThrow(/rate-limit failure/);
   });
 });

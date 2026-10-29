@@ -47,3 +47,25 @@ export function assertUpdatedValuesPersisted(
     .join('; ');
   throw new ScriptError(`Smoke row update did not persist ${stage}: ${details}.`);
 }
+
+export type ReadinessChecks = {
+  controlPlane: string;
+  rateLimit: string;
+};
+
+/**
+ * `/ready` returns detailed checks only to callers with admin:projects global scope.
+ * Returns false when the checks were omitted (nothing verified); throws when a reported check is not `ok`.
+ */
+export function assertReadinessChecksOk(checks: ReadinessChecks | undefined): boolean {
+  if (!checks) {
+    return false;
+  }
+  if (checks.controlPlane !== 'ok') {
+    throw new ScriptError('Readiness check reported control-plane failure.');
+  }
+  if (checks.rateLimit !== 'ok') {
+    throw new ScriptError('Readiness check reported rate-limit failure.');
+  }
+  return true;
+}

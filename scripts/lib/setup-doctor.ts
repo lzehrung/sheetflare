@@ -1,24 +1,37 @@
+import { z } from 'zod';
 import { getSetupConfigGoogleCredentialRefs, type SetupConfig } from './setup-config';
 import type { SetupPrereqResult } from './setup-prereqs';
-import type { ResolvedSetupRuntimeState } from './setup-runtime';
+import { resolvePreferredAdminCredential, type ResolvedSetupRuntimeState } from './setup-runtime';
 import { listDriveWatchRetryAdvice, listDriveWatches } from './setup-drive-watches';
 import { isPlaceholderGoogleClientEmail } from './setup-google';
 import { requestJson, ScriptError } from './runtime';
 
-type ReadyResponse = {
-  ok: boolean;
-  checks: {
-    defaultGoogleCredential: 'configured' | 'missing';
-    namedGoogleCredentials: 'configured' | 'missing' | 'invalid';
-    googleDriveWebhookSecret: 'configured' | 'missing';
-    bootstrapAdmin: 'configured' | 'missing';
-    adminUi?: 'enabled' | 'disabled' | 'invalid' | 'assets-missing';
-  };
-  notes: string[];
-};
+const readyChecksSchema = z.object({
+  defaultGoogleCredential: z.enum(['configured', 'missing']),
+  namedGoogleCredentials: z.enum(['configured', 'missing', 'invalid']),
+  googleDriveWebhookSecret: z.enum(['configured', 'missing']),
+  bootstrapAdmin: z.enum(['configured', 'missing']),
+  adminUi: z.enum(['enabled', 'disabled', 'invalid', 'assets-missing']).optional()
+});
+
+// Anonymous callers get only { ok, service }; checks and notes need the bootstrap token or a global admin:projects key.
+const readyResponseSchema = z.object({
+  ok: z.boolean(),
+  service: z.string().optional(),
+  checks: readyChecksSchema.optional(),
+  notes: z.array(z.string()).optional()
+});
+
+type ReadyResponse = z.infer<typeof readyResponseSchema>;
+type ReadyChecks = z.infer<typeof readyChecksSchema>;
+
+const READY_DETAILS_UNAVAILABLE_SUMMARY = 'API /ready did not include readiness details, so the Google credential, webhook secret, and admin UI state could not be verified.';
+const READY_DETAILS_GUIDANCE = 'Set SHEETFLARE_ADMIN_CREDENTIAL to a global API key with admin:projects scope or to the bootstrap admin token, then rerun npm run setup -- --verify.';
+
+class ReadyScopeError extends ScriptError {}
 
 type SetupDoctorDependencies = {
-  fetchReady?: (apiUrl: string) => Promise<ReadyResponse>;
+  fetchReady?: (apiUrl: string, credential: string | null) => Promise<ReadyResponse>;
   listDriveWatches?: typeof listDriveWatches;
   listDriveWatchRetryAdvice?: typeof listDriveWatchRetryAdvice;
 };
@@ -56,12 +69,17 @@ export function getSetupDoctorFailureMessage(results: SetupPrereqResult[]) {
   return `Setup verification found ${issues}.`;
 }
 
-async function fetchReadyStatus(apiUrl: string) {
-  const { response, data } = await requestJson<ReadyResponse>({
+async function fetchReadyStatus(apiUrl: string, credential: string | null): Promise<ReadyResponse> {
+  const { response, data } = await requestJson<unknown>({
     baseUrl: apiUrl,
     path: '/ready',
-    method: 'GET'
+    method: 'GET',
+    bearer: credential
   });
+
+  if (response.status === 403) {
+    throw new ReadyScopeError('API /ready returned 403 for the admin credential.');
+  }
 
   if (![200, 503].includes(response.status)) {
     const requestId = response.headers.get('x-request-id');
@@ -77,7 +95,12 @@ async function fetchReadyStatus(apiUrl: string) {
     throw new ScriptError('API /ready returned an empty response.');
   }
 
-  return data;
+  const parsed = readyResponseSchema.safeParse(data);
+  if (!parsed.success) {
+    throw new ScriptError('API /ready returned a response that does not match the expected shape.');
+  }
+
+  return parsed.data;
 }
 
 function getConfiguredSpreadsheetIds(config: SetupConfig) {
@@ -112,7 +135,7 @@ function getRetryAdviceBySpreadsheetId(
   return new Map(retryAdvice.map((entry) => [entry.spreadsheetId, entry] as const));
 }
 
-function describeReadyCredentialSummary(ready: ReadyResponse['checks']) {
+function describeReadyCredentialSummary(ready: ReadyChecks) {
   if (ready.defaultGoogleCredential === 'configured' && ready.namedGoogleCredentials === 'configured') {
     return 'default and named Google credentials';
   }
@@ -125,7 +148,7 @@ function describeReadyCredentialSummary(ready: ReadyResponse['checks']) {
 }
 
 function describeAdminUiResult(
-  deployed: ReadyResponse['checks']['adminUi'],
+  deployed: ReadyChecks['adminUi'],
   configured: SetupConfig['adminUi'],
   apiUrl: string
 ): SetupPrereqResult {
@@ -228,49 +251,68 @@ export async function runSetupDoctor(options: {
 
   if (options.runtimeState.apiUrl) {
     try {
-      const ready = await fetchReady(options.runtimeState.apiUrl);
-      const hasAnyReadyGoogleCredential =
-        ready.checks.defaultGoogleCredential === 'configured' ||
-        ready.checks.namedGoogleCredentials === 'configured';
-
-      if (!hasAnyReadyGoogleCredential) {
-        results.push(createResult(
-          'API readiness',
-          'blocked',
-          'API /ready reports that neither the default Google credential nor named Google credentials are configured.',
-          'Apply a real GOOGLE_CLIENT_EMAIL/GOOGLE_PRIVATE_KEY pair or a valid GOOGLE_CREDENTIALS_JSON secret, then redeploy the Worker.'
-        ));
-      } else if (usesNamedGoogleCredential && ready.checks.namedGoogleCredentials === 'invalid') {
-        results.push(createResult(
-          'API readiness',
-          'blocked',
-          'API /ready reports GOOGLE_CREDENTIALS_JSON as invalid.',
-          'Fix GOOGLE_CREDENTIALS_JSON so every named entry has non-empty client_email/private_key or clientEmail/privateKey fields, then redeploy the Worker.'
-        ));
-      } else if (ready.checks.googleDriveWebhookSecret !== 'configured') {
+      const ready = await fetchReady(options.runtimeState.apiUrl, resolvePreferredAdminCredential(options.runtimeState));
+      if (!ready.checks) {
         results.push(createResult(
           'API readiness',
           'warning',
-          'API /ready is healthy, but GOOGLE_DRIVE_WEBHOOK_SECRET is missing so automatic Drive-watch reindexing is unavailable.',
-          'Apply GOOGLE_DRIVE_WEBHOOK_SECRET through setup or wrangler secret put, then redeploy if needed.'
+          READY_DETAILS_UNAVAILABLE_SUMMARY,
+          READY_DETAILS_GUIDANCE
+        ));
+      } else {
+        const checks = ready.checks;
+        const hasAnyReadyGoogleCredential =
+          checks.defaultGoogleCredential === 'configured' ||
+          checks.namedGoogleCredentials === 'configured';
+
+        if (!hasAnyReadyGoogleCredential) {
+          results.push(createResult(
+            'API readiness',
+            'blocked',
+            'API /ready reports that neither the default Google credential nor named Google credentials are configured.',
+            'Apply a real GOOGLE_CLIENT_EMAIL/GOOGLE_PRIVATE_KEY pair or a valid GOOGLE_CREDENTIALS_JSON secret, then redeploy the Worker.'
+          ));
+        } else if (usesNamedGoogleCredential && checks.namedGoogleCredentials === 'invalid') {
+          results.push(createResult(
+            'API readiness',
+            'blocked',
+            'API /ready reports GOOGLE_CREDENTIALS_JSON as invalid.',
+            'Fix GOOGLE_CREDENTIALS_JSON so every named entry has non-empty client_email/private_key or clientEmail/privateKey fields, then redeploy the Worker.'
+          ));
+        } else if (checks.googleDriveWebhookSecret !== 'configured') {
+          results.push(createResult(
+            'API readiness',
+            'warning',
+            'API /ready is healthy, but GOOGLE_DRIVE_WEBHOOK_SECRET is missing so automatic Drive-watch reindexing is unavailable.',
+            'Apply GOOGLE_DRIVE_WEBHOOK_SECRET through setup or wrangler secret put, then redeploy if needed.'
+          ));
+        } else {
+          results.push(createResult(
+            'API readiness',
+            'ready',
+            `API /ready reports the Worker as healthy with ${describeReadyCredentialSummary(checks)} and the Drive webhook secret configured.`,
+            null
+          ));
+        }
+
+        results.push(describeAdminUiResult(checks.adminUi, options.config.adminUi, options.runtimeState.apiUrl));
+      }
+    } catch (error) {
+      if (error instanceof ReadyScopeError) {
+        results.push(createResult(
+          'API readiness',
+          'warning',
+          'API /ready returned 403 for the admin credential, so it lacks global scope and readiness details are unavailable.',
+          READY_DETAILS_GUIDANCE
         ));
       } else {
         results.push(createResult(
           'API readiness',
-          'ready',
-          `API /ready reports the Worker as healthy with ${describeReadyCredentialSummary(ready.checks)} and the Drive webhook secret configured.`,
-          null
+          'blocked',
+          `Failed to verify API /ready at ${options.runtimeState.apiUrl}.`,
+          error instanceof Error ? error.message : String(error)
         ));
       }
-
-      results.push(describeAdminUiResult(ready.checks.adminUi, options.config.adminUi, options.runtimeState.apiUrl));
-    } catch (error) {
-      results.push(createResult(
-        'API readiness',
-        'blocked',
-        `Failed to verify API /ready at ${options.runtimeState.apiUrl}.`,
-        error instanceof Error ? error.message : String(error)
-      ));
     }
   } else {
     results.push(createResult(

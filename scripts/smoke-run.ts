@@ -1,6 +1,6 @@
 import { getEnv, assert, assertPresent, logStep, logSuccess, requestJson, ScriptError } from './lib/runtime';
 import { readSmokeConfig } from './lib/smoke-config';
-import { assertUpdatedValuesPersisted } from './lib/smoke-assertions';
+import { assertReadinessChecksOk, assertUpdatedValuesPersisted, type ReadinessChecks } from './lib/smoke-assertions';
 import { summarizeJson, writeReportArtifacts } from './lib/reporting';
 
 type RowEnvelope = {
@@ -204,21 +204,21 @@ async function main() {
         path: '/ready',
         auth: 'anonymous'
       },
-      summary: (value) => `Readiness reported controlPlane=${value.checks.controlPlane} rateLimit=${value.checks.rateLimit}.`,
+      summary: (value) => value.checks
+        ? `Readiness reported controlPlane=${value.checks.controlPlane} rateLimit=${value.checks.rateLimit}.`
+        : 'Readiness is ok; the response omitted detailed checks.',
       run: async () => {
         const readiness = await requestJson<{
-          checks: {
-            controlPlane: string;
-            rateLimit: string;
-          };
+          ok: boolean;
+          checks?: ReadinessChecks;
         }>({
           baseUrl,
           path: '/ready',
+          bearer: adminCredential,
           expectedStatus: 200
         });
         const body = assertPresent(readiness.data, 'Readiness check returned an empty response body.');
-        assert(body.checks.controlPlane === 'ok', 'Readiness check reported control-plane failure.');
-        assert(body.checks.rateLimit === 'ok', 'Readiness check reported rate-limit failure.');
+        assertReadinessChecksOk(body.checks);
         return {
           responseStatus: readiness.response.status,
           responseBody: body,

@@ -20,7 +20,7 @@ The default entrypoint remains uncached. Admin, system, mutation, readiness, and
 - The inner entrypoint uses `Cloudflare-CDN-Cache-Control` for edge-only caching and `Cache-Tag` for invalidation.
 - The outer gateway removes edge-only directives and tags and enforces client-visible `no-store`.
 - Errors, unsupported methods, stale/not-ready table state, disabled TTLs, and unsafe tags are not cached.
-- External-change debounce bounds the edge TTL.
+- A pending external change marks the table stale, so nothing is stored at the edge until the reindex completes.
 - Purge failures after committed changes preserve the successful mutation response, set `X-Sheetflare-Cache-Invalidation: failed`, and emit a structured internal error event.
 - `X-Sheetflare-Cache-Status` exposes the inner cache result without forwarding Cloudflare cache metadata directly.
 
