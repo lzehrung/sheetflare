@@ -8,7 +8,7 @@ import {
   createBootstrapCommandOptions,
   createBootstrapEnv,
   findCreatedKeyIfPresent,
-  parseBootstrapOutput,
+  readBootstrapCommandResult,
   redactBootstrapResultMarker,
   type SetupBootstrapOutput
 } from './lib/setup-bootstrap';
@@ -145,12 +145,12 @@ async function runBootstrap(env: NodeJS.ProcessEnv) {
     if (result.stderr.trim().length > 0) {
       process.stderr.write(result.stderr);
     }
-    throw new ScriptError(
-      'Bootstrap failed. Confirm the spreadsheet is shared with the Google service-account email as Editor, the configured tab exists, the _id header exists, and existing _id values are unique and non-blank.'
-    );
   }
 
-  return parseBootstrapOutput(result.stdout);
+  return readBootstrapCommandResult({
+    code: result.code,
+    stdout: result.stdout
+  });
 }
 
 async function runSmoke(env: NodeJS.ProcessEnv) {
@@ -444,19 +444,25 @@ async function main() {
       }
 
       logStep('Creating projects and API keys');
-      bootstrapOutput = await runBootstrap(createBootstrapEnv(config, apiUrl, adminBearerToken, { rotateKeys: options.rotateKeys }));
-      if (config.smoke.enabled) {
-        adminApiKey = findCreatedKeyIfPresent(bootstrapOutput, config.smoke.adminKeyName) ?? adminApiKey;
-        privateReadKey = findCreatedKeyIfPresent(bootstrapOutput, config.smoke.privateReadKeyName) ?? privateReadKey;
-        mutationKey = findCreatedKeyIfPresent(bootstrapOutput, config.smoke.mutationKeyName) ?? mutationKey;
+      const bootstrapOutcome = await runBootstrap(createBootstrapEnv(config, apiUrl, adminBearerToken, { rotateKeys: options.rotateKeys }));
+      if (bootstrapOutcome.output) {
+        bootstrapOutput = bootstrapOutcome.output;
+        if (config.smoke.enabled) {
+          adminApiKey = findCreatedKeyIfPresent(bootstrapOutput, config.smoke.adminKeyName) ?? adminApiKey;
+          privateReadKey = findCreatedKeyIfPresent(bootstrapOutput, config.smoke.privateReadKeyName) ?? privateReadKey;
+          mutationKey = findCreatedKeyIfPresent(bootstrapOutput, config.smoke.mutationKeyName) ?? mutationKey;
+        }
+        if (bootstrapOutput.skippedKeys.length > 0) {
+          console.warn(
+            `Warning: Left existing API keys in place: ${bootstrapOutput.skippedKeys.map((key) => key.name).join(', ')}. Their secrets cannot be shown again. Supply them through SHEETFLARE_ADMIN_CREDENTIAL, SHEETFLARE_PRIVATE_READ_KEY, and SHEETFLARE_MUTATION_KEY, or replace them with: npm run setup -- --bootstrap --rotate-keys`
+          );
+        }
+        if (bootstrapOutput.revokedKeys.length > 0) {
+          logSuccess(`Revoked ${bootstrapOutput.revokedKeys.length} replaced API key${bootstrapOutput.revokedKeys.length === 1 ? '' : 's'}`);
+        }
       }
-      if (bootstrapOutput.skippedKeys.length > 0) {
-        console.warn(
-          `Warning: Left existing API keys in place: ${bootstrapOutput.skippedKeys.map((key) => key.name).join(', ')}. Their secrets cannot be shown again. Supply them through SHEETFLARE_ADMIN_CREDENTIAL, SHEETFLARE_PRIVATE_READ_KEY, and SHEETFLARE_MUTATION_KEY, or replace them with: npm run setup -- --bootstrap --rotate-keys`
-        );
-      }
-      if (bootstrapOutput.revokedKeys.length > 0) {
-        logSuccess(`Revoked ${bootstrapOutput.revokedKeys.length} replaced API key${bootstrapOutput.revokedKeys.length === 1 ? '' : 's'}`);
+      if (!bootstrapOutcome.ok) {
+        throw new ScriptError(bootstrapOutcome.failureMessage);
       }
       logSuccess('Projects and API keys are ready');
 

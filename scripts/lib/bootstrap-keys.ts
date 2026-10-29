@@ -6,6 +6,23 @@ import {
 import type { BootstrapApiKey } from './bootstrap-config';
 import { assertPresent, logStep, logSuccess, requestJson, ScriptError } from './runtime';
 
+/** Same credential shape the gateway accepts, so rotation can recognize the key it is using. */
+const apiKeyCredentialPattern = /^sfk_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.[0-9a-f]{64}$/;
+
+export class BootstrapApiKeysError extends ScriptError {
+  readonly result: BootstrapApiKeysResult;
+
+  constructor(message: string, result: BootstrapApiKeysResult) {
+    super(message);
+    this.name = 'BootstrapApiKeysError';
+    this.result = result;
+  }
+}
+
+function authenticatingKeyId(credential: string) {
+  return apiKeyCredentialPattern.exec(credential.trim())?.[1] ?? null;
+}
+
 export type ManagedKeyRef = {
   name: string;
   id: string;
@@ -51,8 +68,30 @@ export async function bootstrapApiKeys(options: {
   rotate: boolean;
 }): Promise<BootstrapApiKeysResult> {
   const result: BootstrapApiKeysResult = { created: [], skipped: [], revoked: [] };
-  if (options.apiKeys.length === 0) {
+  try {
+    await issueBootstrapApiKeys(options, result);
     return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new BootstrapApiKeysError(message, {
+      created: [...result.created],
+      skipped: [...result.skipped],
+      revoked: [...result.revoked]
+    });
+  }
+}
+
+async function issueBootstrapApiKeys(
+  options: {
+    baseUrl: string;
+    bearer: string;
+    apiKeys: readonly BootstrapApiKey[];
+    rotate: boolean;
+  },
+  result: BootstrapApiKeysResult
+) {
+  if (options.apiKeys.length === 0) {
+    return;
   }
 
   const listResponse = await requestJson<unknown>({
@@ -95,7 +134,23 @@ export async function bootstrapApiKeys(options: {
     logSuccess(`Key created: ${createdKey.record.id}`);
   }
 
+  const currentKeyId = authenticatingKeyId(options.bearer);
+  const revokeFirst: ManagedKeyRef[] = [];
+  const revokeLast: ManagedKeyRef[] = [];
   for (const key of keysToRevoke) {
+    if (currentKeyId !== null && key.id === currentKeyId) {
+      revokeLast.push(key);
+    } else {
+      revokeFirst.push(key);
+    }
+  }
+  if (revokeLast.length > 0 && revokeFirst.length > 0) {
+    logStep(
+      `Leaving authenticating key ${revokeLast.map((key) => `${key.name} (${key.id})`).join(', ')} in place until the other revocations finish.`
+    );
+  }
+
+  for (const key of [...revokeFirst, ...revokeLast]) {
     logStep(`Revoking replaced key ${key.name} (${key.id})`);
     await requestJson<unknown>({
       baseUrl: options.baseUrl,
@@ -107,6 +162,4 @@ export async function bootstrapApiKeys(options: {
     result.revoked.push(key);
     logSuccess(`Key revoked: ${key.id}`);
   }
-
-  return result;
 }

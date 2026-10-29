@@ -1,7 +1,39 @@
+import { z } from 'zod';
+import { fieldRulesSchema, type FieldRules } from '@sheetflare/contracts';
 import { getEnv, assert, assertPresent, logStep, logSuccess, requestJson, ScriptError } from './lib/runtime';
 import { readSmokeConfig } from './lib/smoke-config';
 import { assertReadinessChecksOk, assertUpdatedValuesPersisted, type ReadinessChecks } from './lib/smoke-assertions';
 import { summarizeJson, writeReportArtifacts } from './lib/reporting';
+
+const privateTableFieldRulesSchema = z.object({
+  data: z.array(z.object({
+    tableSlug: z.string(),
+    fieldRules: fieldRulesSchema.optional()
+  }))
+});
+
+async function loadPrivateTableFieldRules(options: {
+  baseUrl: string;
+  adminCredential: string;
+  privateProject: string;
+  privateTable: string;
+}): Promise<FieldRules> {
+  const response = await requestJson<unknown>({
+    baseUrl: options.baseUrl,
+    path: `/v1/admin/projects/${encodeURIComponent(options.privateProject)}/tables`,
+    bearer: options.adminCredential,
+    expectedStatus: 200
+  });
+  const parsed = privateTableFieldRulesSchema.safeParse(response.data);
+  if (!parsed.success) {
+    throw new ScriptError(`Could not read field rules for ${options.privateProject}/${options.privateTable}.`);
+  }
+  const table = parsed.data.data.find((entry) => entry.tableSlug === options.privateTable);
+  if (!table) {
+    throw new ScriptError(`Smoke table ${options.privateTable} was not found when reading field rules.`);
+  }
+  return table.fieldRules ?? {};
+}
 
 type RowEnvelope = {
   id: string;
@@ -138,6 +170,7 @@ async function main() {
   const smokeId = `smoke-${Date.now()}`;
   const hasPublicReadCoverage = Boolean(publicProject && publicTable);
   let createdRowId: string | null = null;
+  let smokeFieldRules: FieldRules = {};
 
   async function runStep<T>(options: {
     name: string;
@@ -461,6 +494,13 @@ async function main() {
       }
     });
 
+    smokeFieldRules = await loadPrivateTableFieldRules({
+      baseUrl,
+      adminCredential,
+      privateProject,
+      privateTable
+    });
+
     await runStep({
       name: 'Read the updated smoke row back',
       request: {
@@ -477,7 +517,7 @@ async function main() {
           expectedStatus: 200
         });
         const body = assertPresent(response.data, 'Get row returned an empty response body.');
-        assertUpdatedValuesPersisted(body.data.values, updateValues, 'after the update');
+        assertUpdatedValuesPersisted(body.data.values, updateValues, 'after the update', smokeFieldRules);
         return {
           responseStatus: response.response.status,
           responseBody: body,
@@ -528,7 +568,7 @@ async function main() {
           expectedStatus: 200
         });
         const body = assertPresent(response.data, 'Get row returned an empty response body.');
-        assertUpdatedValuesPersisted(body.data.values, updateValues, 'after the reindex');
+        assertUpdatedValuesPersisted(body.data.values, updateValues, 'after the reindex', smokeFieldRules);
         return {
           responseStatus: response.response.status,
           responseBody: body,

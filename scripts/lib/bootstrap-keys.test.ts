@@ -42,10 +42,14 @@ class FakeAdminApi {
     return this.keys.filter((key) => key.revokedAt === null);
   }
 
-  seed(name: string) {
+  /** Successful creates allowed before the next create returns 500. Null disables the fault. */
+  failCreatesAfter: number | null = null;
+  private createsAttempted = 0;
+
+  seed(name: string, id?: string) {
     this.counter += 1;
     const key: StoredKey = {
-      id: `key${this.counter}`,
+      id: id ?? `key${this.counter}`,
       projectSlug: null,
       name,
       scopes: ['table:read'],
@@ -58,6 +62,7 @@ class FakeAdminApi {
   }
 
   async start() {
+    this.createsAttempted = 0;
     this.server = createServer((request, response) => {
       void this.handle(request, response);
     });
@@ -86,12 +91,28 @@ class FakeAdminApi {
       response.end(JSON.stringify(body));
     };
 
+    const authorization = request.headers.authorization;
+    const bearer = typeof authorization === 'string' ? authorization.replace(/^Bearer /u, '') : '';
+    const bearerKeyId = /^sfk_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.[0-9a-f]{64}$/u.exec(bearer)?.[1];
+    if (bearerKeyId) {
+      const authorizingKey = this.keys.find((key) => key.id === bearerKeyId);
+      if (authorizingKey && authorizingKey.revokedAt !== null) {
+        send(401, { error: 'revoked' });
+        return;
+      }
+    }
+
     if (method === 'GET' && path === '/v1/admin/keys') {
       send(200, { data: this.keys });
       return;
     }
 
     if (method === 'POST' && path === '/v1/admin/keys') {
+      if (this.failCreatesAfter !== null && this.createsAttempted >= this.failCreatesAfter) {
+        send(500, { error: 'create failed' });
+        return;
+      }
+      this.createsAttempted += 1;
       const input: { name: string; projectSlug?: string; scopes: string[] } = JSON.parse(await readBody(request));
       const key = this.seed(input.name);
       key.projectSlug = input.projectSlug ?? null;
@@ -121,6 +142,7 @@ describe('bootstrapApiKeys', () => {
   beforeEach(async () => {
     api.keys = [];
     api.requests = [];
+    api.failCreatesAfter = null;
     baseUrl = await api.start();
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
   });
@@ -195,6 +217,35 @@ describe('bootstrapApiKeys', () => {
     const firstDelete = methods.indexOf('DELETE');
     expect(firstDelete).toBeGreaterThan(-1);
     expect(methods.slice(firstDelete).every((method) => method === 'DELETE')).toBe(true);
+  });
+
+  it('revokes the authenticating key last so later revocations are not rejected as 401', async () => {
+    const adminId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const readId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const writeId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    api.seed('setup-admin', adminId);
+    api.seed('setup-read', readId);
+    api.seed('setup-write', writeId);
+    const bearer = `sfk_${adminId}.${'ab'.repeat(32)}`;
+
+    const result = await bootstrapApiKeys({ baseUrl, bearer, apiKeys: desiredKeys, rotate: true });
+
+    expect(result.revoked.map((entry) => entry.id)).toEqual([readId, writeId, adminId]);
+    expect(api.activeKeys).toHaveLength(3);
+    expect(api.activeKeys.map((key) => key.id)).toEqual(result.created.map((entry) => entry.record.id));
+    expect(api.requests.filter((entry) => entry.startsWith('DELETE ')).at(-1)).toBe(`DELETE /v1/admin/keys/${adminId}`);
+  });
+
+  it('returns keys already created when a later create fails', async () => {
+    api.failCreatesAfter = 1;
+
+    await expect(bootstrapApiKeys({ baseUrl, bearer: 'admin', apiKeys: desiredKeys, rotate: false })).rejects.toMatchObject({
+      result: {
+        created: [expect.objectContaining({ record: expect.objectContaining({ name: 'setup-admin' }) })],
+        revoked: []
+      }
+    });
+    expect(api.activeKeys.map((key) => key.name)).toEqual(['setup-admin']);
   });
 
   it('makes no requests when no keys are configured', async () => {

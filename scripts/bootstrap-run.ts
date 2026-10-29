@@ -4,7 +4,6 @@ import {
   logStep,
   logSuccess,
   readJsonEnv,
-  redactSecret,
   requestJson,
   requireAdminCredential,
   requireEnv,
@@ -12,6 +11,7 @@ import {
 } from './lib/runtime';
 import { parseBootstrapConfig, type BootstrapConfig } from './lib/bootstrap-config';
 import { assertRotationCanHandOffKeys, bootstrapApiKeys } from './lib/bootstrap-keys';
+import { finishBootstrapKeys } from './lib/bootstrap-result';
 
 type ProjectResponse = {
   project: {
@@ -70,34 +70,23 @@ async function main() {
     }
   }
 
-  const keyResult = await bootstrapApiKeys({
-    baseUrl,
-    bearer,
-    apiKeys: config.apiKeys ?? [],
-    rotate: rotateKeys
-  });
-
-  const output = {
+  await finishBootstrapKeys({
     projects: config.projects.map((project) => ({
       slug: project.slug,
       tables: (project.tables ?? []).map((table) => table.tableSlug)
     })),
-    apiKeys: keyResult.created,
-    skippedKeys: keyResult.skipped,
-    revokedKeys: keyResult.revoked
-  };
-
-  console.log(JSON.stringify({
-    ...output,
-    apiKeys: output.apiKeys.map((apiKey) => ({
-      ...apiKey,
-      apiKey: shouldShowSecrets() ? apiKey.apiKey : redactSecret(apiKey.apiKey)
-    }))
-  }, null, 2));
-
-  if (process.env.SHEETFLARE_BOOTSTRAP_RESULT_MODE === 'full') {
-    console.log(`__SHEETFLARE_BOOTSTRAP_RESULT__=${JSON.stringify(output)}`);
-  }
+    showSecrets: shouldShowSecrets(),
+    includeResultMarker: process.env.SHEETFLARE_BOOTSTRAP_RESULT_MODE === 'full',
+    writeLine: (line) => {
+      console.log(line);
+    },
+    loadKeys: () => bootstrapApiKeys({
+      baseUrl,
+      bearer,
+      apiKeys: config.apiKeys ?? [],
+      rotate: rotateKeys
+    })
+  });
 }
 
 void main().catch((error: unknown) => {
