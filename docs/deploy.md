@@ -155,7 +155,7 @@ npm run deploy:api:raw
 npm run deploy:staging:api:raw
 ```
 
-To invoke Wrangler directly outside setup:
+To invoke Wrangler directly outside setup (these target **production**; for staging use `--config apps/api/wrangler.staging.jsonc`):
 
 ```powershell
 npm --workspace @sheetflare/api run build
