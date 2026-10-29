@@ -1,8 +1,19 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import { killProcessTree, runCommand, shouldUseWindowsShell } from './process';
+import { withProcessEnv } from './runtime';
 
 type SpawnCall = { command: string; args: readonly string[] };
+
+const childEnvProbe = "process.stdout.write(JSON.stringify({ token: process.env.CLOUDFLARE_API_TOKEN ?? null, hostOnly: process.env.SHEETFLARE_TEST_HOST_ONLY ?? null, path: process.env.PATH ?? null }))";
+
+function restoreEnv(name: string, value: string | undefined) {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
+}
 
 /**
  * Stands in for child_process.spawn (an external boundary). killProcessTree only listens for
@@ -55,6 +66,44 @@ describe('process helpers', () => {
     expect(result.signal).toBeNull();
     expect(result.stdout).toBe('ok');
     expect(result.stderr).toBe('');
+  });
+
+  it('runs real children under the injected env without leaking host-only variables', async () => {
+    const previous = {
+      token: process.env.CLOUDFLARE_API_TOKEN,
+      hostOnly: process.env.SHEETFLARE_TEST_HOST_ONLY
+    };
+    process.env.CLOUDFLARE_API_TOKEN = 'host-cloudflare-token';
+    process.env.SHEETFLARE_TEST_HOST_ONLY = 'host-only-value';
+    const hostPath = process.env.PATH ?? process.env.Path ?? '';
+    try {
+      // Same scoping runSetup applies for deps.env; the injected env deliberately omits PATH.
+      const result = await withProcessEnv({ CLOUDFLARE_API_TOKEN: 'injected-cloudflare-token' }, () =>
+        runCommand(process.execPath, ['-e', childEnvProbe], { echoStdout: false, echoStderr: false })
+      );
+
+      expect(result.code).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        token: 'injected-cloudflare-token',
+        hostOnly: null,
+        path: hostPath
+      });
+    } finally {
+      restoreEnv('CLOUDFLARE_API_TOKEN', previous.token);
+      restoreEnv('SHEETFLARE_TEST_HOST_ONLY', previous.hostOnly);
+    }
+  });
+
+  it('applies per-command env overrides on top of the injected env', async () => {
+    const result = await withProcessEnv({ CLOUDFLARE_API_TOKEN: 'injected-cloudflare-token' }, () =>
+      runCommand(process.execPath, ['-e', childEnvProbe], {
+        env: { CLOUDFLARE_API_TOKEN: 'command-cloudflare-token' },
+        echoStdout: false,
+        echoStderr: false
+      })
+    );
+
+    expect(JSON.parse(result.stdout).token).toBe('command-cloudflare-token');
   });
 });
 
