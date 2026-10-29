@@ -1,5 +1,4 @@
 import { expect } from 'vitest';
-import { exports as workerExports } from 'cloudflare:workers';
 import type { ZodType } from 'zod';
 import {
   controlPlaneDoRequestSchema,
@@ -13,6 +12,7 @@ import {
 } from '@sheetflare/contracts';
 import type { Env } from '../../src/env';
 import { CachedTableReads, type CachePurgeTarget, type CachedTableReadProps } from '../../src/index';
+import { exports as workerExports } from './cloudflare-workers';
 import type { WorkersCacheEmulator } from './workers-cache';
 import { apiKeyFixtures } from './api-keys';
 
@@ -55,6 +55,12 @@ export type CachedReadRequestRecord = {
   method: string;
   authorization: string | null;
   cacheKey: string | null;
+};
+
+export type TableRequestRecord = {
+  type: string;
+  resolvedConfig?: Record<string, unknown> | undefined;
+  requestContext?: Record<string, unknown> | undefined;
 };
 
 const resolvedTableConfigSnapshot = resolvedTableConfigSnapshotSchema.parse({
@@ -113,7 +119,7 @@ class FakeDurableObjectNamespace {
 export type EnvProbes = {
   rateLimitRequests: Array<{ name: string; key: string }>;
   projectRequests: string[];
-  tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }>;
+  tableRequests: TableRequestRecord[];
   controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }>;
   durableObjectRequests: string[];
   cachedReadRequests: CachedReadRequestRecord[];
@@ -136,7 +142,7 @@ export function probesOf(env: Env): EnvProbes {
   return probes;
 }
 
-type UnexpectedTableResponseRequest =
+export type UnexpectedTableResponseRequest =
   | 'table.cache.refresh'
   | 'table.reindex'
   | 'table.row.create'
@@ -182,7 +188,7 @@ export function createEnv(options?: {
 }): Env {
   const rateLimitRequests: Array<{ name: string; key: string }> = [];
   const projectRequests: string[] = [];
-  const tableRequests: Array<{ type: string; resolvedConfig?: Record<string, unknown>; requestContext?: Record<string, unknown> }> = [];
+  const tableRequests: TableRequestRecord[] = [];
   const controlPlaneRequests: Array<{ type: string; body: Record<string, unknown> }> = [];
   const durableObjectRequests: string[] = [];
   const cachedReadRequests: CachedReadRequestRecord[] = [];
@@ -957,12 +963,12 @@ export function createEnv(options?: {
     RATE_LIMIT_DO: rateLimit as never,
     GOOGLE_CLIENT_EMAIL: options?.googleClientEmail ?? 'service@example.com',
     GOOGLE_PRIVATE_KEY: options?.googlePrivateKey ?? 'private-key',
-    GOOGLE_CREDENTIALS_JSON: options?.googleCredentialsJson,
+    ...(options?.googleCredentialsJson === undefined ? {} : { GOOGLE_CREDENTIALS_JSON: options.googleCredentialsJson }),
     GOOGLE_DRIVE_WEBHOOK_SECRET: options?.googleDriveWebhookSecret ?? 'drive-secret',
     ADMIN_BEARER_TOKEN: options?.adminBearerToken ?? 'secret',
     RATE_LIMIT_MAX_REQUESTS: '300',
     RATE_LIMIT_WINDOW_SECONDS: '60',
-    SHEETFLARE_ALLOWED_ORIGINS: options?.allowedOrigins
+    ...(options?.allowedOrigins === undefined ? {} : { SHEETFLARE_ALLOWED_ORIGINS: options.allowedOrigins })
   };
 
   const fetchCachedTableRead = async (
@@ -1115,7 +1121,7 @@ export function createCachedTableReadsHarness(
     purgeShouldFail?: boolean;
     purgeResultShouldFail?: boolean;
     /** Answers purge calls like the emulated purge API (rate limit included) instead of always accepting them. */
-    workersCache?: WorkersCacheEmulator;
+    workersCache?: WorkersCacheEmulator | undefined;
   }
 ): { entrypoint: CachedTableReads; purgeCalls: CachePurgeCall[] } {
   const purgeCalls = options?.purgeCalls ?? [];
@@ -1160,9 +1166,10 @@ export function createCachedTableReadsHarness(
   };
 }
 
-export function getOnlyCachedReadRequest(env: { __cachedReadRequests: CachedReadRequestRecord[] }) {
-  expect(env.__cachedReadRequests).toHaveLength(1);
-  const [request] = env.__cachedReadRequests;
+export function getOnlyCachedReadRequest(env: Env) {
+  const { cachedReadRequests } = probesOf(env);
+  expect(cachedReadRequests).toHaveLength(1);
+  const [request] = cachedReadRequests;
   if (!request) {
     throw new Error('Expected one cached read request.');
   }
@@ -1187,11 +1194,8 @@ export function readCacheTagHeader(response: Response) {
   return value.split(',').map((tag) => tag.trim()).filter((tag) => tag.length > 0);
 }
 
-export function expectCachedReadPurgeCalls(
-  env: { __cachedReadPurgeCalls: CachePurgeCall[] },
-  expectedTags: string[][]
-) {
-  expect(env.__cachedReadPurgeCalls).toEqual(
+export function expectCachedReadPurgeCalls(env: Env, expectedTags: string[][]) {
+  expect(probesOf(env).cachedReadPurgeCalls).toEqual(
     expectedTags.map((tags) => ({
       tags
     }))

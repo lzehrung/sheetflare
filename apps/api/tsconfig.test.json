@@ -1,0 +1,16 @@
+{
+  // Type-checks the API tests, which tsconfig.json (src only, Worker types) never sees. The tests run on Node under
+  // Vitest and drive Worker code, so both sets of global types are loaded.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The base enables composite, which demands that every imported file is listed in the project. The tests import
+    // support files from packages/cloudflare/test, and nothing is emitted here anyway.
+    "composite": false,
+    "noEmit": true,
+    // Node 24 runs the tests: ES2024 for Promise.withResolvers, DOM.Iterable for iterating Headers.
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  // src comes along for src/cloudflare-globals.d.ts, which gives `exports` from cloudflare:workers its entries.
+  "include": ["src", "test"]
+}

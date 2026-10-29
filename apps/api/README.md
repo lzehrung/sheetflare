@@ -26,4 +26,5 @@ Cloudflare Worker entrypoint for the Sheetflare HTTP surface.
 ```powershell
 npm --workspace @sheetflare/api run dev
 npm --workspace @sheetflare/api run test
+npm --workspace @sheetflare/api run typecheck   # src (tsconfig.json), then src and test (tsconfig.test.json)
 ```

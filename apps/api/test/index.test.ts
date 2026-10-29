@@ -23,7 +23,8 @@ import {
   expectNoCredentialMaterial,
   expectSuccessfulCachedReadHeaders,
   getOnlyCachedReadRequest,
-  requireCacheKey
+  requireCacheKey,
+  type UnexpectedTableResponseRequest
 } from './support/harness';
 import { WorkersCacheEmulator } from './support/workers-cache';
 
@@ -1797,7 +1798,6 @@ describe('api routes', () => {
     const env = createEnv({ defaultAuthMode: 'public-read' }) as Env & {
       __projectRequests: string[];
       __tableRequests: Array<{ type: string; requestContext?: Record<string, unknown> }>;
-      __cachedReadRequests: CachedReadRequestRecord[];
     };
 
     const response = await app.request(
@@ -1811,9 +1811,9 @@ describe('api routes', () => {
     expect(response.headers.get('cloudflare-cdn-cache-control')).toBeNull();
     expect(response.headers.get('cache-tag')).toBeNull();
     expect(env.__projectRequests).toEqual(['project.table.resolve']);
-    expect(env.__cachedReadRequests).toHaveLength(1);
-    expect(env.__cachedReadRequests[0].authorization).toBeNull();
-    expect(env.__cachedReadRequests[0].url).toBe(
+    const cachedReadRequest = getOnlyCachedReadRequest(env);
+    expect(cachedReadRequest.authorization).toBeNull();
+    expect(cachedReadRequest.url).toBe(
       'http://localhost/internal/cache/v1/projects/demo/tables/users/rows'
     );
     expect(env.__tableRequests.map((request) => request.type)).toEqual([
@@ -2273,7 +2273,6 @@ describe('api routes', () => {
           issues: [],
           validatedAt: '2026-04-26T00:00:02.000Z'
         },
-        dataGeneration: 0,
         externalChange: {
           pending: false,
           lastChangedAt: null,
@@ -2481,7 +2480,6 @@ describe('api routes', () => {
           issues: [],
           validatedAt: '2026-04-26T00:00:03.000Z'
         },
-        dataGeneration: 0,
         externalChange: {
           pending: false,
           lastChangedAt: null,
