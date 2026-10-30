@@ -15,7 +15,7 @@ Implementation and rollout contracts are in [docs/workers-cache-plan.md](./docs/
 ```powershell
 npm install
 npm run check
-npx wrangler deploy --dry-run --config apps/api/wrangler.staging.jsonc
+npm --workspace @sheetflare/api exec -- wrangler deploy --dry-run --config wrangler.staging.jsonc
 ```
 
 The Wrangler dry-run must accept the per-entrypoint `exports` configuration without an unknown-field warning.

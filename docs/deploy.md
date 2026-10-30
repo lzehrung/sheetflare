@@ -155,19 +155,19 @@ npm run deploy:api:raw
 npm run deploy:staging:api:raw
 ```
 
-To invoke Wrangler directly outside setup (these target **production**; for staging use `--config apps/api/wrangler.staging.jsonc`):
+To invoke Wrangler directly outside setup, run the version the lockfile installs in the API workspace. These target **production**; for staging use `--config wrangler.staging.jsonc`:
 
 ```powershell
 npm --workspace @sheetflare/api run build
-npx wrangler deploy --config apps/api/wrangler.jsonc
+npm --workspace @sheetflare/api exec -- wrangler deploy --config wrangler.jsonc
 ```
 
 If you manage Worker secrets manually, set them before deployment:
 
 ```powershell
-npx wrangler secret put ADMIN_BEARER_TOKEN --config apps/api/wrangler.jsonc
-npx wrangler secret put GOOGLE_DRIVE_WEBHOOK_SECRET --config apps/api/wrangler.jsonc
-npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
+npm --workspace @sheetflare/api exec -- wrangler secret put ADMIN_BEARER_TOKEN --config wrangler.jsonc
+npm --workspace @sheetflare/api exec -- wrangler secret put GOOGLE_DRIVE_WEBHOOK_SECRET --config wrangler.jsonc
+npm --workspace @sheetflare/api exec -- wrangler secret put GOOGLE_PRIVATE_KEY --config wrangler.jsonc
 ```
 
 Set `GOOGLE_CLIENT_EMAIL` as a normal Worker variable. `GOOGLE_PRIVATE_KEY`, `GOOGLE_DRIVE_WEBHOOK_SECRET`, and `GOOGLE_CREDENTIALS_JSON` are secret material. Named Google credentials require the matching `googleCredentialRef` in project config.

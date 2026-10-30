@@ -198,11 +198,11 @@ If it reports that you are not authenticated, run:
 npx wrangler login
 ```
 
-One shared credential manual fallback (production config; for staging use `--config apps/api/wrangler.staging.jsonc`):
+One shared credential manual fallback (production config; for staging use `--config wrangler.staging.jsonc`):
 
 ```powershell
-npx wrangler secret put GOOGLE_PRIVATE_KEY --config apps/api/wrangler.jsonc
-npx wrangler secret put GOOGLE_DRIVE_WEBHOOK_SECRET --config apps/api/wrangler.jsonc
+npm --workspace @sheetflare/api exec -- wrangler secret put GOOGLE_PRIVATE_KEY --config wrangler.jsonc
+npm --workspace @sheetflare/api exec -- wrangler secret put GOOGLE_DRIVE_WEBHOOK_SECRET --config wrangler.jsonc
 ```
 
 Then set `GOOGLE_CLIENT_EMAIL` as a normal Worker variable through your deploy system. `GOOGLE_DRIVE_WEBHOOK_SECRET` is required when you enable automatic Drive-watch reindexing and should be treated as Worker secret material. If you are using the standard onboarding flow, prefer `npm run setup` or `npm run setup -- --apply-secrets` instead of editing checked repo defaults directly.
@@ -212,7 +212,7 @@ Each Drive watch carries the webhook secret it was registered with, and the Work
 Multiple named credentials manual fallback:
 
 ```powershell
-npx wrangler secret put GOOGLE_CREDENTIALS_JSON --config apps/api/wrangler.jsonc
+npm --workspace @sheetflare/api exec -- wrangler secret put GOOGLE_CREDENTIALS_JSON --config wrangler.jsonc
 ```
 
 Treat `GOOGLE_CREDENTIALS_JSON` as secret material because it contains private keys.
