@@ -115,7 +115,8 @@ Severity: **P1** likely wrong behavior or significant risk; **P2** real but boun
 - [x] **P3 · usability** Setup counted credential-conflict watch placeholders as registered watches; it now counts only watches without `lastWatchError` and warns per skipped spreadsheet. *(Copilot review on #20)*
 - [x] **P2 · performance** Forced requests that joined a sync a write superseded each started their own full-sheet rebuild; they now join one replacement sync. *(Copilot review on #20; proven: gated real-DO tests)*
 - [x] **P3 · security** Add Dependabot or Renovate to keep SHA-pinned GitHub Actions current. *(fixed: `.github/dependabot.yml`)*
-- [ ] **Validation** Verify generation-keyed caching, `cf.cacheKey` format, and purge behavior against real Workers Cache in staging (blocked: GitHub staging secrets unset, Wrangler login expired).
+- [x] **Validation** Generation-keyed caching verified against real Workers Cache on staging (version `7106c033`+, 2026-10-30). Repeat reads `HIT`; the first read after each write `MISS`es with the new value; 19 write/read cycles gave 0 stale reads. The purge budget was not exhausted: the Google Sheets write quota (429 `RESOURCE_EXHAUSTED`, sanitized) ran out first. A write whose follow-up Google call hit that quota committed but answered 429; the cache was marked stale (`BYPASS`) and then served the sheet's value. Purge-budget exhaustion itself stays covered by the emulator tests.
+- [x] **P2 · ops** Running `setup:staging` exposed two setup failures, fixed in #26: Wrangler was no longer installed at the repository root after #22 (setup's auth check, `secret put`, and the documented `npx wrangler login` all failed), and Windows `.cmd` arguments containing spaces were split (`--config E:\git repos\...`). The staging GCP project also lacked the Drive API, which watch registration requires; it is now enabled. *(proven: staging run; regression tests)*
 
 ## Verified correct
 
