@@ -11,7 +11,14 @@ import {
   type TableDoResponse
 } from '@sheetflare/contracts';
 import type { Env } from '../../src/env';
-import { CachedTableReads, type CachePurgeTarget, type CachedTableReadProps } from '../../src/index';
+import {
+  handleCachedTableRead,
+  purgeCachedTableReadTags,
+  type CachedTableReads,
+  type CachedTableReadsCache,
+  type CachePurgeTarget,
+  type CachedTableReadProps
+} from '../../src/index';
 import { exports as workerExports } from './cloudflare-workers';
 import type { WorkersCacheEmulator } from './workers-cache';
 import { apiKeyFixtures } from './api-keys';
@@ -1081,38 +1088,9 @@ export function createEnv(options?: {
   return env;
 }
 
-export type CachePurgeCall = Parameters<CacheContext['purge']>[0];
+export type CachePurgeCall = Parameters<CachedTableReadsCache['purge']>[0];
 
-class FakeSpan implements Span {
-  get isTraced() {
-    return false;
-  }
-
-  setAttribute() {}
-
-  end() {}
-}
-
-function createTracing(): Tracing {
-  return {
-    Span: FakeSpan,
-    enterSpan<T, A extends unknown[]>(
-      _name: string,
-      callback: (span: Span, ...args: A) => T,
-      ...args: A
-    ): T {
-      return callback(new FakeSpan(), ...args);
-    },
-    startActiveSpan<T, A extends unknown[]>(
-      _name: string,
-      callback: (span: Span, ...args: A) => T,
-      ...args: A
-    ): T {
-      return callback(new FakeSpan(), ...args);
-    }
-  };
-}
-
+// Runs the same handlers the CachedTableReads entrypoint forwards to, with a recording Workers Cache purge API.
 export function createCachedTableReadsHarness(
   env: Env = createEnv(),
   options?: {
@@ -1123,45 +1101,41 @@ export function createCachedTableReadsHarness(
     /** Answers purge calls like the emulated purge API (rate limit included) instead of always accepting them. */
     workersCache?: WorkersCacheEmulator | undefined;
   }
-): { entrypoint: CachedTableReads; purgeCalls: CachePurgeCall[] } {
+): { entrypoint: Pick<CachedTableReads, 'fetch' | 'purge'>; purgeCalls: CachePurgeCall[] } {
   const purgeCalls = options?.purgeCalls ?? [];
-  const ctx: ExecutionContext<CachedTableReadProps> = {
-    waitUntil(promise: Promise<unknown>) {
-      void promise;
-    },
-    passThroughOnException() {},
-    props: options?.props ?? defaultCachedTableReadProps,
-    cache: {
-      async purge(purgeOptions) {
-        purgeCalls.push(purgeOptions);
-        if (options?.purgeShouldFail === true) {
-          throw new Error('Workers Cache purge failed for test.');
-        }
-        if (options?.purgeResultShouldFail === true) {
-          return {
-            success: false,
-            errors: [
-              {
-                code: 1000,
-                message: 'Workers Cache purge was rejected for test.'
-              }
-            ]
-          };
-        }
-        if (options?.workersCache !== undefined) {
-          return options.workersCache.purge(purgeOptions);
-        }
+  const props = options?.props ?? defaultCachedTableReadProps;
+  const cache: CachedTableReadsCache = {
+    async purge(purgeOptions) {
+      purgeCalls.push(purgeOptions);
+      if (options?.purgeShouldFail === true) {
+        throw new Error('Workers Cache purge failed for test.');
+      }
+      if (options?.purgeResultShouldFail === true) {
         return {
-          success: true,
-          errors: []
+          success: false,
+          errors: [
+            {
+              code: 1000,
+              message: 'Workers Cache purge was rejected for test.'
+            }
+          ]
         };
       }
-    },
-    tracing: createTracing()
+      if (options?.workersCache !== undefined) {
+        return options.workersCache.purge(purgeOptions);
+      }
+      return {
+        success: true,
+        errors: []
+      };
+    }
   };
 
   return {
-    entrypoint: new CachedTableReads(ctx, env),
+    entrypoint: {
+      fetch: (request) => handleCachedTableRead(env, props, request),
+      purge: (targets) => purgeCachedTableReadTags(cache, targets)
+    },
     purgeCalls
   };
 }
