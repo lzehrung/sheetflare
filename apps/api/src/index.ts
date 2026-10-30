@@ -1,5 +1,6 @@
 import { Scalar } from '@scalar/hono-api-reference';
 import type { Context } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import { WorkerEntrypoint, exports as workerExports } from 'cloudflare:workers';
 import {
@@ -47,6 +48,7 @@ import {
   ServiceUnavailableError,
   toErrorResponse,
   UnauthorizedError,
+  UnsupportedMediaTypeError,
   updateRowInputSchema,
   updateRowResultSchema,
   type AdminCreateApiKeyResult,
@@ -1454,6 +1456,11 @@ function normalizeRequestError(error: unknown) {
     return new BadRequestError('Malformed JSON in request body.');
   }
 
+  // The OpenAPI route layer rejects a body whose Content-Type is missing or not a declared media type.
+  if (error instanceof HTTPException && error.status === 415) {
+    return new UnsupportedMediaTypeError('Request body must be sent as application/json.');
+  }
+
   return error;
 }
 
@@ -2517,64 +2524,78 @@ function collectPurgeTags(targets: readonly CachePurgeTarget[]) {
   return [...tags];
 }
 
-export class CachedTableReads extends WorkerEntrypoint<Env, CachedTableReadProps> {
-  async fetch(request: Request): Promise<Response> {
-    if (request.method === 'HEAD') {
-      return new Response(null, {
-        status: 405,
-        headers: {
-          allow: 'GET',
-          'cache-control': 'no-store'
-        }
-      });
-    }
+// The Workers Cache purge capability CachedTableReads needs from its execution context.
+export type CachedTableReadsCache = Pick<CacheContext, 'purge'>;
 
-    if (request.method !== 'GET') {
-      return noStoreJsonResponse(
-        {
-          error: {
-            code: 'METHOD_NOT_ALLOWED',
-            message: 'Cached table reads only support GET requests.',
-            details: null
-          }
-        },
-        405
-      );
-    }
-
-    try {
-      return await cachedTableReadSuccessResponse(
-        this.env,
-        parseCachedTableReadRequest(request),
-        this.ctx.props
-      );
-    } catch (error) {
-      return noStoreErrorResponse(error);
-    }
+export async function handleCachedTableRead(
+  env: Env,
+  props: CachedTableReadProps,
+  request: Request
+): Promise<Response> {
+  if (request.method === 'HEAD') {
+    return new Response(null, {
+      status: 405,
+      headers: {
+        allow: 'GET',
+        'cache-control': 'no-store'
+      }
+    });
   }
 
-  // Deletes the edge entries the targets superseded. The gateway calls it over RPC as best-effort cleanup: reads are
-  // keyed by the table's data generation, so freshness never depends on a purge. Tags go out in as few purge requests
-  // as the limit of 100 tags per request allows.
+  if (request.method !== 'GET') {
+    return noStoreJsonResponse(
+      {
+        error: {
+          code: 'METHOD_NOT_ALLOWED',
+          message: 'Cached table reads only support GET requests.',
+          details: null
+        }
+      },
+      405
+    );
+  }
+
+  try {
+    return await cachedTableReadSuccessResponse(env, parseCachedTableReadRequest(request), props);
+  } catch (error) {
+    return noStoreErrorResponse(error);
+  }
+}
+
+// Deletes the edge entries the targets superseded. The gateway calls it over RPC as best-effort cleanup: reads are
+// keyed by the table's data generation, so freshness never depends on a purge. Tags go out in as few purge requests
+// as the limit of 100 tags per request allows.
+export async function purgeCachedTableReadTags(
+  workerCache: CachedTableReadsCache | undefined,
+  targets: readonly CachePurgeTarget[]
+): Promise<void> {
+  const tags = collectPurgeTags(targets);
+  if (tags.length === 0) {
+    return;
+  }
+
+  if (!workerCache) {
+    throw new ServiceUnavailableError('Workers Cache purge API is unavailable.');
+  }
+
+  for (let start = 0; start < tags.length; start += maxPurgeTagsPerRequest) {
+    const result = await workerCache.purge({ tags: tags.slice(start, start + maxPurgeTagsPerRequest) });
+    if (!result.success) {
+      const failures = result.errors.map(({ code, message }) => `${code}: ${message}`).join('; ');
+      const suffix = failures ? `: ${failures}` : '.';
+      throw new Error(`Workers Cache purge was unsuccessful${suffix}`);
+    }
+  }
+}
+
+// Runtime adapter: the logic above takes only the context it uses, so tests drive it without a full ExecutionContext.
+export class CachedTableReads extends WorkerEntrypoint<Env, CachedTableReadProps> {
+  async fetch(request: Request): Promise<Response> {
+    return handleCachedTableRead(this.env, this.ctx.props, request);
+  }
+
   async purge(targets: readonly CachePurgeTarget[]): Promise<void> {
-    const tags = collectPurgeTags(targets);
-    if (tags.length === 0) {
-      return;
-    }
-
-    const workerCache = this.ctx.cache;
-    if (!workerCache) {
-      throw new ServiceUnavailableError('Workers Cache purge API is unavailable.');
-    }
-
-    for (let start = 0; start < tags.length; start += maxPurgeTagsPerRequest) {
-      const result = await workerCache.purge({ tags: tags.slice(start, start + maxPurgeTagsPerRequest) });
-      if (!result.success) {
-        const failures = result.errors.map(({ code, message }) => `${code}: ${message}`).join('; ');
-        const suffix = failures ? `: ${failures}` : '.';
-        throw new Error(`Workers Cache purge was unsuccessful${suffix}`);
-      }
-    }
+    return purgeCachedTableReadTags(this.ctx.cache, targets);
   }
 }
 
@@ -2650,7 +2671,15 @@ function shouldCacheAdminAssetImmutably(path: string, assetResponse: Response) {
 }
 
 function createApp() {
-  const app = new OpenAPIHono<{ Bindings: Env; Variables: AppVariables }>();
+  const app = new OpenAPIHono<{ Bindings: Env; Variables: AppVariables }>({
+    // Route validation failures go through onError, so clients get the documented error envelope
+    // (BAD_REQUEST with flattened field errors) instead of the library's default body.
+    defaultHook: (result) => {
+      if (!result.success) {
+        throw result.error;
+      }
+    }
+  });
 
   app.use('*', async (c, next) => {
     const startedAt = Date.now();

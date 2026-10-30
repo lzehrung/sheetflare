@@ -446,13 +446,29 @@ describe('Durable Object RPC validation failures are internal errors', () => {
     }
   });
 
-  it('keeps the gateway own request validation errors as client 400s', async () => {
-    // Without a JSON content type the route validator steps aside, so the handler's own schema parse rejects the body.
+  it('answers a request body without a JSON content type with 415, not an internal error', async () => {
     const response = await createApp().request(
       rowsPath,
       {
         method: 'POST',
         headers: { authorization: apiKeys.project.authorization },
+        body: JSON.stringify({ values: { name: 'Ada' } })
+      },
+      createEnv()
+    );
+
+    expect(response.status).toBe(415);
+    const error = await readError(response);
+    expect(error.code).toBe('UNSUPPORTED_MEDIA_TYPE');
+    expect(error.message).toBe('Request body must be sent as application/json.');
+  });
+
+  it('keeps the gateway own request validation errors as client 400s', async () => {
+    const response = await createApp().request(
+      rowsPath,
+      {
+        method: 'POST',
+        headers: { authorization: apiKeys.project.authorization, 'content-type': 'application/json' },
         body: JSON.stringify({})
       },
       createEnv()

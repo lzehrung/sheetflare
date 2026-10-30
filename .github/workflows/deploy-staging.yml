@@ -53,7 +53,8 @@ jobs:
           node -e "const fs = require('fs'); fs.writeFileSync('.wrangler-staging-secrets.json', JSON.stringify({ GOOGLE_PRIVATE_KEY: process.env.SHEETFLARE_STAGING_GOOGLE_PRIVATE_KEY, ADMIN_BEARER_TOKEN: process.env.SHEETFLARE_STAGING_ADMIN_BEARER_TOKEN }));"
 
       - name: Deploy staging worker
-        run: npx wrangler@4.107.0 deploy --config apps/api/wrangler.staging.jsonc --secrets-file .wrangler-staging-secrets.json
+        working-directory: apps/api
+        run: npx wrangler deploy --config wrangler.staging.jsonc --secrets-file ../../.wrangler-staging-secrets.json
 
       - name: Remove staging secrets file
         if: ${{ always() }}

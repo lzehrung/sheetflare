@@ -32,9 +32,9 @@ afterEach(async () => {
 });
 
 describe('setup deploy command builders', () => {
-  it('builds the pinned API deploy command', () => {
+  it('builds the API deploy command with the installed Wrangler', () => {
     expect(buildApiDeployCommand('wrangler.setup.jsonc')).toEqual([
-      'wrangler@4.107.0',
+      'wrangler',
       'deploy',
       '--config',
       'wrangler.setup.jsonc'
