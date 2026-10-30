@@ -1,5 +1,6 @@
 import { Scalar } from '@scalar/hono-api-reference';
 import type { Context } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import { WorkerEntrypoint, exports as workerExports } from 'cloudflare:workers';
 import {
@@ -47,6 +48,7 @@ import {
   ServiceUnavailableError,
   toErrorResponse,
   UnauthorizedError,
+  UnsupportedMediaTypeError,
   updateRowInputSchema,
   updateRowResultSchema,
   type AdminCreateApiKeyResult,
@@ -1454,6 +1456,11 @@ function normalizeRequestError(error: unknown) {
     return new BadRequestError('Malformed JSON in request body.');
   }
 
+  // The OpenAPI route layer rejects a body whose Content-Type is missing or not a declared media type.
+  if (error instanceof HTTPException && error.status === 415) {
+    return new UnsupportedMediaTypeError('Request body must be sent as application/json.');
+  }
+
   return error;
 }
 
@@ -2650,7 +2657,15 @@ function shouldCacheAdminAssetImmutably(path: string, assetResponse: Response) {
 }
 
 function createApp() {
-  const app = new OpenAPIHono<{ Bindings: Env; Variables: AppVariables }>();
+  const app = new OpenAPIHono<{ Bindings: Env; Variables: AppVariables }>({
+    // Route validation failures go through onError, so clients get the documented error envelope
+    // (BAD_REQUEST with flattened field errors) instead of the library's default body.
+    defaultHook: (result) => {
+      if (!result.success) {
+        throw result.error;
+      }
+    }
+  });
 
   app.use('*', async (c, next) => {
     const startedAt = Date.now();

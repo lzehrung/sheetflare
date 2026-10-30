@@ -39,6 +39,12 @@ export class ConflictError extends AppError {
   }
 }
 
+export class UnsupportedMediaTypeError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super(message, 'UNSUPPORTED_MEDIA_TYPE', 415, details);
+  }
+}
+
 export class BadGatewayError extends AppError {
   constructor(message: string, details?: unknown) {
     super(message, 'BAD_GATEWAY', 502, details);
