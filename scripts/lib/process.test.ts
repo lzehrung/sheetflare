@@ -1,6 +1,9 @@
 import { EventEmitter } from 'node:events';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { killProcessTree, runCommand, shouldUseWindowsShell } from './process';
+import { buildWindowsShellCommandLine, killProcessTree, runCommand, shouldUseWindowsShell } from './process';
 import { withProcessEnv } from './runtime';
 
 type SpawnCall = { command: string; args: readonly string[] };
@@ -104,6 +107,46 @@ describe('process helpers', () => {
     );
 
     expect(JSON.parse(result.stdout).token).toBe('command-cloudflare-token');
+  });
+});
+
+describe('Windows shell command lines', () => {
+  it('quotes arguments that contain spaces or cmd.exe metacharacters and leaves plain ones alone', () => {
+    expect(buildWindowsShellCommandLine('npx.cmd', [
+      'wrangler',
+      'secret',
+      'put',
+      'GOOGLE_PRIVATE_KEY',
+      '--config',
+      'E:\\git repos\\sheetflare\\apps\\api\\wrangler.staging.jsonc'
+    ])).toBe('npx.cmd wrangler secret put GOOGLE_PRIVATE_KEY --config "E:\\git repos\\sheetflare\\apps\\api\\wrangler.staging.jsonc"');
+    expect(buildWindowsShellCommandLine('npm.cmd', ['a&b', 'x|y', ''])).toBe('npm.cmd "a&b" "x|y" ""');
+  });
+
+  it('doubles trailing backslashes so the closing quote stays a quote', () => {
+    expect(buildWindowsShellCommandLine('tool.cmd', ['C:\\dir with space\\'])).toBe('tool.cmd "C:\\dir with space\\\\"');
+  });
+
+  it.each(['say "hi"', '%PATH%', 'line\nbreak'])('refuses %j, which cmd.exe cannot pass through intact', (value) => {
+    expect(() => buildWindowsShellCommandLine('tool.cmd', [value])).toThrow(/cannot pass/i);
+  });
+
+  it.skipIf(process.platform !== 'win32')('delivers arguments with spaces intact to a real .cmd in a path with spaces', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sheetflare process '));
+    try {
+      const script = join(dir, 'echo args.cmd');
+      await writeFile(script, `@"${process.execPath}" -e "process.stdout.write(JSON.stringify(process.argv.slice(1)))" -- %*\r\n`);
+
+      const result = await runCommand(script, ['--config', join(dir, 'wrangler.staging.jsonc'), 'a&b'], {
+        echoStdout: false,
+        echoStderr: false
+      });
+
+      expect(result.code).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual(['--config', join(dir, 'wrangler.staging.jsonc'), 'a&b']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

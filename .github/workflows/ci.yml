@@ -24,6 +24,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Setup and the docs run `npx wrangler` from the repository root (auth check, secret put, login).
+      - name: Wrangler resolves from the repository root
+        run: npx --no-install wrangler --version
+
       - name: Lint
         run: npm run lint
 

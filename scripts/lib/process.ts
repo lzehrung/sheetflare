@@ -48,6 +48,37 @@ export function getCommandName(base: string) {
   return process.platform === 'win32' ? `${base}.cmd` : base;
 }
 
+// cmd.exe treats these specially outside double quotes; whitespace splits arguments.
+const windowsShellQuoteTrigger = /[\s&|<>^()!,;=]/;
+// cmd.exe expands `%` even inside quotes, and an embedded `"` ends the quoted span, so neither can be passed safely.
+const windowsShellUnsafe = /["%\r\n]/;
+
+function quoteWindowsShellArgument(value: string) {
+  if (windowsShellUnsafe.test(value)) {
+    throw new Error(`Cannot pass ${JSON.stringify(value)} through cmd.exe: it contains a double quote, percent sign, or line break.`);
+  }
+  if (value.length > 0 && !windowsShellQuoteTrigger.test(value)) {
+    return value;
+  }
+  // The closing quote would escape trailing backslashes, so double them (Windows argv parsing rules).
+  return `"${value.replace(/(\\+)$/, '$1$1')}"`;
+}
+
+/**
+ * The single command line cmd.exe runs for a `.cmd`/`.bat` command. Node concatenates `shell: true` arguments
+ * without quoting, which splits any argument containing a space (for example a checkout under `E:\git repos`).
+ */
+export function buildWindowsShellCommandLine(command: string, args: readonly string[]) {
+  return [command, ...args].map(quoteWindowsShellArgument).join(' ');
+}
+
+function spawnChild(command: string, args: string[], options: { cwd: string | undefined; env: NodeJS.ProcessEnv; stdio: 'inherit' | 'pipe' }) {
+  if (shouldUseWindowsShell(command)) {
+    return spawn(buildWindowsShellCommandLine(command, args), { ...options, shell: true });
+  }
+  return spawn(command, args, options);
+}
+
 export type CommandRunOptions = {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -83,10 +114,9 @@ export function spawnCommand(
     env?: NodeJS.ProcessEnv;
   }
 ) : ChildProcess {
-  return spawn(command, args, {
+  return spawnChild(command, args, {
     cwd: options?.cwd,
     env: buildCommandEnv(options?.env),
-    ...(shouldUseWindowsShell(command) ? { shell: true } : {}),
     stdio: 'inherit'
   });
 }
@@ -109,10 +139,9 @@ async function runSpawnedCommand(
   args: string[],
   options?: CommandRunOptions
 ): Promise<CommandResult> {
-  const child = spawn(command, args, {
+  const child = spawnChild(command, args, {
     cwd: options?.cwd,
     env: buildCommandEnv(options?.env),
-    ...(shouldUseWindowsShell(command) ? { shell: true } : {}),
     stdio: 'pipe'
   });
 
