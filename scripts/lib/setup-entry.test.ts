@@ -294,7 +294,7 @@ function createHarness(options: { failSmoke?: boolean; deployUrl?: string; failA
       return commandResult(0);
     }
 
-    if (base === 'npx' && args[0] === 'wrangler@4.107.0' && args[1] === 'deploy') {
+    if (base === 'npx' && args[0] === 'wrangler' && args[1] === 'deploy') {
       const configIndex = args.indexOf('--config');
       const configPath = args[configIndex + 1];
       if (!configPath) {

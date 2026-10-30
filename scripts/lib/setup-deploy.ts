@@ -96,8 +96,9 @@ async function buildAdminUi(options: { debug?: boolean }) {
 }
 
 
+// Runs the Wrangler installed from the lockfile, the same version `npm run build` validates with its dry run.
 export function buildApiDeployCommand(configPath: string) {
-  return ['wrangler@4.107.0', 'deploy', '--config', configPath];
+  return ['wrangler', 'deploy', '--config', configPath];
 }
 
 
