@@ -14,13 +14,13 @@
   "dependencies": {
     "@hono/zod-openapi": "^1.6.3",
     "@hono/zod-validator": "^0.9.1",
-    "@scalar/hono-api-reference": "^0.12.14",
+    "@scalar/hono-api-reference": "^0.12.17",
     "@sheetflare/cloudflare": "*",
     "@sheetflare/contracts": "*",
-    "hono": "^4.13.14",
+    "hono": "^4.13.16",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "wrangler": "^4.153.0"
+    "wrangler": "^4.156.2"
   }
 }
